@@ -1,0 +1,140 @@
+/* ===========================================================================
+   Atlas Blueprint — Phase 2B style additions
+   ---------------------------------------------------------------------------
+   Append to the END of src/atlas.css. No existing rules are changed.
+   =========================================================================== */
+
+/* ---- Recommendation panel ----------------------------------------------- */
+
+.atlas-reco { margin-top: 16px; }
+
+.atlas-reco__body { margin-top: 14px; }
+
+.atlas-reco__headline {
+  font-family: var(--atlas-display);
+  font-weight: 500; font-size: 18px;
+  margin: 0 0 18px;
+  color: var(--atlas-ink);
+  line-height: 1.4;
+}
+
+.atlas-reco__divider {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--atlas-muted);
+  margin: 22px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--atlas-line);
+}
+
+.atlas-reco__nothing,
+.atlas-reco__nodata {
+  background: var(--atlas-canvas);
+  border-radius: var(--atlas-radius-s);
+  padding: 12px 14px; font-size: 13px; color: var(--atlas-ink-soft);
+  line-height: 1.5;
+}
+.atlas-reco__nodata { margin-top: 16px; }
+
+/* ---- Per-insurer block --------------------------------------------------- */
+
+.atlas-reco__insurer {
+  border: 1px solid var(--atlas-line);
+  border-radius: var(--atlas-radius);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  background: var(--atlas-surface);
+}
+
+/* The top recommendation: prominent. Coloured left band keyed to its band. */
+.atlas-reco__insurer--top {
+  border-left-width: 4px;
+  padding: 18px 20px;
+  box-shadow: var(--atlas-shadow);
+  margin-bottom: 16px;
+}
+.atlas-reco__insurer--top.atlas-reco__insurer--preferred { border-left-color: var(--atlas-ok); }
+.atlas-reco__insurer--top.atlas-reco__insurer--standard  { border-left-color: var(--atlas-accent); }
+.atlas-reco__insurer--top.atlas-reco__insurer--caution   { border-left-color: var(--atlas-warn); }
+
+.atlas-reco__insurer--secondary { border-left: 2px solid var(--atlas-line); }
+
+.atlas-reco__insurer--ruled_out {
+  background: var(--atlas-canvas);
+  color: var(--atlas-ink-soft);
+}
+.atlas-reco__insurer--ruled_out .atlas-reco__insurer-name {
+  text-decoration: line-through;
+  color: var(--atlas-muted);
+}
+
+.atlas-reco__insurer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.atlas-reco__insurer-name {
+  font-family: var(--atlas-display);
+  font-weight: 600; font-size: 18px;
+}
+.atlas-reco__insurer--top .atlas-reco__insurer-name { font-size: 22px; }
+
+.atlas-reco__insurer-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+
+.atlas-reco__score {
+  font-family: var(--atlas-mono); font-size: 12px;
+  font-weight: 500; color: var(--atlas-ink-soft);
+  background: var(--atlas-canvas-2);
+  padding: 3px 10px; border-radius: 999px;
+}
+.atlas-reco__insurer--top .atlas-reco__score {
+  background: var(--atlas-accent-bg);
+  color: var(--atlas-accent-ink);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* Flag pills (referral / senior review) */
+.atlas-flag {
+  font-family: var(--atlas-mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 2px 8px; border-radius: 999px; font-weight: 500;
+}
+.atlas-flag--referral { color: var(--atlas-warn); background: var(--atlas-warn-bg); }
+.atlas-flag--senior {
+  color: var(--atlas-danger);
+  background: var(--atlas-danger-bg);
+}
+
+.atlas-reco__reasoning {
+  margin: 4px 0 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--atlas-ink);
+}
+.atlas-reco__insurer--top .atlas-reco__reasoning { font-size: 15px; }
+.atlas-reco__insurer--ruled_out .atlas-reco__reasoning { font-size: 13px; }
+
+/* Collapsible detail */
+.atlas-reco__detail { margin-top: 6px; }
+.atlas-reco__detail > summary {
+  font-size: 12px; color: var(--atlas-muted); cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+}
+.atlas-reco__detail > summary:hover { color: var(--atlas-ink); }
+.atlas-reco__detail-body {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--atlas-canvas);
+  border-radius: var(--atlas-radius-s);
+}
+.atlas-reco__matched {
+  font-size: 13px; line-height: 1.5; margin-bottom: 4px;
+}
+.atlas-reco__notes {
+  list-style: none; margin: 8px 0 0; padding: 0;
+  font-size: 12px; color: var(--atlas-muted);
+}
+.atlas-reco__notes li { padding: 2px 0; }

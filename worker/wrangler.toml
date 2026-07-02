@@ -1,0 +1,24 @@
+name = "atlas-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Secrets (set via `wrangler secret put`, NEVER committed):
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_ROLE_KEY      # server-side only; bypasses RLS by design
+#   SUPABASE_ANON_KEY
+#   AZURE_TENANT_ID                # reused from Scout's app registration
+#   AZURE_CLIENT_ID                # reused from Scout's app registration
+#   AZURE_CLIENT_SECRET            # reused from Scout's app registration
+#   AZURE_REDIRECT_URI             # Atlas's callback, added to that registration
+#   ANTHROPIC_API_KEY              # extraction/reasoning (later phases)
+#   ATLAS_ALLOWLIST_JSON           # {"email":"consultant|manager|admin|readonly", ...}
+#
+# Vars (non-secret, configurable):
+[vars]
+ATLAS_DOC_RETENTION_DAYS = "7"   # configurable retention window for client docs
+ATLAS_ENV = "development"        # set to "production" in deployed Atlas
+
+# The daily document-expiry cron lands here in the retention phase:
+# [triggers]
+# crons = ["0 2 * * *"]

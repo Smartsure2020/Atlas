@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            worker/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install worker dependencies
+        run: npm ci
+        working-directory: worker
+
+      - name: Type-check worker
+        run: npx tsc --noEmit
+        working-directory: worker
+
+      - name: Run all phase test suites
+        run: npm test
+
+      - name: Frontend production build
+        run: npm run build

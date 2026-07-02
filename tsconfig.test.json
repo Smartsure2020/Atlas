@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "outDir": ".test-dist",
+    "rootDir": "."
+  },
+  "include": [
+    "tests/**/*.ts",
+    "worker/src/extraction.ts",
+    "worker/src/matcher.ts",
+    "worker/src/matcher-types.ts",
+    "worker/src/taxonomy.ts",
+    "worker/src/appetite-ingestion.ts",
+    "worker/src/quote-review.ts",
+    "worker/src/quote-decision.ts",
+    "worker/src/phase4-workflow.ts",
+    "worker/src/phase6-hardening.ts",
+    "worker/src/phase7-core.ts",
+    "worker/src/phase7-jobs.ts",
+    "worker/src/phase7-endpoints.ts",
+    "worker/src/phase8-core.ts",
+    "src/lib/review-edit.ts",
+    "src/lib/upload.ts"
+  ]
+}

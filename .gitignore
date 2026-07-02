@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.test-dist/
+.env
+.env.local
+.dev.vars
+.wrangler/
+*.tsbuildinfo
+.verify-*/

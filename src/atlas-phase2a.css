@@ -1,0 +1,169 @@
+/* ===========================================================================
+   Atlas Blueprint — Phase 2A style additions
+   ---------------------------------------------------------------------------
+   Append to the END of src/atlas.css. No existing rules are changed.
+   =========================================================================== */
+
+/* ---- Page head action buttons (multi-button right side) ----------------- */
+
+.atlas-page-head__actions { display: flex; align-items: center; gap: 10px; }
+
+/* ---- Insurers list ------------------------------------------------------- */
+
+.atlas-insurerlist {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.atlas-insurer-card {
+  text-align: left; width: 100%; cursor: pointer;
+  background: var(--atlas-surface);
+  border: 1px solid var(--atlas-line);
+  border-radius: var(--atlas-radius);
+  padding: 16px 18px;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.atlas-insurer-card:hover {
+  border-color: var(--atlas-accent);
+  box-shadow: var(--atlas-shadow);
+}
+.atlas-insurer-card__name {
+  font-family: var(--atlas-display);
+  font-weight: 600; font-size: 19px;
+}
+.atlas-insurer-card__meta {
+  margin-top: 4px; color: var(--atlas-muted); font-size: 13px;
+}
+
+/* ---- Tabs ---------------------------------------------------------------- */
+
+.atlas-tabs {
+  display: flex; gap: 4px;
+  border-bottom: 1px solid var(--atlas-line);
+  margin-bottom: 18px;
+}
+.atlas-tab {
+  font-family: var(--atlas-body); font-size: 13px; font-weight: 500;
+  color: var(--atlas-muted); background: transparent;
+  border: none; padding: 9px 14px; cursor: pointer;
+  border-bottom: 2px solid transparent;
+  display: flex; align-items: center; gap: 8px;
+}
+.atlas-tab:hover { color: var(--atlas-ink); }
+.atlas-tab--on {
+  color: var(--atlas-accent-ink);
+  border-bottom-color: var(--atlas-accent);
+}
+.atlas-tab__count {
+  font-family: var(--atlas-mono); font-size: 11px;
+  background: var(--atlas-canvas-2);
+  padding: 1px 7px; border-radius: 999px;
+}
+
+/* ---- Document list (Phase 2A version with status tags) ----------------- */
+
+.atlas-doclist__item {
+  display: flex !important;
+  align-items: center; justify-content: space-between; gap: 12px;
+}
+.atlas-doclist__main { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+.atlas-doclist__name { font-weight: 500; font-size: 14px; }
+
+.atlas-doc-status {
+  font-family: var(--atlas-mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 7px; border-radius: 999px;
+}
+.atlas-doc-status--awaiting   { color: var(--atlas-muted); background: var(--atlas-canvas-2); }
+.atlas-doc-status--processing { color: var(--atlas-accent-ink); background: var(--atlas-accent-bg); }
+.atlas-doc-status--processed  { color: var(--atlas-ok); background: #e6f3ec; }
+.atlas-doc-status--failed     { color: var(--atlas-danger); background: var(--atlas-danger-bg); }
+
+/* ---- Rule cards (proposed + active) ------------------------------------- */
+
+.atlas-rules { display: flex; flex-direction: column; gap: 12px; }
+
+.atlas-rule { border-left: 3px solid var(--atlas-line); }
+.atlas-rule--preferred { border-left-color: var(--atlas-ok); }
+.atlas-rule--standard  { border-left-color: var(--atlas-accent); }
+.atlas-rule--caution   { border-left-color: var(--atlas-warn); }
+.atlas-rule--declined  { border-left-color: var(--atlas-danger); }
+
+.atlas-rule__head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 10px;
+}
+.atlas-rule__title { display: flex; align-items: baseline; gap: 8px; }
+.atlas-rule__product {
+  font-family: var(--atlas-display); font-weight: 600; font-size: 17px;
+}
+.atlas-rule__sep { color: var(--atlas-muted); }
+.atlas-rule__risk { font-size: 14px; color: var(--atlas-ink-soft); }
+
+.atlas-rule__edit-head {
+  display: grid; grid-template-columns: 1fr 1fr 160px; gap: 8px; flex: 1;
+}
+.atlas-rule__edit-head input,
+.atlas-rule__edit-head select {
+  font-family: var(--atlas-body); font-size: 13px; padding: 6px 9px;
+  border: 1px solid var(--atlas-line); border-radius: var(--atlas-radius-s);
+}
+
+.atlas-level {
+  font-family: var(--atlas-mono); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 3px 10px; border-radius: 999px; font-weight: 500;
+}
+.atlas-level--preferred { color: var(--atlas-ok); background: #e6f3ec; }
+.atlas-level--standard  { color: var(--atlas-accent-ink); background: var(--atlas-accent-bg); }
+.atlas-level--caution   { color: var(--atlas-warn); background: var(--atlas-warn-bg); }
+.atlas-level--declined  { color: var(--atlas-danger); background: var(--atlas-danger-bg); }
+
+.atlas-rule__lists {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-bottom: 8px;
+}
+.atlas-rule__list { display: flex; flex-direction: column; gap: 5px; }
+.atlas-rule__list-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.atlas-tone--ok      { color: var(--atlas-ok); }
+.atlas-tone--warn    { color: var(--atlas-warn); }
+.atlas-tone--danger  { color: var(--atlas-danger); }
+.atlas-tone--neutral { color: var(--atlas-muted); }
+
+.atlas-rule__list ul {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.atlas-rule__list li {
+  font-size: 13px; color: var(--atlas-ink-soft);
+  padding-left: 10px; position: relative;
+}
+.atlas-rule__list li::before {
+  content: "·"; position: absolute; left: 0; color: var(--atlas-muted);
+}
+.atlas-rule__list input {
+  font-family: var(--atlas-body); font-size: 13px; padding: 6px 9px;
+  border: 1px solid var(--atlas-line); border-radius: var(--atlas-radius-s);
+}
+
+.atlas-rule__notes {
+  font-size: 13px; color: var(--atlas-ink-soft);
+  background: var(--atlas-canvas); padding: 8px 11px;
+  border-radius: var(--atlas-radius-s); margin: 0 0 8px;
+}
+.atlas-rule__notes-edit {
+  font-family: var(--atlas-body); font-size: 13px; padding: 8px 11px;
+  border: 1px solid var(--atlas-line); border-radius: var(--atlas-radius-s);
+  width: 100%; resize: vertical; margin-bottom: 8px;
+}
+
+.atlas-rule__actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding-top: 10px; border-top: 1px solid var(--atlas-line);
+}
+.atlas-btn--ghost { background: transparent; border-color: transparent; color: var(--atlas-muted); }
+.atlas-btn--ghost:hover { color: var(--atlas-danger); border-color: var(--atlas-line); }
