@@ -30,7 +30,12 @@
  */
 
 import type { AppetiteRow, AppetiteLevel } from "./matcher-types";
-import { canonicalTaxonomyKey, nearbyTaxonomyMatches } from "./taxonomy.js";
+import {
+  canonicalTaxonomyKey,
+  nearbyTaxonomyMatches,
+  normalizeLoose,
+  taxonomyKeysRelated,
+} from "./taxonomy.js";
 
 const BASE_SCORE: Record<AppetiteLevel, number> = {
   preferred: 100,
@@ -49,6 +54,24 @@ const CAUTION_BAND_MAX = 50;
 
 const PORTFOLIO = "*";
 
+/**
+ * A feature the matcher scans against a rule's preferred/caution/declined/
+ * referral term lists. `source` names where the text came from (so scoring
+ * notes can show provenance) and `ai_inferred` marks text the AI produced
+ * itself (red-flag issues) rather than read from a document. AI-inferred
+ * matches never hard-rule an insurer out on their own — they downgrade to
+ * a referral that needs human confirmation.
+ */
+export interface RiskFeature {
+  text: string;
+  source: string;
+  ai_inferred?: boolean;
+}
+
+/** Plain strings are accepted for backward compatibility and treated as
+ *  document-derived features with a generic source label. */
+export type FeatureInput = string | RiskFeature;
+
 export interface MatchInputRisk {
   /** All taxonomy candidates that describe what COVER this submission needs.
    *  Built in deriveRisk() from cover_sections, secondary_risk_types, and
@@ -57,9 +80,9 @@ export interface MatchInputRisk {
   section_candidates?: string[];
   /** Same idea for risk type — business sector, secondary types, anything
    *  the extraction surfaced that an appetite rule's risk_type might
-   *  substring-match. */
+   *  token-match. */
   risk_candidates: string[];
-  features: string[];
+  features: FeatureInput[];
   available_documents: string[];
   overall_confidence: number;
 }
@@ -119,10 +142,13 @@ function normTaxonomy(s: string): string {
 /**
  * Best taxonomy-quality across all (product_candidate × risk_candidate) pairs
  * for this appetite rule. Returns the same 3/2/1/-1 scale as before:
- *   3 = both product and risk match (any direction substring)
+ *   3 = both product and risk match (related canonical keys)
  *   2 = only product matches
  *   1 = only risk matches
  *  -1 = nothing matches any candidate
+ * Keys are compared with taxonomyKeysRelated() — equality or underscore-token
+ * containment — never raw substring containment, which produced silent false
+ * positives ("risk" matching "business_all_risks").
  */
 function taxonomyQualityWithCandidates(
   productCandidates: string[],
@@ -136,14 +162,14 @@ function taxonomyQualityWithCandidates(
   for (const c of productCandidates) {
     if (!c) continue;
     const n = normTaxonomy(c);
-    if (n && aPL && (aPL.includes(n) || n.includes(aPL))) { bestPL = true; break; }
+    if (n && aPL && taxonomyKeysRelated(aPL, n)) { bestPL = true; break; }
   }
 
   let bestRT = false;
   for (const c of riskCandidates) {
     if (!c) continue;
     const n = normTaxonomy(c);
-    if (n && aRT && (aRT.includes(n) || n.includes(aRT))) { bestRT = true; break; }
+    if (n && aRT && taxonomyKeysRelated(aRT, n)) { bestRT = true; break; }
   }
 
   if (bestPL && bestRT) return 3;
@@ -152,15 +178,62 @@ function taxonomyQualityWithCandidates(
   return -1;
 }
 
-function findMatches(features: string[], candidates: string[]): string[] {
+// ---------------------------------------------------------------------------
+// Feature ↔ rule-term matching. Token-based with word boundaries: every token
+// of the rule term must appear as a whole token of a single feature ("war"
+// matches "war risk" but never "warranty"; "thatch roof" matches "thatch roof
+// lapa"). Light plural folding so "vehicles" matches "vehicle".
+// ---------------------------------------------------------------------------
+
+interface FeatureHit {
+  candidate: string;
+  /** Which feature fields matched, e.g. ["business sector", "red flag [AI]"]. */
+  sources: string[];
+  /** True when the term matched ONLY in AI-inferred features (red flags). */
+  ai_only: boolean;
+}
+
+function stemToken(t: string): string {
+  return t.length > 3 && t.endsWith("s") ? t.slice(0, -1) : t;
+}
+
+function tokenSet(text: string): Set<string> {
+  return new Set(normalizeLoose(text).split(" ").filter(Boolean).map(stemToken));
+}
+
+function termTokens(term: string): string[] {
+  return normalizeLoose(term).split(" ").filter(Boolean).map(stemToken);
+}
+
+function normalizeFeatures(features: FeatureInput[]): RiskFeature[] {
+  return features.map((f) =>
+    typeof f === "string" ? { text: f, source: "feature", ai_inferred: false } : f
+  );
+}
+
+function findMatches(features: RiskFeature[], candidates: string[]): FeatureHit[] {
   if (!features.length || !candidates.length) return [];
-  const f = features.map(lower);
-  const hits: string[] = [];
+  const prepared = features
+    .map((f) => ({ f, tokens: tokenSet(f.text) }))
+    .filter((x) => x.tokens.size > 0);
+  const hits: FeatureHit[] = [];
   for (const c of candidates) {
-    const cl = lower(c);
-    if (f.some((x) => x.includes(cl) || cl.includes(x))) hits.push(c);
+    const ct = termTokens(c);
+    if (ct.length === 0) continue;
+    const matched = prepared.filter((p) => ct.every((t) => p.tokens.has(t)));
+    if (matched.length === 0) continue;
+    hits.push({
+      candidate: c,
+      sources: [...new Set(matched.map((m) => `${m.f.source}${m.f.ai_inferred ? " [AI]" : ""}`))],
+      ai_only: matched.every((m) => m.f.ai_inferred === true),
+    });
   }
   return hits;
+}
+
+/** "term (from: source, source)" for scoring notes. */
+function hitLabel(h: FeatureHit): string {
+  return `${h.candidate} (from: ${h.sources.join(", ")})`;
 }
 
 function hasRequiredDoc(available: string[], required: string): boolean {
@@ -220,6 +293,7 @@ export function matchInsurers(
   risk: MatchInputRisk,
   allAppetite: AppetiteRow[]
 ): MatchResult {
+  const features = normalizeFeatures(risk.features);
   const productByInsurer = new Map<string, AppetiteRow[]>();
   const portfolioByInsurer = new Map<string, AppetiteRow[]>();
   for (const row of allAppetite) {
@@ -262,17 +336,11 @@ export function matchInsurers(
       }
     }
 
-    // (2) no_data_for is now narrow: only when the insurer literally has zero
-    // active rules at all. An insurer with active rules but no taxonomy match
-    // proceeds at standard baseline and is presented to the underwriter with
-    // a clear note rather than hidden.
-    const hasAnyRules = productRules.length > 0 || portfolioRules.length > 0;
-    if (!hasAnyRules) {
-      const name =
-        productRules[0]?.insurer_name ?? portfolioRules[0]?.insurer_name ?? "Unknown";
-      noData.push({ insurer_id: insurerId, insurer_name: name });
-      continue;
-    }
+    // NOTE: insurers with literally zero active rules never appear in
+    // allAppetite at all, so they cannot be detected here. The CALLER is
+    // responsible for populating no_data_for via insurersWithoutActiveRules()
+    // against the full insurer list — otherwise those insurers silently
+    // vanish from the recommendation.
 
     const usedRule = bestQuality >= 1 ? bestRule : null;
     const insurerName =
@@ -284,6 +352,7 @@ export function matchInsurers(
 
     let score: number;
     let band: AppetiteLevel | "ruled_out" | "insufficient_rule_match";
+    let referralRequired = false;
 
     if (usedRule) {
       score = BASE_SCORE[usedRule.appetite_level];
@@ -293,12 +362,29 @@ export function matchInsurers(
       );
       matched.push(ruleRef(usedRule, "base"));
 
-      const declinedHits = findMatches(risk.features, usedRule.declined_risks);
-      if (declinedHits.length > 0) {
-        notes.push(`Declined-risk match (product) → ruled out: ${declinedHits.join("; ")}`);
-        matched.push(ruleRef(usedRule, "declined", declinedHits));
+      const declinedHits = findMatches(features, usedRule.declined_risks);
+      const declinedDocumentHits = declinedHits.filter((h) => !h.ai_only);
+      const declinedAiOnlyHits = declinedHits.filter((h) => h.ai_only);
+      if (declinedDocumentHits.length > 0) {
+        notes.push(
+          `Declined-risk match (product) → ruled out: ${declinedDocumentHits.map(hitLabel).join("; ")}`
+        );
+        matched.push(ruleRef(usedRule, "declined", declinedDocumentHits.map((h) => h.candidate)));
         scored.push(ruleOut(insurerId, insurerName, usedRule.id, matched, notes));
         continue;
+      }
+      if (declinedAiOnlyHits.length > 0) {
+        // The term matched ONLY in AI-inferred red-flag text, not in anything
+        // read from a document. An AI inference must not hard-rule an insurer
+        // out by itself — downgrade to a referral that a human confirms.
+        const drop = declinedAiOnlyHits.length * CAUTION_PER_MATCH;
+        score -= drop;
+        referralRequired = true;
+        notes.push(
+          `Declined-risk terms matched only in AI-inferred red flags -${drop} → referral, ` +
+            `needs human confirmation before ruling out: ${declinedAiOnlyHits.map(hitLabel).join("; ")}`
+        );
+        matched.push(ruleRef(usedRule, "declined", declinedAiOnlyHits.map((h) => h.candidate)));
       }
 
       if (usedRule.appetite_level === "declined") {
@@ -307,20 +393,20 @@ export function matchInsurers(
         continue;
       }
 
-      const preferredHits = findMatches(risk.features, usedRule.preferred_risks);
+      const preferredHits = findMatches(features, usedRule.preferred_risks);
       if (preferredHits.length > 0) {
         const lift = Math.min(preferredHits.length * PREFERRED_PER_MATCH, PREFERRED_MATCH_CAP);
         score += lift;
-        notes.push(`Preferred-risk matches +${lift}: ${preferredHits.join("; ")}`);
-        matched.push(ruleRef(usedRule, "preferred", preferredHits));
+        notes.push(`Preferred-risk matches +${lift}: ${preferredHits.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(usedRule, "preferred", preferredHits.map((h) => h.candidate)));
       }
 
-      const cautionHits = findMatches(risk.features, usedRule.caution_risks);
+      const cautionHits = findMatches(features, usedRule.caution_risks);
       if (cautionHits.length > 0) {
         const drop = cautionHits.length * CAUTION_PER_MATCH;
         score -= drop;
-        notes.push(`Caution-risk matches -${drop}: ${cautionHits.join("; ")}`);
-        matched.push(ruleRef(usedRule, "caution", cautionHits));
+        notes.push(`Caution-risk matches -${drop}: ${cautionHits.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(usedRule, "caution", cautionHits.map((h) => h.candidate)));
       }
     } else {
       // No product-specific rule could be matched to any candidate. Don't
@@ -335,43 +421,58 @@ export function matchInsurers(
       );
     }
 
-    let referralRequired = false;
     if (usedRule) {
-      const referralHits = findMatches(risk.features, usedRule.referral_triggers);
+      const referralHits = findMatches(features, usedRule.referral_triggers);
       if (referralHits.length > 0) {
         const drop = referralHits.length * REFERRAL_TRIGGER_PENALTY;
         score -= drop;
         referralRequired = true;
-        notes.push(`Referral triggers (product) -${drop}: ${referralHits.join("; ")}`);
-        matched.push(ruleRef(usedRule, "referral", referralHits));
+        notes.push(`Referral triggers (product) -${drop}: ${referralHits.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(usedRule, "referral", referralHits.map((h) => h.candidate)));
       }
     }
 
     let portfolioRuledOut = false;
     let portfolioRuledOutRule: string | null = null;
     for (const pf of portfolioRules) {
-      const pDeclined = findMatches(risk.features, pf.declined_risks);
-      if (pDeclined.length > 0) {
-        notes.push(`Portfolio declined-risk match → ruled out: ${pDeclined.join("; ")}`);
-        matched.push(ruleRef(pf, "portfolio_declined", pDeclined));
+      const pDeclined = findMatches(features, pf.declined_risks);
+      const pDeclinedDocument = pDeclined.filter((h) => !h.ai_only);
+      const pDeclinedAiOnly = pDeclined.filter((h) => h.ai_only);
+      if (pDeclinedDocument.length > 0) {
+        notes.push(
+          `Portfolio declined-risk match → ruled out: ${pDeclinedDocument.map(hitLabel).join("; ")}`
+        );
+        matched.push(ruleRef(pf, "portfolio_declined", pDeclinedDocument.map((h) => h.candidate)));
         portfolioRuledOut = true;
         portfolioRuledOutRule = pf.id;
         break;
       }
-      const pCaution = findMatches(risk.features, pf.caution_risks);
+      if (pDeclinedAiOnly.length > 0) {
+        // Same rule as the product path: AI-inferred text alone must not
+        // hard-rule an insurer out — downgrade to a human-confirmed referral.
+        const drop = pDeclinedAiOnly.length * CAUTION_PER_MATCH;
+        score -= drop;
+        referralRequired = true;
+        notes.push(
+          `Portfolio declined-risk terms matched only in AI-inferred red flags -${drop} → referral, ` +
+            `needs human confirmation before ruling out: ${pDeclinedAiOnly.map(hitLabel).join("; ")}`
+        );
+        matched.push(ruleRef(pf, "portfolio_declined", pDeclinedAiOnly.map((h) => h.candidate)));
+      }
+      const pCaution = findMatches(features, pf.caution_risks);
       if (pCaution.length > 0) {
         const drop = pCaution.length * CAUTION_PER_MATCH;
         score -= drop;
-        notes.push(`Portfolio caution-risk matches -${drop}: ${pCaution.join("; ")}`);
-        matched.push(ruleRef(pf, "portfolio_caution", pCaution));
+        notes.push(`Portfolio caution-risk matches -${drop}: ${pCaution.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(pf, "portfolio_caution", pCaution.map((h) => h.candidate)));
       }
-      const pReferral = findMatches(risk.features, pf.referral_triggers);
+      const pReferral = findMatches(features, pf.referral_triggers);
       if (pReferral.length > 0) {
         const drop = pReferral.length * REFERRAL_TRIGGER_PENALTY;
         score -= drop;
         referralRequired = true;
-        notes.push(`Portfolio referral triggers -${drop}: ${pReferral.join("; ")}`);
-        matched.push(ruleRef(pf, "portfolio_referral", pReferral));
+        notes.push(`Portfolio referral triggers -${drop}: ${pReferral.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(pf, "portfolio_referral", pReferral.map((h) => h.candidate)));
       }
     }
 
@@ -449,6 +550,22 @@ export function matchInsurers(
   });
 
   return { insurers: scored, no_data_for: noData };
+}
+
+/**
+ * Insurers with ZERO active appetite rules — they never reach matchInsurers
+ * (its input is appetite rows), so the caller must surface them explicitly in
+ * no_data_for. Otherwise "Atlas has no data for insurer X" silently reads as
+ * "insurer X doesn't exist", overstating the recommendation's completeness.
+ */
+export function insurersWithoutActiveRules(
+  insurers: { id: string; name: string }[],
+  activeAppetite: { insurer_id: string }[]
+): { insurer_id: string; insurer_name: string }[] {
+  const withRules = new Set(activeAppetite.map((a) => a.insurer_id));
+  return insurers
+    .filter((i) => !withRules.has(i.id))
+    .map((i) => ({ insurer_id: i.id, insurer_name: i.name }));
 }
 
 function ruleOut(

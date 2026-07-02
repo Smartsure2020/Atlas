@@ -76,6 +76,23 @@ for (const entry of ENTRIES) {
   for (const alias of entry.aliases) aliasToKey.set(normalizeLoose(alias), entry.key);
 }
 
+// Alias list for the token-based fallback, ordered scan with best-match-wins.
+const ALIAS_ENTRIES: { aliasLoose: string; key: string; tokenCount: number }[] = [
+  ...aliasToKey.entries(),
+].map(([aliasLoose, key]) => ({
+  aliasLoose,
+  key,
+  tokenCount: aliasLoose.split(" ").filter(Boolean).length,
+}));
+
+/**
+ * Short single-token aliases ("st", "ee", "bar", "git", …) are landmines under
+ * fuzzy matching: as substrings OR as loose tokens they hit unrelated words
+ * ("storage" → sectional title, "digital" → goods in transit). They therefore
+ * only ever match when the WHOLE normalized value equals the alias.
+ */
+const SHORT_ALIAS_MAX_LENGTH = 3;
+
 export function normalizeLoose(value: string): string {
   return value
     .toLowerCase()
@@ -86,16 +103,61 @@ export function normalizeLoose(value: string): string {
     .trim();
 }
 
+/**
+ * Does this alias describe the value? Word-boundary semantics, never raw
+ * substrings: every alias token must appear as a whole token of the value.
+ * ("fire" matches "fire and allied perils" but not "misfire prevention".)
+ */
+function aliasMatchesValue(aliasLoose: string, valueLoose: string, valueTokens: Set<string>): boolean {
+  if (!aliasLoose) return false;
+  if (aliasLoose === valueLoose) return true;
+  const aliasTokens = aliasLoose.split(" ").filter(Boolean);
+  if (aliasTokens.length === 1 && aliasLoose.length <= SHORT_ALIAS_MAX_LENGTH) return false;
+  return aliasTokens.every((t) => valueTokens.has(t));
+}
+
 export function canonicalTaxonomyKey(value: string): string {
   const loose = normalizeLoose(value);
   if (!loose) return "";
   if (loose === "*") return "*";
-  if (aliasToKey.has(loose)) return aliasToKey.get(loose)!;
+  const exact = aliasToKey.get(loose);
+  if (exact) return exact;
 
-  for (const [alias, key] of aliasToKey) {
-    if (alias && (loose.includes(alias) || alias.includes(loose))) return key;
+  // Token-based fallback: the most specific alias (most tokens, then longest
+  // text) whose every token appears in the value wins. No substring matching —
+  // that's what produced silent misclassification ("storage" → sectional
+  // title via "st"), which changes which appetite rule scores an insurer.
+  const valueTokens = new Set(loose.split(" ").filter(Boolean));
+  let best: { key: string; tokenCount: number; length: number } | null = null;
+  for (const entry of ALIAS_ENTRIES) {
+    if (!aliasMatchesValue(entry.aliasLoose, loose, valueTokens)) continue;
+    if (
+      !best ||
+      entry.tokenCount > best.tokenCount ||
+      (entry.tokenCount === best.tokenCount && entry.aliasLoose.length > best.length)
+    ) {
+      best = { key: entry.key, tokenCount: entry.tokenCount, length: entry.aliasLoose.length };
+    }
   }
+  if (best) return best.key;
   return loose.replace(/\s+/g, "_");
+}
+
+/**
+ * Are two canonical keys the same product family? Equality, or one key's
+ * underscore-token set fully contained in the other's ("motor" relates to
+ * "commercial_motor"; "risk" does NOT relate to "business_all_risks").
+ * Used by the matcher instead of raw substring containment on keys.
+ */
+export function taxonomyKeysRelated(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const at = a.split("_").filter(Boolean);
+  const bt = b.split("_").filter(Boolean);
+  if (at.length === 0 || bt.length === 0) return false;
+  const aset = new Set(at);
+  const bset = new Set(bt);
+  return at.every((t) => bset.has(t)) || bt.every((t) => aset.has(t));
 }
 
 export function canonicalizeMany(values: string[]): string[] {

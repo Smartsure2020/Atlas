@@ -1,5 +1,10 @@
 import type { AppetiteRow } from "./matcher-types.js";
-import { canonicalTaxonomyKey } from "./taxonomy.js";
+import { canonicalTaxonomyKey, taxonomyKeysRelated } from "./taxonomy.js";
+import {
+  BUSINESS_EXPOSURE_RULES,
+  EXCESS_SENSITIVE_SECTION_TERMS,
+  ISOLATION_SENSITIVE_SECTIONS,
+} from "./house-rules.js";
 
 export type QuoteReviewStatus =
   | "draft"
@@ -73,14 +78,6 @@ export interface QuoteReviewResult {
   sections: QuoteReviewSection[];
   findings: string[];
 }
-
-const ISOLATION_SENSITIVE = new Set([
-  "public_liability",
-  "theft",
-  "business_all_risks",
-  "accidental_damage",
-  "accounts_receivable",
-]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -228,10 +225,30 @@ function quoteTermsFromReviewed(reviewed: Record<string, unknown>): QuoteTerms {
   };
 }
 
-function findRule(section: QuoteTermSection, appetite: AppetiteRow[]): AppetiteRow | null {
+/**
+ * Find the appetite rule for a quoted section. When several rules share the
+ * section's product line, prefer one whose risk_type relates to the reviewed
+ * submission's risk classification; if that still leaves more than one (or
+ * none discriminates), the pick is reported as AMBIGUOUS so the consultant
+ * reviews which rule actually applies instead of trusting an arbitrary row.
+ */
+function findRule(
+  section: QuoteTermSection,
+  appetite: AppetiteRow[],
+  riskCandidateKeys: string[]
+): { rule: AppetiteRow | null; ambiguous: boolean } {
   const sectionKey = canonicalTaxonomyKey(section.section_key || section.section_name);
   const candidates = appetite.filter((r) => canonicalTaxonomyKey(r.product_line) === sectionKey);
-  return candidates[0] ?? null;
+  if (candidates.length === 0) return { rule: null, ambiguous: false };
+  if (candidates.length === 1) return { rule: candidates[0], ambiguous: false };
+
+  const compatible = candidates.filter((r) => {
+    const rt = canonicalTaxonomyKey(r.risk_type);
+    return riskCandidateKeys.some((k) => taxonomyKeysRelated(rt, k));
+  });
+  if (compatible.length === 1) return { rule: compatible[0], ambiguous: false };
+  if (compatible.length > 1) return { rule: compatible[0], ambiguous: true };
+  return { rule: candidates[0], ambiguous: true };
 }
 
 function portfolioRules(appetite: AppetiteRow[]): AppetiteRow[] {
@@ -264,8 +281,21 @@ export function buildQuoteReview(input: {
   const availableDocs = input.availableDocuments.map((d) => d.toLowerCase());
   const sections: QuoteReviewSection[] = [];
 
+  // The submission's risk-type vocabulary, canonicalized — used to pick the
+  // right rule when an insurer has several rules for the same product line.
+  // business_sector is deliberately excluded: sector words ("Property",
+  // "Construction") canonicalize into PRODUCT families and would falsely
+  // discriminate between risk-type rules.
+  const riskCandidateKeys = [
+    ...strings(fieldValue(input.reviewed, "risk_classification", "risk_type")),
+    ...strings(fieldValue(input.reviewed, "risk_classification", "secondary_risk_types")),
+    ...strings(fieldValue(input.reviewed, "risk_classification", "primary_risk_type")),
+  ]
+    .map(canonicalTaxonomyKey)
+    .filter(Boolean);
+
   for (const quoteSection of quoteTerms.sections) {
-    const rule = findRule(quoteSection, activeRules);
+    const { rule, ambiguous } = findRule(quoteSection, activeRules, riskCandidateKeys);
     const matchedRules = rule ? [rule, ...globals] : globals;
     const sectionText = [
       quoteSection.section_name,
@@ -308,6 +338,12 @@ export function buildQuoteReview(input: {
     if (!rule) {
       result.findings.push("No product-level appetite rule matched this quoted section.");
     }
+    if (rule && ambiguous) {
+      result.findings.push(
+        `Multiple appetite rules matched this section's product line; Atlas used ` +
+          `"${rule.product_line} × ${rule.risk_type}" — review which rule actually applies.`
+      );
+    }
 
     const requiredDocs = new Set<string>();
     for (const r of matchedRules) for (const doc of r.required_documents) requiredDocs.add(doc);
@@ -346,9 +382,10 @@ export function buildQuoteReview(input: {
     }
 
     if (strings(quoteSection.excess).length === 0) {
-      const sensitive = ["theft", "glass", "accidental", "electronic", "fire", "motor"];
-      if (sensitive.some((s) => quoteSection.section_name.toLowerCase().includes(s))) {
-        result.excess_findings.push("Excess is missing or unclear for a section that normally needs one reviewed.");
+      if (EXCESS_SENSITIVE_SECTION_TERMS.some((s) => quoteSection.section_name.toLowerCase().includes(s))) {
+        result.excess_findings.push(
+          "House rule: excess is missing or unclear for a section that normally needs one reviewed."
+        );
       }
     }
 
@@ -362,17 +399,19 @@ export function buildQuoteReview(input: {
       }
     }
 
-    if (quoteTerms.sections.length === 1 && ISOLATION_SENSITIVE.has(canonicalTaxonomyKey(quoteSection.section_name))) {
-      result.findings.push("Section may require review before being written in isolation.");
+    // House rules (see house-rules.ts): internal heuristics, not insurer
+    // appetite. Their findings are labelled so the consultant can tell them
+    // apart from rule-sourced findings.
+    if (quoteTerms.sections.length === 1 && ISOLATION_SENSITIVE_SECTIONS.has(canonicalTaxonomyKey(quoteSection.section_name))) {
+      result.findings.push("House rule: section may require review before being written in isolation.");
     }
 
     const business = strings(fieldValue(input.reviewed, "extracted_client", "occupation_or_business_description")).join(" ").toLowerCase();
     const quotedKeys = quoteTerms.sections.map((s) => canonicalTaxonomyKey(s.section_name));
-    if (/restaurant|hotel|food|franchise/.test(business) && !quotedKeys.includes("public_liability")) {
-      result.findings.push("Food or hospitality exposure detected without a clear liability/product liability section.");
-    }
-    if (/motor|vehicle|fleet|transport|delivery|courier/.test(business) && !quotedKeys.some((k) => k.includes("motor") || k === "goods_in_transit")) {
-      result.findings.push("Motor or transit exposure detected without a clear motor/GIT section.");
+    for (const exposure of BUSINESS_EXPOSURE_RULES) {
+      if (exposure.businessPattern.test(business) && !exposure.hasExpectedSection(quotedKeys)) {
+        result.findings.push(exposure.finding);
+      }
     }
 
     result.status = deriveSectionStatus(result);

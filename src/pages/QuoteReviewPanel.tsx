@@ -119,6 +119,8 @@ export default function QuoteReviewPanel({
           ? "Review the extraction before running quote review."
           : msg === "no_extraction"
           ? "Run the extraction first."
+          : msg === "insurer_scope_required" || msg.includes("Run a recommendation")
+          ? "Run a recommendation (or select an insurer) first, so the quote is checked against that insurer's rules only."
           : "Could not run the quote review."
       );
     } finally {

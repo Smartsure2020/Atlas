@@ -21,7 +21,13 @@
  */
 
 import { adminClient, audit, json, type AtlasUser } from "./auth";
-import { matchInsurers, type InsurerScore, type MatchInputRisk } from "./matcher";
+import {
+  insurersWithoutActiveRules,
+  matchInsurers,
+  type InsurerScore,
+  type MatchInputRisk,
+  type RiskFeature,
+} from "./matcher";
 import type { AppetiteRow } from "./matcher-types";
 import {
   REASONING_MODEL,
@@ -102,20 +108,25 @@ function deriveRisk(reviewed: Record<string, unknown>, availableDocs: string[]):
   const complexity = fieldStr(rc.complexity_level);
   if (complexity) riskCandidates.push(complexity);
 
-  const features: string[] = [];
-  const push = (s: string) => { if (s) features.push(s); };
-  push(fieldStr(rc.primary_risk_type));
-  push(fieldStr(rc.secondary_risk_types));
-  push(fieldStr(rc.business_sector));
-  push(fieldStr(rc.complexity_level));
-  push(fieldStr(ec.occupation_or_business_description));
-  push(fieldStr(ec.risk_address));
-  push(fieldStr(ec.entity_type));
-  push(fieldStr(cc.cover_sections));
-  push(fieldStr(cc.endorsements));
-  push(fieldStr(cc.exclusions));
+  // Features carry a source label so scoring notes can show WHERE a rule term
+  // matched, and red-flag issues are marked ai_inferred — the matcher treats
+  // those as needing human confirmation instead of hard-ruling insurers out.
+  const features: RiskFeature[] = [];
+  const push = (text: string, source: string, aiInferred = false) => {
+    if (text) features.push({ text, source, ai_inferred: aiInferred });
+  };
+  push(fieldStr(rc.primary_risk_type), "primary risk type");
+  push(fieldStr(rc.secondary_risk_types), "secondary risk types");
+  push(fieldStr(rc.business_sector), "business sector");
+  push(fieldStr(rc.complexity_level), "complexity level");
+  push(fieldStr(ec.occupation_or_business_description), "occupation/business description");
+  push(fieldStr(ec.risk_address), "risk address");
+  push(fieldStr(ec.entity_type), "entity type");
+  push(fieldStr(cc.cover_sections), "cover sections");
+  push(fieldStr(cc.endorsements), "endorsements");
+  push(fieldStr(cc.exclusions), "exclusions");
   const reds = (reviewed.red_flags as { issue?: string }[]) ?? [];
-  for (const r of reds) if (r?.issue) push(r.issue);
+  for (const r of reds) if (r?.issue) push(r.issue, "red flag", true);
 
   const overall_confidence =
     typeof reviewed.overall_confidence === "number" ? reviewed.overall_confidence : 0.7;
@@ -260,6 +271,21 @@ export async function handleRunRecommendation(
 
   // ---- Match deterministically ----
   const result = matchInsurers(risk, appetite);
+
+  // Insurers with ZERO active rules never enter the matcher (its input is
+  // appetite rows), so surface them explicitly: the underwriter must see
+  // "Atlas has no appetite data for X" rather than X silently vanishing.
+  const { data: insurerRows } = await admin
+    .from("atlas_insurers")
+    .select("id, name")
+    .eq("active", true);
+  result.no_data_for = [
+    ...result.no_data_for,
+    ...insurersWithoutActiveRules(
+      (insurerRows ?? []) as { id: string; name: string }[],
+      appetite
+    ),
+  ];
 
   // ---- Build reasoning context map (id -> source_quote/notes) ----
   // Prefer stored guideline evidence, with notes as a fallback for older rows.

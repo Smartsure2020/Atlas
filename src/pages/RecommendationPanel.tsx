@@ -204,7 +204,7 @@ function RecommendationView({ rec }: { rec: Recommendation }) {
         <div className="atlas-reco__nodata">
           <strong>No appetite data on file for:</strong>{" "}
           {rec.reasoning_json.no_data_for.map((i) => i.insurer_name).join(", ")}
-          {" — these insurers have no matrix entry for this product line × risk type."}
+          {" — these insurers have no active appetite rules in the matrix, so Atlas could not consider them. This is a data gap, not a rejection."}
         </div>
       )}
     </div>

@@ -60,6 +60,21 @@ export async function handleRunQuoteReview(
   const top = (recommendation?.reasoning_json as { top?: { insurer_id?: string } } | undefined)?.top;
   const insurerId = body.insurer_id ?? top?.insurer_id ?? null;
 
+  // A quote review must be scoped to ONE insurer. Unscoped, findRule() would
+  // check quoted sections against whichever insurer's rules happen to share a
+  // product line — validating a quote against a competitor's appetite.
+  if (!insurerId) {
+    return json(
+      {
+        error: "insurer_scope_required",
+        detail: "insurer_scope_required",
+        message:
+          "Run a recommendation (or select an insurer) before running a quote review, so sections are checked against that insurer's rules only.",
+      },
+      400
+    );
+  }
+
   const { data: docs } = await admin
     .from("atlas_documents")
     .select("document_type, file_name")
