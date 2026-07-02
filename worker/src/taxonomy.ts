@@ -1,3 +1,10 @@
+/**
+ * Bumped whenever alias data or matching semantics change. Stored on every
+ * recommendation so a historical result can be attributed to the taxonomy
+ * behaviour of its day.
+ */
+export const TAXONOMY_VERSION = "2026-07-token-aliases-v1";
+
 export type LineOfBusiness = "personal" | "commercial" | "both";
 
 export interface TaxonomyEntry {

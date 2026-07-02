@@ -11,6 +11,7 @@
 
 import { adminClient, audit, json, type AtlasUser } from "./auth";
 import { validateAndNormalizeExtraction } from "./extraction";
+import { diffFieldPaths } from "./review-diff";
 import type { Env } from "./config";
 import { getLatestJob } from "./phase7-jobs";
 
@@ -113,10 +114,11 @@ export async function handleReview(
 
   const admin = adminClient(env);
 
-  // Guard: the extraction must belong to this submission.
+  // Guard: the extraction must belong to this submission. The JSON columns
+  // are loaded too so the audit row can record WHICH fields were corrected.
   const { data: existing } = await admin
     .from("atlas_extractions")
-    .select("id, submission_id")
+    .select("id, submission_id, extracted_json, reviewed_json")
     .eq("id", body.extraction_id)
     .single();
   if (!existing || existing.submission_id !== submissionId) {
@@ -144,13 +146,21 @@ export async function handleReview(
     .eq("id", body.extraction_id);
   if (updErr) return json({ error: "save_failed" }, 500);
 
+  // Which fields changed vs the version being corrected (the previous review
+  // when re-reviewing, else the raw extraction). PATHS only — never values.
+  const baseline = existing.reviewed_json ?? existing.extracted_json ?? {};
+  const diff = diffFieldPaths(baseline, validated.value);
+
   await audit(env, {
     submissionId,
     action: "extraction_reviewed",
     actorId: user.id,
-    // Field NAMES that were corrected could be added by the caller; we keep it
-    // to the extraction id here to avoid logging any values.
-    metadata: { extraction_id: body.extraction_id },
+    metadata: {
+      extraction_id: body.extraction_id,
+      changed_field_count: diff.changed_paths.length,
+      changed_fields: diff.changed_paths,
+      changed_fields_truncated: diff.truncated,
+    },
   });
 
   return json({ ok: true });

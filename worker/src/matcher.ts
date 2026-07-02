@@ -37,6 +37,13 @@ import {
   taxonomyKeysRelated,
 } from "./taxonomy.js";
 
+/**
+ * Bumped whenever the scoring rubric or matching semantics change. Stored on
+ * every recommendation (with the matcher input) so an old recommendation can
+ * be reconstructed and defended without replaying current code against it.
+ */
+export const MATCHER_VERSION = "2026-07-token-matching-v1";
+
 const BASE_SCORE: Record<AppetiteLevel, number> = {
   preferred: 100,
   standard: 70,

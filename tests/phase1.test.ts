@@ -2,6 +2,7 @@ import {
   collectUnavailablePdfDocuments,
   validateAndNormalizeExtraction,
 } from "../worker/src/extraction.js";
+import { diffFieldPaths } from "../worker/src/review-diff.js";
 import { parseReviewFieldValue } from "../src/lib/review-edit.js";
 import { putSignedUpload } from "../src/lib/upload.js";
 
@@ -165,6 +166,43 @@ test("object manual correction remains an object", () => {
   const parsed = parseReviewFieldValue({ section: "Motor" }, "{\"section\":\"Property\"}");
   assertEqual(parsed.ok, true, "object edit should parse");
   if (parsed.ok) assertDeepEqual(parsed.value, { section: "Property" }, "object should remain an object");
+});
+
+test("review diff reports corrected field paths, names only", () => {
+  const before = validExtraction();
+  const after = validExtraction();
+  (after.extracted_client.name as { value: unknown }).value = "ABC Contractors (Pty) Ltd";
+  (after.current_cover.cover_sections as { value: unknown }).value = ["Motor", "Public Liability", "SASRIA"];
+  const diff = diffFieldPaths(before, after);
+  assertDeepEqual(
+    diff.changed_paths,
+    ["current_cover.cover_sections", "extracted_client.name"],
+    "changed field paths should be reported"
+  );
+  assert(
+    !JSON.stringify(diff).includes("ABC Contractors"),
+    "diff output must contain field names only, never values"
+  );
+});
+
+test("review diff is empty when nothing changed, regardless of key order", () => {
+  const before = validExtraction();
+  const after = JSON.parse(JSON.stringify(validExtraction()));
+  const diff = diffFieldPaths(before, after);
+  assertEqual(diff.changed_paths.length, 0, "identical documents should produce no diff");
+  assertEqual(diff.truncated, false, "no truncation expected");
+});
+
+test("review diff caps the number of reported paths", () => {
+  const before: Record<string, unknown> = {};
+  const after: Record<string, unknown> = {};
+  for (let i = 0; i < 80; i++) {
+    before[`field_${i}`] = { value: "a", status: "extracted" };
+    after[`field_${i}`] = { value: "b", status: "extracted" };
+  }
+  const diff = diffFieldPaths(before, after, 50);
+  assertEqual(diff.changed_paths.length, 50, "paths should cap at the limit");
+  assertEqual(diff.truncated, true, "cap should be reported as truncation");
 });
 
 test("legacy extraction data normalizes without crashing", () => {

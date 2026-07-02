@@ -28,6 +28,7 @@
 import { adminClient, audit, json } from "./auth";
 import { resolveRoleFromAllowlist, type Env } from "./config";
 import { isDevSignInAllowed } from "./phase6-hardening";
+import { findUserByEmail } from "./user-directory";
 
 /**
  * GET /dev/sign-in?email=<allow-listed email>
@@ -61,8 +62,7 @@ export async function handleDevSignIn(
 
   // Step 1: find or create the Supabase user.
   let userId: string | null = null;
-  const { data: list } = await admin.auth.admin.listUsers();
-  const existing = list?.users?.find((u) => u.email?.toLowerCase() === email);
+  const existing = await findUserByEmail(admin, email);
   if (existing) {
     userId = existing.id;
   } else {

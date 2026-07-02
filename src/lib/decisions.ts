@@ -74,6 +74,11 @@ export type EmailType =
 export interface EmailDraft {
   subject: string;
   body: string;
+  /** Communication record id — every generated draft is persisted server-side. */
+  draft_id?: string | null;
+  draft_persisted?: boolean;
+  /** Whether the draft was built from the human-reviewed extraction or the raw AI one. */
+  based_on?: "reviewed_extraction" | "raw_extraction";
 }
 
 export function generateEmail(submissionId: string, type: EmailType) {

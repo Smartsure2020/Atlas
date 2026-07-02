@@ -20,6 +20,7 @@
 
 import { adminClient, audit, json } from "./auth";
 import { resolveRoleFromAllowlist, type Env } from "./config";
+import { findUserByEmail } from "./user-directory";
 
 const MS_AUTHORIZE = (env: Env) =>
   `https://login.microsoftonline.com/${env.AZURE_TENANT_ID}/oauth2/v2.0/authorize`;
@@ -125,8 +126,7 @@ export async function handleCallback(
   } else {
     // User already exists — fetch and UPDATE the role so allow-list changes
     // (e.g. promotion to admin, or revocation handled elsewhere) take effect.
-    const { data: list } = await admin.auth.admin.listUsers();
-    const existing = list?.users?.find((u) => u.email?.toLowerCase() === email);
+    const existing = await findUserByEmail(admin, email);
     if (existing) {
       userId = existing.id;
       await admin.auth.admin.updateUserById(existing.id, {

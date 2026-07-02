@@ -105,6 +105,7 @@ export interface ReviewLike {
   review_snapshot?: {
     quote_terms?: {
       insurer_name?: string | null;
+      insured_name?: string | null;
       quote_reference?: string | null;
       quote_date?: string | null;
       sections?: { section_name?: string; premium?: unknown; sum_insured?: unknown }[];
@@ -269,6 +270,18 @@ export function generateMissingInfoRequestDraft(input: {
   return withControlledHeader("Missing information request", lines.join("\n").trim(), input.generatedAt);
 }
 
+/** The insured's name from a review snapshot: prefer the quote's own
+ *  insured_name, fall back to the reviewed extraction's client name. */
+function insuredNameFromSnapshot(review: ReviewLike): string | null {
+  const fromQuote = review.review_snapshot?.quote_terms?.insured_name;
+  if (typeof fromQuote === "string" && fromQuote.trim()) return fromQuote.trim();
+  const client = (review.review_snapshot?.reviewed_json?.extracted_client as
+    | Record<string, unknown>
+    | undefined)?.name as { value?: unknown } | undefined;
+  const value = client?.value;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 export function generateReferralPack(input: {
   review: ReviewLike;
   sections: ReviewSectionLike[];
@@ -280,7 +293,10 @@ export function generateReferralPack(input: {
   const lines = [
     "Referral summary for review",
     "",
-    `Client/insured: ${quote?.insurer_name ? quote.insurer_name : "Not specified"}`,
+    // The insured and the quoting insurer are different parties; this line
+    // previously printed the INSURER's name as "Client/insured".
+    `Client/insured: ${insuredNameFromSnapshot(input.review) ?? "Not specified"}`,
+    `Insurer: ${quote?.insurer_name ?? "Not specified"}`,
     `Quote reference: ${quote?.quote_reference ?? "Not specified"}`,
     `Overall Atlas outcome: ${input.review.status}`,
     input.review.id ? `Quote review reference: ${input.review.id}` : "",

@@ -117,6 +117,33 @@ test("referral pack includes triggers and rule evidence", () => {
   assert(/does not bind cover/i.test(draft), "pack should not bind cover");
 });
 
+test("referral pack names the insured, not the insurer, as the client", () => {
+  const withInsured = {
+    ...review,
+    review_snapshot: {
+      quote_terms: { ...review.review_snapshot.quote_terms, insured_name: "ABC Body Corporate" },
+    },
+  };
+  const draft = generateReferralPack({ review: withInsured, sections: [section] });
+  assert(/Client\/insured: ABC Body Corporate/.test(draft), "insured name should appear as client");
+  assert(/Insurer: Test Insurer/.test(draft), "insurer should be named on its own line");
+  assert(!/Client\/insured: Test Insurer/.test(draft), "insurer must not be labelled as the client");
+});
+
+test("referral pack falls back to the reviewed client name when the quote lacks one", () => {
+  const withReviewedClient = {
+    ...review,
+    review_snapshot: {
+      quote_terms: review.review_snapshot.quote_terms,
+      reviewed_json: {
+        extracted_client: { name: { value: "Fallback Client CC", status: "extracted" } },
+      },
+    },
+  };
+  const draft = generateReferralPack({ review: withReviewedClient, sections: [section] });
+  assert(/Client\/insured: Fallback Client CC/.test(draft), "reviewed client name should be the fallback");
+});
+
 test("quote review summary includes overall and section outcomes", () => {
   const summary = generateQuoteReviewSummary({
     review,

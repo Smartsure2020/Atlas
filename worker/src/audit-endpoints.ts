@@ -11,6 +11,7 @@
 
 import { adminClient, json, type AtlasUser } from "./auth";
 import type { Env } from "./config";
+import { emailsForUserIds } from "./user-directory";
 
 export async function handleGetAuditTimeline(
   submissionId: string,
@@ -28,23 +29,16 @@ export async function handleGetAuditTimeline(
     .order("created_at", { ascending: true });
   if (error) return json({ error: "fetch_failed" }, 500);
 
-  // Resolve actor IDs → emails via a single auth.listUsers call, then map.
-  // For larger tenants this would need pagination; for an MVP with a small
-  // team it's fine. (Same pattern as the existing oauth.ts user lookup.)
+  // Resolve actor IDs → emails, paginating the auth directory so actors
+  // beyond the first page are never silently mislabelled.
   const actorIds = new Set<string>();
   for (const r of rows ?? []) if (r.actor) actorIds.add(r.actor);
 
   let emailById = new Map<string, string>();
-  if (actorIds.size > 0) {
-    try {
-      const { data: list } = await admin.auth.admin.listUsers();
-      const users = (list?.users ?? []) as { id: string; email?: string | null }[];
-      for (const u of users) {
-        if (u.email && actorIds.has(u.id)) emailById.set(u.id, u.email);
-      }
-    } catch {
-      // Non-fatal — UI just shows "system" / actor ID when email is unavailable.
-    }
+  try {
+    emailById = await emailsForUserIds(admin, actorIds);
+  } catch {
+    // Non-fatal — UI just shows "system" / actor ID when email is unavailable.
   }
 
   const enriched = (rows ?? []).map(

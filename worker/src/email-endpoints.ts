@@ -21,6 +21,7 @@
 
 import { adminClient, audit, json, type AtlasUser } from "./auth";
 import type { Env } from "./config";
+import { logOperationError } from "./phase6-hardening";
 
 const EMAIL_MODEL = "claude-sonnet-4-6";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -122,6 +123,22 @@ RULES:
 - Return ONLY a JSON object: {"subject": "...", "body": "..."}
 - The body uses plain text with \\n line breaks.
 `.trim(),
+};
+
+/**
+ * Where each LLM email draft lands in atlas_communications, so every piece of
+ * AI-generated external-facing text is a durable, auditable record with the
+ * normal draft → copied → sent_manually lifecycle — not ephemeral response
+ * JSON that vanishes if the user doesn't separately save it.
+ */
+const EMAIL_COMMUNICATION: Record<
+  EmailType,
+  { communication_type: string; audience: string }
+> = {
+  broker_missing_info: { communication_type: "missing_info_request", audience: "broker" },
+  broker_acknowledgement: { communication_type: "broker_note", audience: "broker" },
+  insurer_submission: { communication_type: "other", audience: "insurer" },
+  internal_summary: { communication_type: "internal_note", audience: "internal" },
 };
 
 function emailTypeFromPath(suffix: string): EmailType | null {
@@ -255,19 +272,69 @@ export async function handleGenerateEmail(
     return json({ error: "email_parse_failed" }, 502);
   }
 
+  // ---- Persist the draft as a communication record ----
+  // Reviewed extraction is authoritative; a draft built from a raw
+  // (unreviewed) extraction is labelled so nobody sends unverified facts.
+  const basedOnReviewed = Boolean(extRes.data?.reviewed_json);
+  const target = EMAIL_COMMUNICATION[emailType];
+  const notes = [
+    "AI-generated email draft. Review before sending — Atlas never sends automatically.",
+    basedOnReviewed ? null : "Based on an UNREVIEWED AI extraction; verify facts before use.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  let draftId: string | null = null;
+  const { data: saved, error: saveErr } = await admin
+    .from("atlas_communications")
+    .insert({
+      submission_id: submissionId,
+      communication_type: target.communication_type,
+      audience: target.audience,
+      subject: result.subject,
+      body: result.body,
+      status: "draft",
+      created_by: user.id,
+      notes,
+    })
+    .select("id")
+    .single();
+  if (saveErr || !saved) {
+    // The draft was already generated; return it rather than discarding paid
+    // work, but say plainly that it was NOT persisted.
+    logOperationError({
+      endpoint: `/api/submissions/${submissionId}/emails`,
+      operation: "persist_email_draft",
+      code: "store_failed",
+      submissionId,
+      status: 500,
+    });
+  } else {
+    draftId = saved.id;
+  }
+
   await audit(env, {
     submissionId,
     action: "email_draft_generated",
     actorId: user.id,
     metadata: {
       email_type: emailType,
+      draft_id: draftId,
+      draft_persisted: Boolean(draftId),
+      based_on_reviewed_extraction: basedOnReviewed,
       // Length only — we never log the email body itself (it contains client PII).
       body_length: result.body.length,
       subject_length: result.subject.length,
     },
   });
 
-  return json({ ok: true, ...result });
+  return json({
+    ok: true,
+    ...result,
+    draft_id: draftId,
+    draft_persisted: Boolean(draftId),
+    based_on: basedOnReviewed ? "reviewed_extraction" : "raw_extraction",
+  });
 }
 
 export { emailTypeFromPath };

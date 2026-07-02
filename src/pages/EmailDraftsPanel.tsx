@@ -47,7 +47,13 @@ export default function EmailDraftsPanel({ submissionId, decisionVersion = 0 }: 
     setActive(type);
     try {
       const r = await generateEmail(submissionId, type);
-      setDraft({ subject: r.subject, body: r.body });
+      setDraft({
+        subject: r.subject,
+        body: r.body,
+        draft_id: r.draft_id ?? null,
+        draft_persisted: r.draft_persisted,
+        based_on: r.based_on,
+      });
     } catch {
       setError("Could not generate the draft. Please try again.");
       setDraft(null);
@@ -101,6 +107,19 @@ export default function EmailDraftsPanel({ submissionId, decisionVersion = 0 }: 
               Regenerate
             </button>
           </div>
+
+          {draft.based_on === "raw_extraction" && (
+            <div className="atlas-inline-error" style={{ marginBottom: 10 }}>
+              This draft was built from an <strong>unreviewed</strong> AI extraction —
+              review the risk summary and verify every fact before sending.
+            </div>
+          )}
+          {draft.draft_persisted === false && (
+            <div className="atlas-inline-error" style={{ marginBottom: 10 }}>
+              The draft could not be saved to the communications record — copy it now
+              if you need it, then regenerate to retry saving.
+            </div>
+          )}
 
           <div className="atlas-email-draft__field">
             <div className="atlas-email-draft__label">

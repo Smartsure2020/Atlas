@@ -22,12 +22,14 @@
 
 import { adminClient, audit, json, type AtlasUser } from "./auth";
 import {
+  MATCHER_VERSION,
   insurersWithoutActiveRules,
   matchInsurers,
   type InsurerScore,
   type MatchInputRisk,
   type RiskFeature,
 } from "./matcher";
+import { TAXONOMY_VERSION } from "./taxonomy";
 import type { AppetiteRow } from "./matcher-types";
 import {
   REASONING_MODEL,
@@ -362,6 +364,14 @@ export async function handleRunRecommendation(
       manual_review_required: top?.manual_review_required ?? false,
       unmatched_sections: top?.unmatched_sections ?? [],
       unmatched_product_candidates: top?.unmatched_product_candidates ?? [],
+      // Reconstruction snapshot: the exact derived input the matcher ran on,
+      // and which matcher/taxonomy behaviour produced the scores. Without
+      // this, explaining an old recommendation would mean replaying CURRENT
+      // code against the reviewed JSON — wrong after any matcher change.
+      matcher_input: risk,
+      matcher_version: MATCHER_VERSION,
+      taxonomy_version: TAXONOMY_VERSION,
+      reasoning_source: usedFallbackReasoning ? "fallback" : "llm",
     },
     confidence_score: top?.confidence ?? 0,
     referral_required: top?.referral_required ?? false,
