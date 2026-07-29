@@ -75,7 +75,9 @@ export async function handleListJobs(env: Env, user: AtlasUser): Promise<Respons
     .from("atlas_jobs")
     .select(
       "id, submission_id, document_id, quote_review_id, insurer_id, job_type, status, " +
-        "result_reference_id, error_code, error_message, started_at, completed_at, created_at, metadata"
+        "result_reference_id, error_code, error_message, started_at, completed_at, created_at, metadata, " +
+        "retry_count, max_retries, next_retry_at, last_error_code, cancellation_requested, " +
+        "progress_percent, current_step, heartbeat_at"
     )
     .order("created_at", { ascending: false })
     .limit(100);
@@ -126,7 +128,7 @@ export async function handleCleanupPreview(env: Env, user: AtlasUser): Promise<R
     cleanup_candidates_created: candidateRows.length,
     expired_inactive_documents: expiredDocs ?? [],
     orphan_storage_note:
-      "Phase 8 records cleanup candidates for manager approval. Automatic storage deletion is deferred until a dedicated cleanup worker is enabled.",
+      "The background worker detects orphan paths and deletes only candidates explicitly approved by a manager.",
   });
 }
 

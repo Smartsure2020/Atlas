@@ -45,6 +45,9 @@ import {
   buildRecommendationFingerprint,
   completeJob,
   failJob,
+  queuedJobResponse,
+  isJobCancellationRequested,
+  updateJobProgress,
 } from "./phase7-jobs";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -176,7 +179,7 @@ export async function handleRunRecommendation(
   env: Env,
   user: AtlasUser
 ): Promise<Response> {
-  const body = (await request.json().catch(() => ({}))) as { force?: boolean };
+  const body = (await request.json().catch(() => ({}))) as { force?: boolean; background_job_id?: string };
   const admin = adminClient(env);
 
   // ---- Load latest extraction; require reviewed_json (input gate) ----
@@ -253,9 +256,13 @@ export async function handleRunRecommendation(
       jobType: "recommendation",
       inputFingerprint: inputFp,
       createdBy: user.id,
-      metadata: { extraction_id: extraction.id, active_rules: appetite.length },
+      metadata: {
+        extraction_id: extraction.id,
+        active_rules: appetite.length,
+        request: { force: body.force === true },
+      },
     },
-    { force: body.force === true }
+    { force: body.force === true, existingJobId: body.background_job_id }
   );
   if (job.action === "unchanged_completed") {
     return json({
@@ -270,6 +277,12 @@ export async function handleRunRecommendation(
   if (job.action === "duplicate_running") {
     return json({ error: "job_already_running", detail: job.message, job_id: job.previousJobId }, 409);
   }
+  if (job.action === "cancelled") {
+    return json({ error: "job_cancelled", detail: job.message, job_id: job.jobId }, 409);
+  }
+  if (job.action === "queued") return queuedJobResponse(job, "recommendation");
+
+  await updateJobProgress(admin, job.jobId, 20, "matching_active_appetite");
 
   // ---- Match deterministically ----
   const result = matchInsurers(risk, appetite);
@@ -298,6 +311,10 @@ export async function handleRunRecommendation(
 
   // ---- Reasoning pass (with deterministic fallback) ----
   const riskSummary = buildRiskSummary(reviewedJson);
+  await updateJobProgress(admin, job.jobId, 45, "generating_explanation");
+  if (await isJobCancellationRequested(admin, job.jobId)) {
+    return json({ error: "job_cancelled", job_id: job.jobId }, 409);
+  }
   let reasoning: ReasoningOutput;
   let usedFallbackReasoning = false;
   try {
@@ -377,7 +394,16 @@ export async function handleRunRecommendation(
     referral_required: top?.referral_required ?? false,
     senior_review_required: top?.senior_review_required || top?.manual_review_required || false,
     extraction_id: extraction.id,
+    version_metadata: {
+      model: REASONING_MODEL,
+      prompt: "recommendation-reasoning-v1",
+      taxonomy: TAXONOMY_VERSION,
+      appetite: inputFp,
+      extraction: String((reviewedJson as { schema_version?: unknown }).schema_version ?? "unknown"),
+    },
   };
+
+  await updateJobProgress(admin, job.jobId, 85, "saving_recommendation");
 
   const { data: recRow, error: recErr } = await admin
     .from("atlas_recommendations")

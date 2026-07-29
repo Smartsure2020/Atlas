@@ -25,8 +25,12 @@ import {
   beginJob,
   completeJob,
   failJob,
+  queuedJobResponse,
+  isJobCancellationRequested,
+  updateJobProgress,
 } from "./phase7-jobs";
 import { buildExtractionFingerprintV2 } from "./phase8-core";
+import { TAXONOMY_VERSION } from "./taxonomy";
 
 const CLIENT_DOCS_BUCKET = "atlas-client-docs";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -49,7 +53,7 @@ export async function handleExtract(
   env: Env,
   user: AtlasUser
 ): Promise<Response> {
-  const body = (await request.json().catch(() => ({}))) as { force?: boolean };
+  const body = (await request.json().catch(() => ({}))) as { force?: boolean; background_job_id?: string };
   // ---- Manager-only gate (server-side, authoritative) ----
   if (!roleCanRunExtraction(user.role)) {
     await audit(env, {
@@ -73,9 +77,10 @@ export async function handleExtract(
 
   const { data: docsWithHash, error: docsHashError } = await admin
     .from("atlas_documents")
-    .select("id, file_name, storage_path, document_type, status, created_at, file_hash")
+    .select("id, file_name, storage_path, document_type, status, scan_status, created_at, file_hash")
     .eq("submission_id", submissionId)
-    .eq("status", "active");
+    .eq("status", "active")
+    .in("scan_status", ["clean", "not_scanned"]);
   const { data: docsLegacy } = docsHashError
     ? await admin
         .from("atlas_documents")
@@ -97,9 +102,12 @@ export async function handleExtract(
       jobType: "extraction",
       inputFingerprint: inputFp,
       createdBy: user.id,
-      metadata: { active_documents: docs?.length ?? 0 },
+      metadata: {
+        active_documents: docs?.length ?? 0,
+        request: { force: body.force === true },
+      },
     },
-    { force: body.force === true }
+    { force: body.force === true, existingJobId: body.background_job_id }
   );
   if (job.action === "unchanged_completed") {
     return json({
@@ -114,6 +122,12 @@ export async function handleExtract(
   if (job.action === "duplicate_running") {
     return json({ error: "job_already_running", detail: job.message, job_id: job.previousJobId }, 409);
   }
+  if (job.action === "cancelled") {
+    return json({ error: "job_cancelled", detail: job.message, job_id: job.jobId }, 409);
+  }
+  if (job.action === "queued") return queuedJobResponse(job, "extraction");
+
+  await updateJobProgress(admin, job.jobId, 10, "reading_documents");
 
   // Build the Claude message content: the instruction text + each PDF as a
   // native document block (Claude reads PDFs directly — best accuracy, no
@@ -179,6 +193,11 @@ export async function handleExtract(
       },
       409
     );
+  }
+
+  await updateJobProgress(admin, job.jobId, 35, "calling_extraction_model");
+  if (await isJobCancellationRequested(admin, job.jobId)) {
+    return json({ error: "job_cancelled", job_id: job.jobId }, 409);
   }
 
   if (content.length === 0) {
@@ -262,6 +281,8 @@ export async function handleExtract(
     );
   }
 
+  await updateJobProgress(admin, job.jobId, 85, "saving_extraction");
+
   // ---- Store as extracted_json (raw AI). reviewed_json stays null. ----
   extraction = validated.value;
   const confidence = overallConfidence(extraction);
@@ -273,6 +294,13 @@ export async function handleExtract(
       extraction_confidence: confidence,
       missing_fields_json: extraction["missing_information"] ?? [],
       red_flags_json: extraction["red_flags"] ?? [],
+      version_metadata: {
+        model: EXTRACTION_MODEL,
+        prompt: "extraction-v1",
+        taxonomy: TAXONOMY_VERSION,
+        appetite: "not_applicable",
+        extraction: String((extraction as { schema_version?: unknown }).schema_version ?? "unknown"),
+      },
     })
     .select("id")
     .single();

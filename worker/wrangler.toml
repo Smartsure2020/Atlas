@@ -1,6 +1,6 @@
 name = "atlas-worker"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
+compatibility_date = "2026-07-27"
 compatibility_flags = ["nodejs_compat"]
 
 # Secrets (set via `wrangler secret put`, NEVER committed):
@@ -18,7 +18,41 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ATLAS_DOC_RETENTION_DAYS = "7"   # configurable retention window for client docs
 ATLAS_ENV = "development"        # set to "production" in deployed Atlas
+ATLAS_CLEANUP_APPROVED = "false"
 
-# The daily document-expiry cron lands here in the retention phase:
-# [triggers]
-# crons = ["0 2 * * *"]
+[triggers]
+# The queue worker polls every minute. Cleanup and alert escalation are
+# idempotent and remain protected by manager approval and RLS.
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# Wrangler does NOT inherit [vars] (or anything else) into named environments —
+# each [env.X] section is self-contained and must redeclare every var it needs.
+# Deploy with `wrangler deploy --env production`.
+[env.production]
+name = "atlas-worker-production"
+
+[env.production.triggers]
+crons = ["* * * * *"]
+
+[env.production.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.production.vars]
+ATLAS_ENV = "production"
+ATLAS_DOC_RETENTION_DAYS = "7"
+# Required before deploy — background scanning fails closed without it in production:
+ATLAS_MALWARE_SCANNER_URL = "https://scanner.yourcompany.com/scan"
+# ATLAS_MALWARE_SCANNER_TOKEN is a secret — set via:
+#   wrangler secret put ATLAS_MALWARE_SCANNER_TOKEN --env production
+# Flip to "true" only after retention policy is approved:
+ATLAS_CLEANUP_APPROVED = "false"
+ATLAS_WORKER_BATCH_SIZE = "5"
+ATLAS_STUCK_JOB_MINUTES = "20"
+ATLAS_ALERT_ESCALATE_MINUTES = "30"
+# Optional — escalation delivery target:
+# ATLAS_ALERT_WEBHOOK_URL = "https://hooks.yourcompany.com/atlas-alerts"

@@ -15,6 +15,15 @@ export function validateQuoteDecision(input: {
     input.decisionChoice === "proceed" ||
     input.decisionChoice === "override" ||
     input.decisionStatus === "ready_for_quote";
+  if (input.decisionChoice === "refer" && !input.decisionReason?.trim()) {
+    return "referral_notes_required";
+  }
+  if (input.decisionChoice === "decline" && !input.decisionReason?.trim()) {
+    return "declined_reason_required";
+  }
+  if (input.decisionChoice === "override" && !input.decisionReason?.trim()) {
+    return "override_reason_required";
+  }
   if (
     reviewStatus === "declined" &&
     isProceeding &&

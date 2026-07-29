@@ -95,6 +95,9 @@ export function validateEnv(env: Env): string[] {
     if (!env.CORS_ORIGIN || isLocalUrl(env.CORS_ORIGIN)) {
       problems.push("production_cors_origin_is_local_or_missing");
     }
+    if (!env.ATLAS_MALWARE_SCANNER_URL || !env.ATLAS_MALWARE_SCANNER_TOKEN) {
+      problems.push("production_malware_scanner_missing");
+    }
   }
   return problems;
 }

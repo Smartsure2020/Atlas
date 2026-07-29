@@ -16,7 +16,7 @@
  * routes slot in here behind the same authorise() gate.
  */
 
-import { authorise, audit, adminClient, json, jsonError } from "./auth";
+import { authorise, audit, adminClient, json, jsonError, type AtlasUser } from "./auth";
 import { handleLogin, handleCallback } from "./oauth";
 import { handleExtract } from "./extract-endpoint";
 import { handleGetSubmission, handleReview } from "./submission-endpoints";
@@ -79,6 +79,10 @@ import {
   handleUpdateAlert,
 } from "./phase8-endpoints";
 import { buildHealthBody } from "./phase7-core";
+import { emailsForUserIds } from "./user-directory";
+import { runBackgroundMaintenance } from "./phase4-background";
+import { beginJob } from "./phase7-jobs";
+import { canAccessSubmission, canViewAllSubmissions, scopedSubmissionOr } from "./access-scope";
 
 // ---------------------------------------------------------------------------
 // CORS — the Vite dev server (:5173) and the worker (:8787) are different
@@ -87,18 +91,25 @@ import { buildHealthBody } from "./phase7-core";
 // before the browser will send the real request.
 // ---------------------------------------------------------------------------
 
-function corsHeaders(env: Env): Record<string, string> {
+const LOCAL_DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"];
+
+function corsHeaders(env: Env, requestOrigin?: string | null): Record<string, string> {
+  const configuredOrigin = env.CORS_ORIGIN;
+  const allowedOrigins = configuredOrigin && !LOCAL_DEV_ORIGINS.includes(configuredOrigin)
+    ? [configuredOrigin]
+    : LOCAL_DEV_ORIGINS;
   return {
-    "Access-Control-Allow-Origin": env.CORS_ORIGIN ?? "http://localhost:5173",
+    "Access-Control-Allow-Origin": requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : allowedOrigins[0],
+    "Vary": "Origin",
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, apikey, x-client-info",
     "Access-Control-Max-Age": "86400",
   };
 }
 
-function withCors(res: Response, env: Env): Response {
+function withCors(res: Response, env: Env, requestOrigin?: string | null): Response {
   const h = new Headers(res.headers);
-  for (const [k, v] of Object.entries(corsHeaders(env))) h.set(k, v);
+  for (const [k, v] of Object.entries(corsHeaders(env, requestOrigin))) h.set(k, v);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
 }
 
@@ -109,9 +120,14 @@ const CLIENT_DOCS_BUCKET = "atlas-client-docs";
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders(env) });
+      return new Response(null, { status: 204, headers: corsHeaders(env, request.headers.get("Origin")) });
     }
-    return withCors(await route(request, env), env);
+    return withCors(await route(request, env), env, request.headers.get("Origin"));
+  },
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runBackgroundMaintenance(env).catch((error) => {
+      console.error("atlas_background_maintenance_failed", { error_name: (error as Error)?.name });
+    }));
   },
 };
 
@@ -153,7 +169,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
       // Collection routes
       if (pathname === "/api/submissions" && request.method === "GET") {
-        return listSubmissions(env, user);
+        return listSubmissions(request, env, user);
       }
       if (pathname === "/api/submissions" && request.method === "POST") {
         if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot create submissions.");
@@ -222,6 +238,9 @@ async function route(request: Request, env: Env): Promise<Response> {
       if (m) {
         const id = m[1];
         const sub = m[2];
+        if (!(await canAccessSubmission(env, user, id))) {
+          return jsonError("not_found", 404, "Submission not found.");
+        }
         if (!sub && request.method === "GET") {
           return handleGetSubmission(id, env, user);
         }
@@ -402,37 +421,93 @@ async function route(request: Request, env: Env): Promise<Response> {
 
 /** GET /api/submissions — list for the dashboard board. */
 async function listSubmissions(
+  request: Request,
   env: Env,
-  _user: { id: string; role: string }
+  user: AtlasUser
 ): Promise<Response> {
   const admin = adminClient(env);
+  const params = new URL(request.url).searchParams;
+  const q = (params.get("q") ?? "").replace(/[,%()]/g, " ").trim().slice(0, 80);
+  const status = params.get("status");
+  const queueStatus = params.get("queue_status");
+  const lineOfBusiness = params.get("line_of_business");
+  const priority = params.get("priority");
+  const sort = params.get("sort") === "oldest" ? "created_at" : "created_at";
+  const ascending = params.get("sort") === "oldest";
   const baseColumns =
-    "id, broker_name, client_name, request_type, status, assigned_underwriter, created_at";
+    "id, broker_name, client_name, request_type, status, assigned_underwriter, created_at, updated_at";
   const phase7Columns = `${baseColumns}, assigned_to, assigned_at, assigned_by, queue_status`;
-  const { data, error } = await admin
-    .from("atlas_submissions")
-    .select(phase7Columns)
-    .order("created_at", { ascending: false });
+  const phase1Columns = `${phase7Columns}, line_of_business, priority, next_action, due_at`;
 
-  if (!error) return json({ ok: true, submissions: data ?? [] });
+  let query = admin
+    .from("atlas_submissions")
+    .select(phase1Columns);
+  if (q) {
+    query = query.or(
+      `client_name.ilike.%${q}%,broker_name.ilike.%${q}%,request_type.ilike.%${q}%`
+    );
+  }
+  if (status) query = query.eq("status", status);
+  if (queueStatus) query = query.eq("queue_status", queueStatus);
+  if (lineOfBusiness) query = query.eq("line_of_business", lineOfBusiness);
+  if (priority) query = query.eq("priority", priority);
+  if (!canViewAllSubmissions(env, user)) query = query.or(scopedSubmissionOr(user));
+  const { data, error } = await query.order(sort, { ascending }).limit(500);
+
+  if (!error) return withAssigneeEmails(admin, data ?? []);
 
   // Local/dev databases may not have Phase 7 assignment columns until migration
   // 0013 is applied. Keep the shared queue usable and return null assignment
   // fields rather than failing the whole dashboard.
-  const { data: fallback, error: fallbackError } = await admin
+  let fallbackQuery = admin
     .from("atlas_submissions")
-    .select(baseColumns)
-    .order("created_at", { ascending: false });
+    .select(phase7Columns);
+  if (q) {
+    fallbackQuery = fallbackQuery.or(
+      `client_name.ilike.%${q}%,broker_name.ilike.%${q}%,request_type.ilike.%${q}%`
+    );
+  }
+  if (status) fallbackQuery = fallbackQuery.eq("status", status);
+  if (queueStatus) fallbackQuery = fallbackQuery.eq("queue_status", queueStatus);
+  if (priority) fallbackQuery = fallbackQuery.eq("priority", priority);
+  if (!canViewAllSubmissions(env, user)) fallbackQuery = fallbackQuery.or(scopedSubmissionOr(user));
+  const { data: fallback, error: fallbackError } = await fallbackQuery
+    .order(sort, { ascending })
+    .limit(500);
 
   if (fallbackError) return json({ error: "list_failed" }, 500);
-  return json({
-    ok: true,
-    submissions: (fallback ?? []).map((row: Record<string, unknown>) => ({
+  return withAssigneeEmails(admin, (fallback ?? []).map((row: Record<string, unknown>) => ({
       ...row,
       assigned_to: row.assigned_underwriter ?? null,
       assigned_at: null,
       assigned_by: null,
       queue_status: row.status ?? null,
+      line_of_business: null,
+      priority: "normal",
+      next_action: row.status === "new" ? "Review intake" : null,
+      due_at: null,
+    })));
+}
+
+async function withAssigneeEmails(
+  admin: ReturnType<typeof adminClient>,
+  rows: unknown[]
+): Promise<Response> {
+  const typedRows = rows as Record<string, unknown>[];
+  const ids = typedRows
+    .map((row) => row.assigned_to ?? row.assigned_underwriter)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  const emails = await emailsForUserIds(admin, ids);
+  return json({
+    ok: true,
+    submissions: typedRows.map((row) => ({
+      ...row,
+      assigned_to_email:
+        typeof row.assigned_to === "string"
+          ? emails.get(row.assigned_to) ?? null
+          : typeof row.assigned_underwriter === "string"
+          ? emails.get(row.assigned_underwriter) ?? null
+          : null,
     })),
   });
 }
@@ -449,6 +524,7 @@ async function createSubmission(
     client_name?: string;
     request_type?: string;
     broker_email_body?: string;
+    line_of_business?: "personal" | "commercial";
     assigned_underwriter?: string;
     assigned_to?: string | null;
   } | null;
@@ -461,6 +537,9 @@ async function createSubmission(
     client_name: body.client_name ?? null,
     request_type: body.request_type ?? null,
     broker_email_body: body.broker_email_body ?? null,
+    line_of_business: body.line_of_business ?? null,
+    priority: "normal",
+    next_action: "Review intake",
     assigned_underwriter: body.assigned_underwriter ?? null,
     assigned_to: body.assigned_to ?? body.assigned_underwriter ?? null,
     assigned_at: body.assigned_to || body.assigned_underwriter ? new Date().toISOString() : null,
@@ -483,6 +562,9 @@ async function createSubmission(
       assigned_at: _assignedAt,
       assigned_by: _assignedBy,
       queue_status: _queueStatus,
+      line_of_business: _lineOfBusiness,
+      priority: _priority,
+      next_action: _nextAction,
       ...legacyInsertRow
     } = insertRow;
     const { data: fallback, error: fallbackError } = await admin
@@ -515,7 +597,7 @@ async function createSubmission(
 async function signUpload(
   request: Request,
   env: Env,
-  _user: { id: string; role: string }
+  user: AtlasUser
 ): Promise<Response> {
   const body = (await request.json().catch(() => null)) as {
     submission_id?: string;
@@ -549,6 +631,9 @@ async function signUpload(
     .eq("id", body.submission_id)
     .single();
   if (!submission) return jsonError("not_found", 404, "Submission not found.");
+  if (!(await canAccessSubmission(env, user, body.submission_id))) {
+    return jsonError("not_found", 404, "Submission not found.");
+  }
 
   // Key files under the submission id so cleanup and access are scoped.
   const path = `${body.submission_id}/${crypto.randomUUID()}-${validation.fileName}`;
@@ -576,7 +661,7 @@ async function signUpload(
 async function confirmUpload(
   request: Request,
   env: Env,
-  user: { id: string; role: string }
+  user: AtlasUser
 ): Promise<Response> {
   const body = (await request.json().catch(() => null)) as {
     submission_id?: string;
@@ -609,6 +694,9 @@ async function confirmUpload(
   }
 
   const admin = adminClient(env);
+  if (!(await canAccessSubmission(env, user, body.submission_id))) {
+    return jsonError("not_found", 404, "Submission not found.");
+  }
 
   // Configurable retention window — file becomes eligible for deletion then.
   const expiresAt = new Date(
@@ -623,6 +711,7 @@ async function confirmUpload(
       storage_path: body.storage_path,
       document_type: body.document_type ?? null,
       status: "active",
+      scan_status: "pending",
       uploaded_by: user.id,
       expires_at: expiresAt,
       file_hash: body.file_hash ?? null,
@@ -633,6 +722,24 @@ async function confirmUpload(
     .single();
 
   if (docErr || !doc) return jsonError("upload_failed", 500, "Upload completed but Atlas could not record the document.");
+
+  const scanJob = await beginJob(admin, {
+    submissionId: body.submission_id,
+    documentId: doc.id,
+    jobType: "malware_scan",
+    createdBy: user.id,
+    metadata: {
+      bucket: CLIENT_DOCS_BUCKET,
+      storage_path: body.storage_path,
+      file_name: validation.fileName,
+      content_type: validation.contentType,
+    },
+  });
+  if (scanJob.action !== "queued") {
+    await admin.storage.from(CLIENT_DOCS_BUCKET).remove([body.storage_path]);
+    await admin.from("atlas_documents").delete().eq("id", doc.id);
+    return jsonError("upload_failed", 500, "Upload could not be queued for malware scanning.");
+  }
 
   await audit(env, {
     submissionId: body.submission_id,
@@ -645,12 +752,15 @@ async function confirmUpload(
       file_name: validation.fileName,
       expires_at: expiresAt,
       file_hash_present: Boolean(body.file_hash),
+      scan_status: "pending",
     },
   });
 
   return json({
     ok: true,
     document_id: doc.id,
+    scan_job_id: scanJob.jobId,
+    scan_status: "pending",
     expires_at: expiresAt,
   });
 }

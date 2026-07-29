@@ -1,18 +1,23 @@
 import { adminClient, audit, json, type AtlasUser } from "./auth";
 import type { Env } from "./config";
 import type { AppetiteRow } from "./matcher-types";
+import { TAXONOMY_VERSION } from "./taxonomy";
 import { buildQuoteReview } from "./quote-review";
 import {
   beginJob,
   buildQuoteReviewFingerprint,
   completeJob,
   failJob,
+  queuedJobResponse,
+  isJobCancellationRequested,
+  updateJobProgress,
 } from "./phase7-jobs";
 
 interface RunQuoteReviewInput {
   recommendation_id?: string;
   insurer_id?: string | null;
   force?: boolean;
+  background_job_id?: string;
 }
 
 export async function handleRunQuoteReview(
@@ -77,10 +82,11 @@ export async function handleRunQuoteReview(
 
   const { data: docs } = await admin
     .from("atlas_documents")
-    .select("document_type, file_name")
+    .select("document_type, file_name, scan_status")
     .eq("submission_id", submissionId)
-    .eq("status", "active");
-  const availableDocuments = ((docs ?? []) as { document_type: string | null; file_name: string | null }[])
+    .eq("status", "active")
+    .in("scan_status", ["clean", "not_scanned"]);
+  const availableDocuments = ((docs ?? []) as { document_type: string | null; file_name: string | null; scan_status?: string | null }[])
     .flatMap((d) => [d.document_type, d.file_name])
     .filter((x: string | null): x is string => typeof x === "string" && x.trim().length > 0);
 
@@ -118,10 +124,16 @@ export async function handleRunQuoteReview(
       metadata: {
         extraction_id: extraction.id,
         recommendation_id: recommendation?.id ?? null,
+        insurer_id: insurerId,
         active_rules: appetite.length,
+        request: {
+          recommendation_id: body.recommendation_id ?? recommendation?.id ?? null,
+          insurer_id: insurerId,
+          force: body.force === true,
+        },
       },
     },
-    { force: body.force === true }
+    { force: body.force === true, existingJobId: body.background_job_id }
   );
   if (job.action === "unchanged_completed") {
     return json({
@@ -136,6 +148,15 @@ export async function handleRunQuoteReview(
   if (job.action === "duplicate_running") {
     return json({ error: "job_already_running", detail: job.message, job_id: job.previousJobId }, 409);
   }
+  if (job.action === "cancelled") {
+    return json({ error: "job_cancelled", detail: job.message, job_id: job.jobId }, 409);
+  }
+  if (job.action === "queued") return queuedJobResponse(job, "quote_review");
+
+  await updateJobProgress(admin, job.jobId, 25, "checking_quote_against_appetite");
+  if (await isJobCancellationRequested(admin, job.jobId)) {
+    return json({ error: "job_cancelled", job_id: job.jobId }, 409);
+  }
 
   const reviewedJson = extraction.reviewed_json as Record<string, unknown>;
   const result = buildQuoteReview({
@@ -144,6 +165,7 @@ export async function handleRunQuoteReview(
     appetite,
     availableDocuments,
   });
+  await updateJobProgress(admin, job.jobId, 75, "saving_quote_review");
 
   const snapshot = {
     extraction_id: extraction.id,
@@ -168,6 +190,13 @@ export async function handleRunQuoteReview(
       created_by: user.id,
       reviewed_by: user.id,
       review_snapshot: snapshot,
+      version_metadata: {
+        model: "deterministic_quote_review",
+        prompt: "quote-review-rules-v1",
+        taxonomy: TAXONOMY_VERSION,
+        appetite: inputFp,
+        extraction: String((reviewedJson as { schema_version?: unknown }).schema_version ?? "unknown"),
+      },
     })
     .select("id")
     .single();

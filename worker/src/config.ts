@@ -55,6 +55,18 @@ export interface Env {
 
   // Explicit environment guard for dev-only routes and production validation.
   ATLAS_ENV?: "development" | "staging" | "production" | string;
+
+  // Production controls. Scanner and webhook values are secrets/configured
+  // outside source control; the background worker fails closed when scanning
+  // is not configured in production.
+  ATLAS_MALWARE_SCANNER_URL?: string;
+  ATLAS_MALWARE_SCANNER_TOKEN?: string;
+  ATLAS_ALERT_WEBHOOK_URL?: string;
+  ATLAS_STRICT_ACCESS_SCOPING?: string;
+  ATLAS_CLEANUP_APPROVED?: string;
+  ATLAS_WORKER_BATCH_SIZE?: string;
+  ATLAS_STUCK_JOB_MINUTES?: string;
+  ATLAS_ALERT_ESCALATE_MINUTES?: string;
 }
 
 export type AtlasRole = "underwriter" | "consultant" | "manager" | "admin" | "readonly";
@@ -96,4 +108,8 @@ export function resolveRoleFromAllowlist(
 export function retentionDays(env: Env): number {
   const n = Number(env.ATLAS_DOC_RETENTION_DAYS);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_RETENTION_DAYS;
+}
+
+export function strictAccessScoping(env: Env): boolean {
+  return env.ATLAS_STRICT_ACCESS_SCOPING === "true" || env.ATLAS_ENV === "production";
 }

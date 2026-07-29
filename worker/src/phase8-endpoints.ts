@@ -150,7 +150,7 @@ export async function handleConfirmCleanupCandidate(candidateId: string, request
       approved_at: body.action === "approve" ? new Date().toISOString() : null,
       metadata: {
         ...((candidate as { metadata?: Record<string, unknown> | null }).metadata ?? {}),
-        phase8_note: "Approval records intent only. Automatic storage deletion is deferred until a dedicated cleanup worker is enabled.",
+        phase8_note: "The background worker deletes this candidate only after manager approval and rechecks that active documents remain protected.",
       },
     })
     .eq("id", candidateId);

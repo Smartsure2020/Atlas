@@ -31,13 +31,15 @@ const RETRYABLE_CODES = new Set([
   "anthropic_502",
   "anthropic_503",
   "anthropic_504",
+  "scan_source_unavailable",
+  "scanner_unavailable",
 ]);
 
 export function isRetryableError(code: string | null | undefined): boolean {
   if (!code) return false;
   if (NON_RETRYABLE_CODES.has(code)) return false;
   if (RETRYABLE_CODES.has(code)) return true;
-  return /^anthropic_5\d\d$/.test(code) || /^http_5\d\d$/.test(code);
+  return /^anthropic_5\d\d$/.test(code) || /^http_5\d\d$/.test(code) || /^scanner_http_5\d\d$/.test(code);
 }
 
 export function nextRetryAt(params: {

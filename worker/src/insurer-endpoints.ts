@@ -27,7 +27,11 @@ import {
   buildGuidelineFingerprint,
   completeJob,
   failJob,
+  queuedJobResponse,
+  isJobCancellationRequested,
+  updateJobProgress,
 } from "./phase7-jobs";
+import { TAXONOMY_VERSION } from "./taxonomy";
 
 const INSURER_DOCS_BUCKET = "atlas-insurer-docs";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -166,7 +170,7 @@ export async function handleGetInsurer(
   const { data: documents } = await admin
     .from("atlas_insurer_documents")
     .select(
-      "id, file_name, document_kind, processing_status, processed_at, " +
+      "id, file_name, document_kind, processing_status, scan_status, processed_at, " +
         "proposed_count, processing_error, created_at"
     )
     .eq("insurer_id", insurerId)
@@ -285,7 +289,8 @@ export async function handleConfirmInsurerDoc(
       insurer_id: insurerId,
       file_name: validation.fileName,
       storage_path: body.storage_path,
-      document_kind: body.document_kind ?? "guideline",
+    document_kind: body.document_kind ?? "guideline",
+      scan_status: "pending",
       uploaded_by: user.id,
       processing_status: "awaiting_processing",
       file_hash: body.file_hash ?? null,
@@ -295,6 +300,24 @@ export async function handleConfirmInsurerDoc(
     .select("id")
     .single();
   if (docErr || !doc) return json({ error: "doc_row_failed" }, 500);
+
+  const scanJob = await beginJob(admin, {
+    documentId: doc.id,
+    insurerId,
+    jobType: "malware_scan",
+    createdBy: user.id,
+    metadata: {
+      bucket: INSURER_DOCS_BUCKET,
+      storage_path: body.storage_path,
+      file_name: validation.fileName,
+      content_type: validation.contentType,
+    },
+  });
+  if (scanJob.action !== "queued") {
+    await admin.storage.from(INSURER_DOCS_BUCKET).remove([body.storage_path]);
+    await admin.from("atlas_insurer_documents").delete().eq("id", doc.id);
+    return json({ error: "scan_queue_failed" }, 500);
+  }
 
   await audit(env, {
     action: "insurer_document_uploaded",
@@ -311,6 +334,8 @@ export async function handleConfirmInsurerDoc(
   return json({
     ok: true,
     document_id: doc.id,
+    scan_job_id: scanJob.jobId,
+    scan_status: "pending",
   });
 }
 
@@ -328,17 +353,19 @@ export async function handleProcessInsurerDoc(
 ): Promise<Response> {
   const guard = requireAdmin(user);
   if (guard) return guard;
-  const body = (await request.json().catch(() => ({}))) as { force?: boolean };
+  const body = (await request.json().catch(() => ({}))) as { force?: boolean; background_job_id?: string };
 
   const admin = adminClient(env);
 
   // Fetch document + insurer name (denormalised onto appetite rows for reads).
   const { data: doc } = await admin
     .from("atlas_insurer_documents")
-    .select("id, insurer_id, file_name, storage_path, processing_status")
+    .select("id, insurer_id, file_name, storage_path, processing_status, scan_status")
     .eq("id", documentId)
     .single();
   if (!doc) return json({ error: "document_not_found" }, 404);
+  if (doc.scan_status === "pending") return json({ error: "malware_scan_pending" }, 409);
+  if (doc.scan_status === "infected") return json({ error: "malware_detected" }, 409);
 
   const { data: insurer } = await admin
     .from("atlas_insurers")
@@ -359,9 +386,13 @@ export async function handleProcessInsurerDoc(
       jobType: "guideline_ingestion",
       inputFingerprint: inputFp,
       createdBy: user.id,
-      metadata: { insurer_id: doc.insurer_id, file_name: doc.file_name },
+      metadata: {
+        insurer_id: doc.insurer_id,
+        file_name: doc.file_name,
+        request: { force: body.force === true },
+      },
     },
-    { force: body.force === true }
+    { force: body.force === true, existingJobId: body.background_job_id }
   );
   if (job.action === "unchanged_completed") {
     return json({
@@ -376,6 +407,12 @@ export async function handleProcessInsurerDoc(
   if (job.action === "duplicate_running") {
     return json({ error: "job_already_running", detail: job.message, job_id: job.previousJobId }, 409);
   }
+  if (job.action === "cancelled") {
+    return json({ error: "job_cancelled", detail: job.message, job_id: job.jobId }, 409);
+  }
+  if (job.action === "queued") return queuedJobResponse(job, "guideline_ingestion");
+
+  await updateJobProgress(admin, job.jobId, 20, "reading_guideline_document");
 
   // Mark in-flight (defensive; sync flow is short, but this surfaces stuck rows).
   await admin
@@ -400,6 +437,14 @@ export async function handleProcessInsurerDoc(
   }
 
   const b64 = toBase64(await file.arrayBuffer());
+  await updateJobProgress(admin, job.jobId, 45, "generating_appetite_proposals");
+  if (await isJobCancellationRequested(admin, job.jobId)) {
+    await admin
+      .from("atlas_insurer_documents")
+      .update({ processing_status: "awaiting_processing", processing_error: "cancelled" })
+      .eq("id", documentId);
+    return json({ error: "job_cancelled", job_id: job.jobId }, 409);
+  }
 
   // Call Claude. Native PDF block for accuracy (no in-Worker parsing).
   let parsed: unknown;
@@ -486,6 +531,8 @@ export async function handleProcessInsurerDoc(
     return json({ error: "invalid_shape" }, 502);
   }
 
+  await updateJobProgress(admin, job.jobId, 80, "saving_proposed_appetite");
+
   // Insert proposed rows (is_active=false) and snapshot 'created' for each.
   let inserted = 0;
   for (const rule of validated.rules) {
@@ -511,8 +558,15 @@ export async function handleProcessInsurerDoc(
         source_file_name: doc.file_name,
         ingestion_confidence: rule.confidence,
         source: "ai_extracted",
-        source_document_id: documentId,
-        is_active: false,
+      source_document_id: documentId,
+      is_active: false,
+        version_metadata: {
+          model: APPETITE_MODEL,
+          prompt: "appetite-ingestion-v2",
+          taxonomy: TAXONOMY_VERSION,
+          appetite: inputFp,
+          extraction: "not_applicable",
+        },
       })
       .select("id")
       .single();
@@ -528,6 +582,13 @@ export async function handleProcessInsurerDoc(
       processed_at: new Date().toISOString(),
       proposed_count: inserted,
       processing_error: null,
+      version_metadata: {
+        model: APPETITE_MODEL,
+        prompt: "appetite-ingestion-v2",
+        taxonomy: TAXONOMY_VERSION,
+        appetite: inputFp,
+        extraction: "not_applicable",
+      },
     })
     .eq("id", documentId);
 
