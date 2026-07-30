@@ -7,6 +7,8 @@
  * the recommendation surface, not an easily-removed afterthought.
  */
 
+import { Notice } from "./ui";
+
 const DISCLAIMER_TEXT =
   "Atlas provides decision-support only. Final underwriting decisions, insurer " +
   "selection, pricing, discounts, and quote terms must be reviewed and approved " +
@@ -14,12 +16,9 @@ const DISCLAIMER_TEXT =
 
 export function GovernanceDisclaimer() {
   return (
-    <div className="atlas-disclaimer" role="note" aria-label="Governance notice">
-      <span className="atlas-disclaimer__mark" aria-hidden="true">
-        ⚠
-      </span>
-      <p className="atlas-disclaimer__text">{DISCLAIMER_TEXT}</p>
-    </div>
+    <Notice tone="warning" role="note" title="Decision-support only">
+      {DISCLAIMER_TEXT}
+    </Notice>
   );
 }
 

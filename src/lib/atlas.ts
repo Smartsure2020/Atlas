@@ -84,11 +84,31 @@ export interface SubmissionListItem {
   assigned_at: string | null;
   assigned_by: string | null;
   queue_status: string | null;
+  line_of_business: "personal" | "commercial" | null;
+  priority: "low" | "normal" | "high" | "urgent" | null;
+  next_action: string | null;
+  due_at: string | null;
+  updated_at: string;
+  assigned_to_email: string | null;
   created_at: string;
 }
 
-export function listSubmissions() {
-  return api<{ ok: true; submissions: SubmissionListItem[] }>("/api/submissions");
+export function listSubmissions(filters: {
+  q?: string;
+  status?: string;
+  queue_status?: string;
+  line_of_business?: "personal" | "commercial";
+  priority?: "low" | "normal" | "high" | "urgent";
+  sort?: "newest" | "oldest";
+} = {}) {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  const query = params.toString();
+  return api<{ ok: true; submissions: SubmissionListItem[] }>(
+    `/api/submissions${query ? `?${query}` : ""}`
+  );
 }
 
 export function createSubmission(input: {
@@ -97,6 +117,7 @@ export function createSubmission(input: {
   client_name?: string;
   request_type?: string;
   broker_email_body?: string;
+  line_of_business?: "personal" | "commercial";
 }) {
   return api<{ ok: true; id: string }>("/api/submissions", {
     method: "POST",

@@ -1,0 +1,211 @@
+/* ===========================================================================
+   Atlas — semantic design tokens
+   ---------------------------------------------------------------------------
+   One vocabulary for the whole product. Component CSS must never reach for a
+   raw hex value; it names the role instead (surface, border, danger-ink…).
+   The raw ramps live at the top and are not used directly outside this file.
+
+   Direction: an executive-grade underwriting workbench. Deep navy-charcoal ink,
+   a cool off-white canvas, white elevated surfaces, and Atlas's established
+   teal carried forward as the single primary action colour.
+   =========================================================================== */
+
+:root {
+  /* ---- Raw ramps (internal) --------------------------------------------- */
+  --a-navy-900: #0e1420;
+  --a-navy-800: #161f31;
+  --a-navy-700: #1f2b41;
+  --a-slate-700: #33405a;
+  --a-slate-500: #5b6880;
+  --a-slate-400: #7c889d;
+  --a-slate-300: #aeb8c7;
+  --a-slate-200: #d7dde6;
+  --a-slate-150: #e3e8ee;
+  --a-slate-100: #eef1f5;
+  --a-slate-50: #f6f7f9;
+
+  --a-teal-700: #0a4f4f;
+  --a-teal-600: #0f6e6e;
+  --a-teal-500: #158383;
+  --a-teal-100: #dceceb;
+  --a-teal-50: #eff6f6;
+
+  --a-blue-700: #1d3f6e;
+  --a-blue-600: #26558f;
+  --a-blue-100: #dfe9f5;
+  --a-blue-50: #f0f5fb;
+
+  --a-green-700: #0f5433;
+  --a-green-600: #146c43;
+  --a-green-100: #d8ece0;
+  --a-green-50: #eef7f1;
+
+  --a-amber-700: #6f4800;
+  --a-amber-600: #8a5a00;
+  --a-amber-100: #f6e6c4;
+  --a-amber-50: #fdf6e8;
+
+  --a-orange-700: #85410f;
+  --a-orange-600: #a3521a;
+  --a-orange-100: #f7ddc6;
+  --a-orange-50: #fdf2e9;
+
+  --a-red-700: #85272a;
+  --a-red-600: #9f2f2f;
+  --a-red-100: #f4d5d3;
+  --a-red-50: #fcefee;
+
+  /* ---- Surfaces ---------------------------------------------------------- */
+  --atlas-bg: var(--a-slate-50);
+  --atlas-surface: #ffffff;
+  --atlas-surface-muted: #fafbfc;
+  --atlas-surface-sunken: var(--a-slate-100);
+  --atlas-surface-selected: var(--a-teal-50);
+  --atlas-surface-hover: var(--a-slate-50);
+  --atlas-nav-surface: var(--a-navy-800);
+  --atlas-nav-surface-hover: #202c42;
+  --atlas-nav-surface-active: #24344e;
+  --atlas-overlay: rgba(14, 20, 32, 0.42);
+
+  /* ---- Ink --------------------------------------------------------------- */
+  --atlas-ink: #101623;
+  --atlas-ink-secondary: var(--a-slate-700);
+  --atlas-ink-muted: var(--a-slate-500);
+  --atlas-ink-subtle: var(--a-slate-400);
+  --atlas-ink-inverse: #ffffff;
+  --atlas-nav-ink: #c3cddd;
+  --atlas-nav-ink-active: #ffffff;
+  --atlas-nav-ink-muted: #7f8da4;
+
+  /* ---- Borders ----------------------------------------------------------- */
+  --atlas-border: var(--a-slate-150);
+  --atlas-border-strong: var(--a-slate-200);
+  --atlas-border-stronger: var(--a-slate-300);
+  --atlas-border-nav: #26324a;
+
+  /* ---- Primary action ---------------------------------------------------- */
+  --atlas-primary: var(--a-teal-600);
+  --atlas-primary-hover: var(--a-teal-700);
+  --atlas-primary-ink: var(--a-teal-700);
+  --atlas-primary-surface: var(--a-teal-50);
+  --atlas-primary-border: var(--a-teal-100);
+
+  /* ---- Analytical accent (charts, informational emphasis) ---------------- */
+  --atlas-accent: var(--a-blue-600);
+  --atlas-accent-ink: var(--a-blue-700);
+  --atlas-accent-surface: var(--a-blue-50);
+  --atlas-accent-border: var(--a-blue-100);
+
+  /* ---- Semantic states --------------------------------------------------- */
+  --atlas-success-ink: var(--a-green-700);
+  --atlas-success: var(--a-green-600);
+  --atlas-success-surface: var(--a-green-50);
+  --atlas-success-border: var(--a-green-100);
+
+  --atlas-warning-ink: var(--a-amber-700);
+  --atlas-warning: var(--a-amber-600);
+  --atlas-warning-surface: var(--a-amber-50);
+  --atlas-warning-border: var(--a-amber-100);
+
+  --atlas-referral-ink: var(--a-orange-700);
+  --atlas-referral: var(--a-orange-600);
+  --atlas-referral-surface: var(--a-orange-50);
+  --atlas-referral-border: var(--a-orange-100);
+
+  --atlas-danger-ink: var(--a-red-700);
+  --atlas-danger: var(--a-red-600);
+  --atlas-danger-surface: var(--a-red-50);
+  --atlas-danger-border: var(--a-red-100);
+
+  --atlas-info-ink: var(--a-blue-700);
+  --atlas-info: var(--a-blue-600);
+  --atlas-info-surface: var(--a-blue-50);
+  --atlas-info-border: var(--a-blue-100);
+
+  --atlas-neutral-ink: var(--a-slate-700);
+  --atlas-neutral: var(--a-slate-500);
+  --atlas-neutral-surface: var(--a-slate-100);
+  --atlas-neutral-border: var(--a-slate-200);
+
+  --atlas-disabled-surface: var(--a-slate-100);
+  --atlas-disabled-ink: var(--a-slate-400);
+  --atlas-disabled-border: var(--a-slate-200);
+
+  /* ---- Focus ------------------------------------------------------------- */
+  --atlas-focus-ring: #1c6fb8;
+  --atlas-focus-ring-offset: var(--atlas-surface);
+
+  /* ---- Type -------------------------------------------------------------- */
+  --atlas-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  --atlas-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --atlas-fs-page: 28px;   /* page title */
+  --atlas-fs-section: 20px;/* section title */
+  --atlas-fs-sub: 16px;    /* subsection title */
+  --atlas-fs-body: 14px;   /* standard body */
+  --atlas-fs-dense: 13px;  /* tables and dense UI */
+  --atlas-fs-label: 12px;  /* labels and metadata */
+  --atlas-fs-metric: 26px; /* metric values */
+
+  --atlas-lh-tight: 1.25;
+  --atlas-lh-snug: 1.4;
+  --atlas-lh-normal: 1.55;
+
+  --atlas-fw-regular: 400;
+  --atlas-fw-medium: 500;
+  --atlas-fw-semibold: 600;
+  --atlas-fw-bold: 700;
+
+  /* ---- Spacing scale ----------------------------------------------------- */
+  --atlas-space-1: 4px;
+  --atlas-space-2: 8px;
+  --atlas-space-3: 12px;
+  --atlas-space-4: 16px;
+  --atlas-space-5: 20px;
+  --atlas-space-6: 24px;
+  --atlas-space-8: 32px;
+  --atlas-space-10: 40px;
+  --atlas-space-12: 48px;
+
+  /* ---- Geometry ---------------------------------------------------------- */
+  --atlas-radius-badge: 4px;
+  --atlas-radius-control: 6px;
+  --atlas-radius-card: 10px;
+  --atlas-radius-shell: 12px;
+
+  --atlas-control-h-sm: 30px;
+  --atlas-control-h: 36px;
+  --atlas-control-h-lg: 42px;
+
+  /* ---- Elevation --------------------------------------------------------- */
+  --atlas-shadow-sm: 0 1px 2px rgba(16, 22, 35, 0.05);
+  --atlas-shadow-md: 0 2px 4px rgba(16, 22, 35, 0.06),
+    0 8px 20px rgba(16, 22, 35, 0.06);
+  --atlas-shadow-lg: 0 8px 16px rgba(16, 22, 35, 0.1),
+    0 24px 48px rgba(16, 22, 35, 0.14);
+
+  /* ---- Layout ------------------------------------------------------------ */
+  --atlas-sidebar-w: 236px;
+  --atlas-sidebar-w-collapsed: 60px;
+  --atlas-topbar-h: 56px;
+  --atlas-content-max: 1560px;
+  --atlas-prose-max: 74ch;
+
+  /* ---- Layering ---------------------------------------------------------- */
+  --atlas-z-sticky: 10;
+  --atlas-z-topbar: 20;
+  --atlas-z-sidebar: 30;
+  --atlas-z-overlay: 60;
+  --atlas-z-drawer: 61;
+  --atlas-z-modal: 70;
+  --atlas-z-toast: 80;
+
+  /* ---- Motion ------------------------------------------------------------ */
+  --atlas-dur-fast: 100ms;
+  --atlas-dur: 160ms;
+  --atlas-dur-slow: 240ms;
+  --atlas-ease: cubic-bezier(0.2, 0, 0.2, 1);
+  --atlas-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}

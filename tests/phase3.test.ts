@@ -241,6 +241,36 @@ test("consultant override requires a reason", () => {
   assertEqual(allowed, null, "reasoned override should pass");
 });
 
+test("manual referral requires a decision reason regardless of quote review status", () => {
+  const blocked = validateQuoteDecision({
+    quoteReviewStatus: "info_required",
+    decisionChoice: "refer",
+    decisionStatus: "referred",
+  });
+  assertEqual(blocked, "referral_notes_required", "referral without a reason should be blocked");
+
+  const allowed = validateQuoteDecision({
+    quoteReviewStatus: "info_required",
+    decisionChoice: "refer",
+    decisionStatus: "referred",
+    decisionReason: "Senior underwriting authority required.",
+  });
+  assertEqual(allowed, null, "referral with a reason should pass");
+});
+
+test("declines and overrides require a decision reason", () => {
+  assertEqual(
+    validateQuoteDecision({ quoteReviewStatus: "info_required", decisionChoice: "decline", decisionStatus: "closed" }),
+    "declined_reason_required",
+    "decline without a reason should be blocked"
+  );
+  assertEqual(
+    validateQuoteDecision({ quoteReviewStatus: "info_required", decisionChoice: "override", decisionStatus: "ready_for_quote" }),
+    "override_reason_required",
+    "override without a reason should be blocked"
+  );
+});
+
 // ---- Decision gate: ruled-out override enforcement (server-resolved) ----
 
 const gateRecommendation: RecommendationForGate = {

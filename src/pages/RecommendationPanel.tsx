@@ -1,312 +1,702 @@
 /**
- * Atlas Blueprint — Recommendation panel
+ * Atlas — insurer recommendation
  * ----------------------------------------------------------------------------
- * Drops into SubmissionDetail.tsx as its own section, beneath the extraction.
- * This is the surface where Phase 2B's matcher output lands — and where the
- * GovernanceDisclaimer finally renders for the first time, as a fixed element
- * at the top, never dismissible.
+ * The surface where the matcher's output lands. Its job is to make a complex
+ * appetite decision legible at a glance while keeping every piece of evidence
+ * one click away.
  *
- * States:
- *   - no extraction yet         → quiet placeholder (parent has the extract UI)
- *   - extraction not reviewed   → run button disabled, hint to review first
- *   - reviewed, no rec yet      → run button enabled
- *   - running                   → "Computing recommendation…"
- *   - cached recommendation     → full render + re-run button
- *   - error                     → inline error + retry
+ * The structural change from the previous version: a hard appetite failure no
+ * longer looks like a soft concern. Blockers, referral triggers, concerns and
+ * strengths are separate, differently-weighted groups, each stating the issue,
+ * why it matters, and what to do about it.
+ *
+ * The governance disclaimer renders unconditionally, above everything.
  */
 
-import { useEffect, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { GovernanceDisclaimer } from "../components/GovernanceDisclaimer";
 import {
-  getRecommendation,
+  Button,
+  Card,
+  Disclosure,
+  EmptyState,
+  Notice,
+  Reason,
+  SourceReference,
+  StatusBadge,
+  useToast,
+} from "../components/ui";
+import {
   runRecommendation,
   type Recommendation,
   type ScoredInsurer,
 } from "../lib/recommendations";
-
-interface Props {
-  submissionId: string;
-  /** From the submission detail load: whether an extraction exists at all, and
-   *  whether its reviewed_json is set. Used to gate the Run button. */
-  extractionExists: boolean;
-  extractionReviewed: boolean;
-  /** Bumps when the parent saves a review, so we can refresh state. */
-  reviewVersion?: number;
-}
+import type { MissingInfoItem } from "../lib/phase4";
+import { appetiteBand } from "../lib/status";
+import { formatDateTime } from "../lib/format";
+import type { SubmissionTab } from "../lib/router";
 
 export default function RecommendationPanel({
   submissionId,
+  recommendation,
   extractionExists,
   extractionReviewed,
-  reviewVersion = 0,
-}: Props) {
-  const [loading, setLoading] = useState(true);
-  const [recommendation, setRecommendation] = useState<Recommendation | null>(null);
+  openMissingInfo,
+  onRefresh,
+  onGoToTab,
+}: {
+  submissionId: string;
+  recommendation: Recommendation | null;
+  extractionExists: boolean;
+  extractionReviewed: boolean;
+  openMissingInfo: MissingInfoItem[];
+  onRefresh: () => Promise<void> | void;
+  onGoToTab: (tab: SubmissionTab) => void;
+}) {
+  const toast = useToast();
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [view, setView] = useState<"ranked" | "compare">("ranked");
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await getRecommendation(submissionId);
-      setRecommendation(res.recommendation);
-    } catch {
-      // Quiet on initial load — most likely "no recommendation yet" rather
-      // than a real failure; the user will retry via the run button.
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [submissionId, reviewVersion]);
-
-  async function onRun(force = false) {
+  async function run(force = false) {
     setRunning(true);
     setError(null);
+    setNotice(null);
     try {
-      const res = await runRecommendation(submissionId, { force });
-      if (res.skipped && res.message) setError(res.message);
-      await load();
-    } catch (e) {
-      const msg = (e as Error).message;
+      const result = await runRecommendation(submissionId, { force });
+      if (result.skipped && result.message) {
+        setNotice(result.message);
+      } else {
+        toast.notify("Recommendation updated.", "success");
+      }
+      await onRefresh();
+    } catch (cause) {
+      const message = (cause as Error).message;
       setError(
-        msg === "extraction_not_reviewed"
-          ? "Review the extraction before running a recommendation."
-          : msg === "no_extraction"
-          ? "Run the extraction first."
-          : msg === "matrix_empty"
-          ? "No active appetite rules in the matrix yet — a manager needs to populate the Insurers section."
-          : "Could not compute the recommendation. Please try again."
+        message === "extraction_not_reviewed"
+          ? "Review the extracted risk information before running a recommendation."
+          : message === "no_extraction"
+          ? "Run the extraction before running a recommendation."
+          : message === "matrix_empty"
+          ? "There are no active appetite rules in the matrix. A manager needs to add insurer guidelines before Atlas can recommend anything."
+          : "The recommendation could not be computed. Check the processing screen for the failure reason, then try again."
       );
     } finally {
       setRunning(false);
     }
   }
 
-  // -- Initial loading shimmer is brief; only show if it actually takes a moment --
-  if (loading && !recommendation) {
-    return null; // don't flash an empty panel
-  }
-
-  // No extraction at all → parent screen surfaces the Extract button; we're quiet.
   if (!extractionExists) {
-    return null;
+    return (
+      <Card>
+        <EmptyState
+          title="No recommendation yet"
+          body="Atlas needs an extraction before it can check the risk against insurer appetite. Start on the risk information tab."
+          actions={
+            <Button iconAfter="arrow-right" onClick={() => onGoToTab("risk")}>
+              Open risk information
+            </Button>
+          }
+        />
+      </Card>
+    );
   }
 
-  // Header: always shows the disclaimer above any recommendation content, even
-  // when there's nothing to recommend yet. The disclaimer is unconditional.
+  const secondary = recommendation?.secondary_options_json ?? [];
+  const ruledOut = recommendation?.not_recommended_json ?? [];
+  const top = recommendation?.reasoning_json.top ?? null;
+  const allInsurers = [...(top ? [top] : []), ...secondary, ...ruledOut];
+
   return (
-    <div className="atlas-card atlas-reco">
+    <div className="atlas-stack">
       <GovernanceDisclaimer />
 
-      <div className="atlas-card__head">
-        <h3 className="atlas-h3">Insurer recommendation</h3>
-        <div className="atlas-card__actions">
-          {recommendation && (
-            <span className="atlas-muted" style={{ fontSize: 12 }}>
-              {new Date(recommendation.created_at).toLocaleString()}
-            </span>
-          )}
-          <button
-            className="atlas-btn atlas-btn--primary atlas-btn--small"
-            onClick={() => onRun()}
-            disabled={running || !extractionReviewed}
-            title={
-              !extractionReviewed
-                ? "Review the extraction before running a recommendation."
-                : recommendation
-                ? "Re-run against the current reviewed extraction."
-                : ""
-            }
-          >
-            {running
-              ? "Computing…"
-              : recommendation
-              ? "Re-run recommendation"
-              : "Run recommendation"}
-          </button>
-          {recommendation && (
-            <button
-              className="atlas-btn atlas-btn--small"
-              onClick={() => onRun(true)}
-              disabled={running || !extractionReviewed}
-              title="Force a new run even if Atlas thinks inputs are unchanged."
-            >
-              Force rerun
-            </button>
-          )}
-        </div>
-      </div>
-
       {!extractionReviewed && (
-        <div
-          className="atlas-disclaimer"
-          role="note"
-          style={{ marginTop: 0 }}
-        >
-          <span className="atlas-disclaimer__mark" aria-hidden="true">ⓘ</span>
-          <div className="atlas-disclaimer__text">
-            <strong>Review the extraction before running a recommendation.</strong>
-            <ol style={{ margin: "6px 0 0 18px", padding: 0, fontSize: 13 }}>
-              <li>Click <em>Correct</em> on the risk summary above.</li>
-              <li>Edit anything Claude misread, then click <em>Save corrections</em>.</li>
-              <li>The <em>Run recommendation</em> button below will enable.</li>
-            </ol>
+        <Notice tone="warning" title="Review the risk information first">
+          Atlas will not run a recommendation against an unreviewed extraction. Open the risk
+          information tab, correct anything it misread, and save your corrections — this button
+          unlocks as soon as you do.
+          <div style={{ marginTop: 8 }}>
+            <Button size="sm" iconAfter="arrow-right" onClick={() => onGoToTab("risk")}>
+              Open risk information
+            </Button>
           </div>
-        </div>
+        </Notice>
       )}
 
-      {error && <div className="atlas-inline-error" style={{ marginTop: 12 }}>{error}</div>}
+      {error && <Notice tone="danger" title="The recommendation did not run">{error}</Notice>}
+      {notice && <Notice tone="info" title="Nothing changed">{notice}</Notice>}
 
-      {recommendation && <RecommendationView rec={recommendation} />}
+      <Card
+        title="Insurer recommendation"
+        description={
+          recommendation
+            ? `Computed ${formatDateTime(recommendation.created_at)} against the reviewed risk information.`
+            : "Atlas checks the reviewed risk information against every active appetite rule in the matrix."
+        }
+        actions={
+          <>
+            {recommendation && allInsurers.length > 1 && (
+              <div className="atlas-btn-group" role="group" aria-label="Recommendation view">
+                <button
+                  type="button"
+                  className={`atlas-btn atlas-btn--sm atlas-btn--ghost ${view === "ranked" ? "atlas-btn--pressed" : ""}`}
+                  aria-pressed={view === "ranked"}
+                  onClick={() => setView("ranked")}
+                >
+                  Ranked
+                </button>
+                <button
+                  type="button"
+                  className={`atlas-btn atlas-btn--sm atlas-btn--ghost ${view === "compare" ? "atlas-btn--pressed" : ""}`}
+                  aria-pressed={view === "compare"}
+                  onClick={() => setView("compare")}
+                >
+                  Compare
+                </button>
+              </div>
+            )}
+            <Button
+              variant="primary"
+              size="sm"
+              loading={running}
+              loadingLabel="Checking appetite…"
+              disabled={!extractionReviewed}
+              onClick={() => run()}
+              title={
+                !extractionReviewed
+                  ? "Review the risk information before running a recommendation."
+                  : undefined
+              }
+            >
+              {recommendation ? "Rerun recommendation" : "Run recommendation"}
+            </Button>
+            {recommendation && (
+              <Button
+                size="sm"
+                disabled={running || !extractionReviewed}
+                onClick={() => run(true)}
+                title="Force a fresh run even when Atlas believes the inputs are unchanged."
+              >
+                Force rerun
+              </Button>
+            )}
+          </>
+        }
+      >
+        {!recommendation ? (
+          <EmptyState
+            inline
+            title="Atlas has not produced a recommendation yet"
+            body={
+              extractionReviewed
+                ? "Run the recommendation to score every insurer with active appetite rules against this risk."
+                : "The recommendation unlocks once the extracted risk information has been reviewed."
+            }
+          />
+        ) : (
+          <>
+            <p className="atlas-reco__headline">{recommendation.reasoning_json.headline}</p>
+
+            {openMissingInfo.length > 0 && (
+              <div style={{ marginTop: "var(--atlas-space-4)" }}>
+                <Notice tone="warning" title="Outstanding information may change this result">
+                  {openMissingInfo.length} item
+                  {openMissingInfo.length === 1 ? " is" : "s are"} still outstanding. Rerun the
+                  recommendation once the information arrives.
+                  <div style={{ marginTop: 8 }}>
+                    <Button size="sm" onClick={() => onGoToTab("missing-information")}>
+                      Review outstanding information
+                    </Button>
+                  </div>
+                </Notice>
+              </div>
+            )}
+
+            {view === "compare" ? (
+              <ComparisonMatrix insurers={allInsurers} topId={top?.insurer_id ?? null} />
+            ) : (
+              <div style={{ marginTop: "var(--atlas-space-5)" }}>
+                {top ? (
+                  <InsurerBlock insurer={top} variant="top" rank={1} />
+                ) : (
+                  <Notice tone="danger" title="No insurer cleared appetite for this risk">
+                    Every insurer with appetite rules on file was ruled out. Review the failures below —
+                    a referral, or a correction to the risk information, may change the outcome.
+                  </Notice>
+                )}
+
+                {secondary.length > 0 && (
+                  <>
+                    <Divider label="Other viable options" />
+                    {secondary.map((insurer, index) => (
+                      <InsurerBlock
+                        key={insurer.insurer_id}
+                        insurer={insurer}
+                        variant="secondary"
+                        rank={index + 2}
+                      />
+                    ))}
+                  </>
+                )}
+
+                {ruledOut.length > 0 && (
+                  <>
+                    <Divider label="Ruled out by appetite" />
+                    {ruledOut.map((insurer) => (
+                      <InsurerBlock key={insurer.insurer_id} insurer={insurer} variant="ruled-out" />
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+
+            {recommendation.reasoning_json.no_data_for?.length > 0 && (
+              <div style={{ marginTop: "var(--atlas-space-5)" }}>
+                <Notice tone="info" title="Insurers Atlas could not consider">
+                  {recommendation.reasoning_json.no_data_for.map((item) => item.insurer_name).join(", ")}
+                  {" have no active appetite rules in the matrix, so Atlas could not score them. "}
+                  This is a gap in the guideline data, not a rejection of the risk.
+                </Notice>
+              </div>
+            )}
+          </>
+        )}
+      </Card>
     </div>
   );
 }
 
-// ----------------------------------------------------------------------------
-// The full rendered recommendation
-// ----------------------------------------------------------------------------
-
-function RecommendationView({ rec }: { rec: Recommendation }) {
-  const top = rec.reasoning_json.top;
+function Divider({ label }: { label: string }) {
   return (
-    <div className="atlas-reco__body">
-      <p className="atlas-reco__headline">{rec.reasoning_json.headline}</p>
-
-      {top ? (
-        <InsurerBlock insurer={top} variant="top" />
-      ) : (
-        <div className="atlas-reco__nothing">
-          No insurer scored above the disqualification threshold for this risk.
-        </div>
-      )}
-
-      {rec.secondary_options_json.length > 0 && (
-        <>
-          <div className="atlas-reco__divider">Secondary options</div>
-          {rec.secondary_options_json.map((ins) => (
-            <InsurerBlock key={ins.insurer_id} insurer={ins} variant="secondary" />
-          ))}
-        </>
-      )}
-
-      {rec.not_recommended_json.length > 0 && (
-        <>
-          <div className="atlas-reco__divider">Not recommended</div>
-          {rec.not_recommended_json.map((ins) => (
-            <InsurerBlock key={ins.insurer_id} insurer={ins} variant="ruled_out" />
-          ))}
-        </>
-      )}
-
-      {rec.reasoning_json.no_data_for?.length > 0 && (
-        <div className="atlas-reco__nodata">
-          <strong>No appetite data on file for:</strong>{" "}
-          {rec.reasoning_json.no_data_for.map((i) => i.insurer_name).join(", ")}
-          {" — these insurers have no active appetite rules in the matrix, so Atlas could not consider them. This is a data gap, not a rejection."}
-        </div>
-      )}
+    <div className="atlas-reco__divider">
+      <span className="atlas-reco__divider-label">{label}</span>
+      <span className="atlas-reco__divider-rule" />
     </div>
   );
 }
+
+/* ===========================================================================
+   One insurer
+   =========================================================================== */
 
 function InsurerBlock({
   insurer,
   variant,
+  rank,
 }: {
   insurer: ScoredInsurer;
-  variant: "top" | "secondary" | "ruled_out";
+  variant: "top" | "secondary" | "ruled-out";
+  rank?: number;
 }) {
+  const band = appetiteBand(insurer.band);
+  const groups = groupFindings(insurer);
+
   return (
-    <div className={`atlas-reco__insurer atlas-reco__insurer--${variant} atlas-reco__insurer--${insurer.band}`}>
-      <div className="atlas-reco__insurer-head">
-        <div className="atlas-reco__insurer-name">{insurer.insurer_name}</div>
-        <div className="atlas-reco__insurer-meta">
-          {!insurer.ruled_out && (
-            <span className="atlas-reco__score">Score {insurer.score}</span>
+    <article className={`atlas-insurer atlas-insurer--${variant}`}>
+      <header className="atlas-insurer__head">
+        <div>
+          {rank !== undefined && (
+            <p className="atlas-insurer__rank">
+              {variant === "top" ? "Recommended" : `Ranked ${rank}`}
+            </p>
           )}
-          <span className={`atlas-level atlas-level--${insurer.band}`}>{insurer.band}</span>
+          {variant === "ruled-out" && <p className="atlas-insurer__rank">Not available for this risk</p>}
+          <h3 className="atlas-insurer__name">{insurer.insurer_name}</h3>
+        </div>
+        <div className="atlas-insurer__flags">
+          <StatusBadge status={band} strong={variant === "top"} />
           {insurer.referral_required && (
-            <span className="atlas-flag atlas-flag--referral">Referral</span>
+            <StatusBadge
+              status={{
+                label: "Referral required",
+                tone: "referral",
+                description: "This insurer's guideline requires approval before you can proceed.",
+              }}
+            />
           )}
           {insurer.senior_review_required && (
-            <span className="atlas-flag atlas-flag--senior">Senior review</span>
+            <StatusBadge
+              status={{
+                label: "Senior review",
+                tone: "referral",
+                description: "A senior underwriter must sign this off.",
+              }}
+            />
           )}
           {insurer.manual_review_required && (
-            <span className="atlas-flag atlas-flag--manual">Manual review</span>
+            <StatusBadge
+              status={{
+                label: "Manual review",
+                tone: "warning",
+                description:
+                  "Atlas could not match a reliable product-level rule. Treat the ranking as provisional.",
+              }}
+            />
           )}
-          {!insurer.ruled_out && (
-            <span className="atlas-muted" style={{ fontSize: 12 }}>
-              · confidence {Math.round(insurer.confidence * 100)}%
-            </span>
-          )}
+        </div>
+      </header>
+
+      <div className="atlas-insurer__body">
+        {insurer.reasoning && <p className="atlas-insurer__reasoning">{insurer.reasoning}</p>}
+
+        {insurer.manual_review_required && (
+          <div style={{ marginTop: "var(--atlas-space-3)" }}>
+            <Reason
+              kind="concern"
+              title="No reliable product-level rule matched"
+              nextAction="Check the unmatched sections below against the insurer's guideline before treating this as a recommendation."
+            >
+              The matrix did not contain a rule Atlas could confidently apply to this risk. The ranking
+              is based on partial information.
+            </Reason>
+          </div>
+        )}
+
+        {groups.length > 0 && (
+          <div className="atlas-reasons" style={{ marginTop: "var(--atlas-space-4)" }}>
+            {groups.map((group, index) => (
+              <Reason key={index} kind={group.kind} title={group.title} nextAction={group.nextAction}>
+                {group.body}
+              </Reason>
+            ))}
+          </div>
+        )}
+
+        <div style={{ marginTop: "var(--atlas-space-3)" }}>
+          <Disclosure summary={`Matched rules and scoring detail (${(insurer.matched_rules ?? []).length})`}>
+            {(insurer.matched_rules ?? []).length === 0 ? (
+              <p className="atlas-text-dense atlas-text-muted">
+                No appetite rule matched this risk for {insurer.insurer_name}.
+              </p>
+            ) : (
+              <ul className="atlas-list">
+                {(insurer.matched_rules ?? []).map((rule, index) => (
+                  <li className="atlas-list__item" key={index}>
+                    <div className="atlas-list__main">
+                      <p className="atlas-list__title">
+                        {rule.matched_strings.join("; ") ||
+                          `${rule.rule_product_line ?? "Rule"} · ${rule.rule_risk_type ?? ""}`}
+                      </p>
+                      <SourceReference
+                        parts={[
+                          rule.source_file_name,
+                          rule.source_section,
+                          rule.source_page ? `page ${rule.source_page}` : null,
+                        ]}
+                        quote={rule.source_quote}
+                      />
+                    </div>
+                    <div className="atlas-list__side">
+                      <StatusBadge status={ruleListMeta(rule.list)} />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {(insurer.scoring_notes ?? []).length > 0 && (
+              <div style={{ marginTop: "var(--atlas-space-3)" }}>
+                <p className="atlas-block__title">Scoring notes</p>
+                <ul className="atlas-rule__list">
+                  {(insurer.scoring_notes ?? []).map((note, index) => (
+                    <li key={index} className="atlas-text-dense atlas-text-muted">
+                      {note}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <p className="atlas-text-muted" style={{ fontSize: 12, marginTop: 12 }}>
+              Internal score {insurer.score}. The score orders candidates; the reasons above are what
+              you should act on.
+            </p>
+          </Disclosure>
         </div>
       </div>
+    </article>
+  );
+}
 
-      {insurer.reasoning && (
-        <p className="atlas-reco__reasoning">{insurer.reasoning}</p>
-      )}
+function ruleListMeta(list: string) {
+  switch (list) {
+    case "preferred":
+      return { label: "Preferred", tone: "success" as const };
+    case "declined":
+    case "portfolio_declined":
+      return { label: "Declined", tone: "danger" as const };
+    case "referral":
+    case "portfolio_referral":
+      return { label: "Referral trigger", tone: "referral" as const };
+    case "caution":
+    case "portfolio_caution":
+      return { label: "Caution", tone: "warning" as const };
+    default:
+      return { label: "Base rule", tone: "neutral" as const };
+  }
+}
 
-      {insurer.manual_review_required && (
-        <div className="atlas-reco__manual">
-          The matrix did not contain a reliable product-level rule for this submission. Review the unmatched sections before treating this as a recommendation.
+/**
+ * Turn the matcher's flat arrays into the structured reason shape the design
+ * system uses: what the issue is, why it matters, and what happens next.
+ */
+function groupFindings(insurer: ScoredInsurer): {
+  kind: "blocker" | "referral" | "concern" | "strength" | "info";
+  title: string;
+  body: string;
+  nextAction?: string;
+}[] {
+  const groups: ReturnType<typeof groupFindings> = [];
+
+  if (insurer.ruled_out) {
+    const declined = (insurer.matched_rules ?? []).filter(
+      (rule) => rule.list === "declined" || rule.list === "portfolio_declined"
+    );
+    groups.push({
+      kind: "blocker",
+      title: "Hard appetite failure",
+      body: declined.length
+        ? `The insurer's guideline declines this risk. Matched: ${declined
+            .flatMap((rule) => rule.matched_strings)
+            .join("; ")}.`
+        : "This risk falls outside the insurer's stated appetite, so Atlas cannot recommend it.",
+      nextAction:
+        "Placing here would need the insurer to make an exception. Record an override reason if a manager approves it.",
+    });
+  }
+
+  if (insurer.referral_required) {
+    const triggers = (insurer.matched_rules ?? [])
+      .filter((rule) => rule.list === "referral" || rule.list === "portfolio_referral")
+      .flatMap((rule) => rule.matched_strings);
+    groups.push({
+      kind: "referral",
+      title: "Referral required",
+      body: triggers.length
+        ? `The guideline requires a referral because of: ${triggers.join("; ")}.`
+        : "The guideline requires the insurer or a senior underwriter to approve this risk before you proceed.",
+      nextAction: "Prepare a referral pack with the risk summary, claims experience and mitigating factors.",
+    });
+  }
+
+  const caution = (insurer.matched_rules ?? [])
+    .filter((rule) => rule.list === "caution" || rule.list === "portfolio_caution")
+    .flatMap((rule) => rule.matched_strings);
+  if (caution.length > 0) {
+    groups.push({
+      kind: "concern",
+      title: "Written with caution",
+      body: `The guideline flags this risk for care: ${caution.join("; ")}.`,
+      nextAction: "Expect tighter terms, higher excesses, or additional warranties on this risk.",
+    });
+  }
+
+  const preferred = (insurer.matched_rules ?? [])
+    .filter((rule) => rule.list === "preferred")
+    .flatMap((rule) => rule.matched_strings);
+  if (preferred.length > 0) {
+    groups.push({
+      kind: "strength",
+      title: "Inside preferred appetite",
+      body: `The guideline actively wants this business: ${preferred.join("; ")}.`,
+    });
+  }
+
+  if ((insurer.missing_required_documents ?? []).length > 0) {
+    groups.push({
+      kind: "concern",
+      title: "Documents this insurer requires",
+      body: (insurer.missing_required_documents ?? []).join("; "),
+      nextAction: "Request these from the broker before submitting to this insurer.",
+    });
+  }
+
+  const unmatched = [
+    ...(insurer.unmatched_sections ?? []).map((item) => `section "${item}"`),
+    ...(insurer.unmatched_product_candidates ?? []).map((item) => `product "${item}"`),
+  ];
+  if (unmatched.length > 0) {
+    groups.push({
+      kind: "info",
+      title: "Not covered by any rule on file",
+      body: `Atlas found no guideline rule for ${unmatched.join(", ")}.`,
+      nextAction:
+        "Confirm the insurer's position on these directly, or ask a manager to add the missing appetite rules.",
+    });
+  }
+
+  return groups;
+}
+
+/* ===========================================================================
+   Comparison matrix
+   =========================================================================== */
+
+const MATRIX_ROWS: {
+  key: string;
+  label: string;
+  render: (insurer: ScoredInsurer) => ReactNode;
+}[] = [
+  {
+    key: "band",
+    label: "Appetite",
+    render: (insurer) => <StatusBadge status={appetiteBand(insurer.band)} />,
+  },
+  {
+    key: "blocker",
+    label: "Hard failure",
+    render: (insurer) =>
+      insurer.ruled_out ? (
+        <StatusBadge status={{ label: "Ruled out", tone: "danger" }} />
+      ) : (
+        <StatusBadge status={{ label: "None", tone: "success" }} />
+      ),
+  },
+  {
+    key: "referral",
+    label: "Referral",
+    render: (insurer) =>
+      insurer.referral_required ? (
+        <StatusBadge status={{ label: "Required", tone: "referral" }} />
+      ) : (
+        <StatusBadge status={{ label: "Not required", tone: "success" }} />
+      ),
+  },
+  {
+    key: "documents",
+    label: "Documents outstanding",
+    render: (insurer) => {
+      const documents = insurer.missing_required_documents ?? [];
+      return documents.length === 0 ? (
+        <StatusBadge status={{ label: "None", tone: "success" }} />
+      ) : (
+        <>
+          <StatusBadge status={{ label: `${documents.length} required`, tone: "warning" }} />
+          <span className="atlas-matrix__note">{documents.join("; ")}</span>
+        </>
+      );
+    },
+  },
+  {
+    key: "coverage",
+    label: "Rule coverage",
+    render: (insurer) => {
+      const unmatched = [
+        ...(insurer.unmatched_sections ?? []),
+        ...(insurer.unmatched_product_candidates ?? []),
+      ];
+      return unmatched.length === 0 ? (
+        <StatusBadge status={{ label: "Fully matched", tone: "success" }} />
+      ) : (
+        <>
+          <StatusBadge status={{ label: `${unmatched.length} unmatched`, tone: "warning" }} />
+          <span className="atlas-matrix__note">{unmatched.join("; ")}</span>
+        </>
+      );
+    },
+  },
+  {
+    key: "reasoning",
+    label: "Atlas reasoning",
+    render: (insurer) => <span className="atlas-matrix__note">{insurer.reasoning || "—"}</span>,
+  },
+];
+
+function ComparisonMatrix({
+  insurers,
+  topId,
+}: {
+  insurers: ScoredInsurer[];
+  topId: string | null;
+}) {
+  // Default to the recommended insurer plus the next few viable options, so a
+  // long ruled-out tail does not swamp the comparison.
+  const [selected, setSelected] = useState<string[]>(() =>
+    insurers.filter((insurer) => !insurer.ruled_out).slice(0, 4).map((insurer) => insurer.insurer_id)
+  );
+
+  const shown = useMemo(
+    () => insurers.filter((insurer) => selected.includes(insurer.insurer_id)),
+    [insurers, selected]
+  );
+
+  return (
+    <div style={{ marginTop: "var(--atlas-space-4)" }}>
+      <fieldset style={{ border: 0, padding: 0, margin: "0 0 var(--atlas-space-4)" }}>
+        <legend className="atlas-block__title" style={{ marginBottom: 8 }}>
+          Insurers in the comparison
+        </legend>
+        <div className="atlas-actions">
+          {insurers.map((insurer) => (
+            <label className="atlas-checkbox" key={insurer.insurer_id} style={{ minHeight: 28 }}>
+              <input
+                type="checkbox"
+                checked={selected.includes(insurer.insurer_id)}
+                onChange={() =>
+                  setSelected((current) =>
+                    current.includes(insurer.insurer_id)
+                      ? current.filter((id) => id !== insurer.insurer_id)
+                      : [...current, insurer.insurer_id]
+                  )
+                }
+              />
+              <span>
+                {insurer.insurer_name}
+                {insurer.insurer_id === topId ? " (recommended)" : ""}
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      {shown.length === 0 ? (
+        <EmptyState
+          inline
+          title="No insurers selected"
+          body="Tick at least one insurer above to build the comparison."
+        />
+      ) : (
+        <div className="atlas-table-wrap">
+          <div className="atlas-table-scroll">
+            <table className="atlas-matrix">
+              <caption className="atlas-sr-only">
+                Insurer comparison across appetite, blockers, referrals and documentation
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col" style={{ minWidth: 170 }}>
+                    Criterion
+                  </th>
+                  {shown.map((insurer) => (
+                    <th
+                      scope="col"
+                      key={insurer.insurer_id}
+                      data-pinned={insurer.insurer_id === topId ? "true" : undefined}
+                    >
+                      <span className="atlas-matrix__insurer">{insurer.insurer_name}</span>
+                      {insurer.insurer_id === topId ? "Recommended" : "Alternative"}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {MATRIX_ROWS.map((row) => (
+                  <tr key={row.key}>
+                    <th scope="row">{row.label}</th>
+                    {shown.map((insurer) => (
+                      <td key={insurer.insurer_id}>
+                        <div className="atlas-matrix__cell">{row.render(insurer)}</div>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
-
-      <details className="atlas-reco__detail">
-        <summary>Show matched rules and scoring detail</summary>
-        <div className="atlas-reco__detail-body">
-          {(insurer.matched_rules ?? [])
-            .map((m, i) => (
-              <div key={i} className="atlas-reco__matched">
-                <span className={`atlas-tone--${
-                  m.list === "preferred" ? "ok"
-                  : m.list === "declined" || m.list === "portfolio_declined" ? "danger"
-                  : m.list === "caution" || m.list === "referral" || m.list === "portfolio_caution" || m.list === "portfolio_referral" ? "warn"
-                  : "neutral"
-                }`}>
-                  {m.list}
-                </span>
-                : {m.matched_strings.join("; ") || `${m.rule_product_line ?? "rule"} / ${m.rule_risk_type ?? "rule"}`}
-                {(m.source_file_name || m.source_section || m.source_page || m.source_quote) && (
-                  <div className="atlas-reco__evidence">
-                    {[m.source_file_name, m.source_section, m.source_page ? `page ${m.source_page}` : null]
-                      .filter(Boolean)
-                      .join(" / ")}
-                    {m.source_quote && <blockquote>{m.source_quote}</blockquote>}
-                  </div>
-                )}
-              </div>
-            ))}
-          {((insurer.unmatched_sections ?? []).length > 0 ||
-            (insurer.unmatched_product_candidates ?? []).length > 0 ||
-            (insurer.nearby_rule_matches ?? []).length > 0) && (
-            <div className="atlas-reco__matched atlas-tone--warn">
-              {(insurer.unmatched_sections ?? []).length > 0 && (
-                <div><strong>Unmatched sections:</strong> {(insurer.unmatched_sections ?? []).join("; ")}</div>
-              )}
-              {(insurer.unmatched_product_candidates ?? []).length > 0 && (
-                <div><strong>Unmatched products:</strong> {(insurer.unmatched_product_candidates ?? []).join("; ")}</div>
-              )}
-              {(insurer.nearby_rule_matches ?? []).length > 0 && (
-                <div><strong>Nearby rules:</strong> {(insurer.nearby_rule_matches ?? []).join("; ")}</div>
-              )}
-            </div>
-          )}
-          {(insurer.missing_required_documents ?? []).length > 0 && (
-            <div className="atlas-reco__matched atlas-tone--warn">
-              <strong>Missing required documents:</strong>{" "}
-              {(insurer.missing_required_documents ?? []).join("; ")}
-            </div>
-          )}
-          {(insurer.scoring_notes ?? []).length > 0 && (
-            <ul className="atlas-reco__notes">
-              {(insurer.scoring_notes ?? []).map((n, i) => <li key={i}>{n}</li>)}
-            </ul>
-          )}
-        </div>
-      </details>
     </div>
   );
 }

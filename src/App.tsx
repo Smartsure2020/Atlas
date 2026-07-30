@@ -1,54 +1,35 @@
 /**
- * Atlas Blueprint — app shell + auth gate + dashboard
+ * Atlas — app root: auth gate and routing
  * ----------------------------------------------------------------------------
- * Phase 0 deliverable: a secure, authenticated shell. Three states:
+ * Three states, unchanged from Phase 0 because the security model is unchanged:
  *   1. Signed out          -> Microsoft sign-in (shared Azure app).
  *   2. Signed in, no role  -> access denied (fail closed; allow-list said no).
- *   3. Signed in + staff   -> the dashboard with its six status columns.
+ *   3. Signed in + staff   -> the application shell.
  *
- * The dashboard renders the columns the team described; it's empty until the
- * submission features land in the next phases. The point of Phase 0 is that the
- * shell, auth, role gate, and API plumbing are all real and locked down.
+ * Role gating in the UI mirrors the Worker's own gates. It is a courtesy so
+ * people are not shown controls that will fail; the server remains the
+ * authoritative boundary.
  */
 
-import { useEffect, useState } from "react";
-import { supabase, currentRole, startLogin, listSubmissions, type SubmissionListItem } from "./lib/atlas";
+import { useCallback, useEffect, useState } from "react";
+import { supabase, currentRole, startLogin } from "./lib/atlas";
+import { routeFromHash, routeToHash, type Route } from "./lib/router";
+import { AppShell, type AtlasUiRole } from "./components/AppShell";
+import { Button, Notice, TextField, ToastProvider } from "./components/ui";
+import WorkQueue from "./pages/WorkQueue";
 import NewSubmission from "./pages/NewSubmission";
 import SubmissionDetail from "./pages/SubmissionDetail";
 import Insurers from "./pages/Insurers";
 import InsurerDetail from "./pages/InsurerDetail";
 import ManagerDashboard from "./pages/ManagerDashboard";
-import "./atlas.css";
-
-type AtlasUiRole = "underwriter" | "consultant" | "manager" | "admin" | "readonly";
-const canManage = (role: AtlasUiRole) => role === "admin" || role === "manager";
-const canWrite = (role: AtlasUiRole) => role !== "readonly";
+import ProcessingJobs from "./pages/ProcessingJobs";
+import "./styles/index.css";
 
 type AuthState =
   | { kind: "loading" }
   | { kind: "signed_out" }
   | { kind: "denied"; email: string | null }
   | { kind: "staff"; email: string | null; role: AtlasUiRole };
-
-type View =
-  | { name: "dashboard" }
-  | { name: "new" }
-  | { name: "detail"; id: string }
-  | { name: "insurers" }
-  | { name: "insurer"; id: string }
-  | { name: "manager" };
-
-const STATUS_COLUMNS: { key: string; title: string }[] = [
-  { key: "new", title: "New submissions" },
-  { key: "in_review", title: "In review" },
-  { key: "missing_info_requested", title: "Missing info requested" },
-  { key: "ready_for_quote", title: "Ready for quote" },
-  { key: "referred_to_insurer", title: "Referred to insurer" },
-  { key: "completed", title: "Completed / closed" },
-];
-
-// Statuses that share the final column.
-const COMPLETED_GROUP = new Set(["completed", "closed"]);
 
 export default function App() {
   const [auth, setAuth] = useState<AuthState>({ kind: "loading" });
@@ -84,65 +65,76 @@ export default function App() {
   }, []);
 
   if (auth.kind === "loading") {
-    return <div className="atlas-auth"><div className="atlas-auth__card"><p>Loading…</p></div></div>;
+    return (
+      <div className="atlas-auth">
+        <div className="atlas-auth__card">
+          <AuthBrand />
+          <p className="atlas-text-dense atlas-text-muted">Checking your access…</p>
+        </div>
+      </div>
+    );
   }
 
   if (auth.kind === "signed_out") {
     const isDev = new URLSearchParams(window.location.search).get("dev") === "1";
-    return isDev ? <DevSignIn /> : (
-      <div className="atlas-auth">
-        <div className="atlas-auth__card">
-          <h1>Atlas</h1>
-          <p>Underwriting decision-support</p>
-          <button className="atlas-btn atlas-btn--primary" onClick={startLogin}>
-            Sign in with Microsoft
-          </button>
-        </div>
-      </div>
-    );
+    return isDev ? <DevSignIn /> : <SignIn />;
   }
 
   if (auth.kind === "denied") {
     return (
       <div className="atlas-auth">
         <div className="atlas-auth__card">
-          <h1>Atlas</h1>
-          <p>Underwriting decision-support</p>
-          <div className="atlas-auth__denied">
-            This account isn’t authorised for Atlas. Contact an administrator to
-            be added to the underwriting team.
+          <AuthBrand />
+          <div className="atlas-stack">
+            <Notice tone="danger" title="This account is not authorised for Atlas">
+              {auth.email ? `${auth.email} is not on the Atlas allow-list. ` : ""}
+              Ask an administrator to add you to the underwriting team, then sign in again.
+            </Notice>
+            <Button onClick={() => supabase.auth.signOut()}>Sign out</Button>
           </div>
-          <button
-            className="atlas-btn"
-            style={{ marginTop: 16 }}
-            onClick={() => supabase.auth.signOut()}
-          >
-            Sign out
-          </button>
         </div>
       </div>
     );
   }
 
-  // Staff app: dashboard / new submission / detail
   return (
-    <div className="atlas-shell">
-      <header className="atlas-topbar">
-        <div className="atlas-brand">
-          Atlas <span className="atlas-brand__tag">Blueprint</span>
-        </div>
-        <div className="atlas-user">
-          <span>{auth.email}</span>
-          <span className="atlas-role-pill">{auth.role}</span>
-          <button className="atlas-btn" onClick={() => supabase.auth.signOut()}>
-            Sign out
-          </button>
-        </div>
-      </header>
+    <ToastProvider>
+      <StaffApp role={auth.role} email={auth.email} />
+    </ToastProvider>
+  );
+}
 
-      <main className="atlas-main">
-        <StaffApp role={auth.role} />
-      </main>
+function AuthBrand() {
+  return (
+    <div className="atlas-auth__brand">
+      <span className="atlas-sidebar__mark" aria-hidden="true">
+        A
+      </span>
+      <span>
+        <span className="atlas-auth__title">Atlas</span>
+        <span className="atlas-auth__subtitle" style={{ display: "block" }}>
+          Underwriting decision-support
+        </span>
+      </span>
+    </div>
+  );
+}
+
+function SignIn() {
+  return (
+    <div className="atlas-auth">
+      <div className="atlas-auth__card">
+        <AuthBrand />
+        <div className="atlas-stack">
+          <p className="atlas-text-dense atlas-text-muted">
+            Sign in with your work account to reach the underwriting queue, insurer appetite,
+            and quote reviews.
+          </p>
+          <Button variant="primary" size="lg" block onClick={startLogin} iconAfter="arrow-right">
+            Sign in with Microsoft
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -159,24 +151,22 @@ function DevSignIn() {
     setWorking(true);
     setError(null);
     try {
-      const res = await fetch(
-        `${workerUrl}/dev/sign-in?email=${encodeURIComponent(email.trim())}`
-      );
+      const res = await fetch(`${workerUrl}/dev/sign-in?email=${encodeURIComponent(email.trim())}`);
       const data = await res.json();
       if (!res.ok || !data.ok || !data.action_link) {
         setError(
           data.error === "not_authorised"
-            ? "Email is not on the allow-list."
+            ? "That email is not on the Atlas allow-list."
             : data.error === "not_found"
             ? "Dev sign-in is only available in local development."
-            : "Sign-in failed."
+            : "Sign-in failed. Check the Worker logs for the reason."
         );
         setWorking(false);
         return;
       }
       window.location.href = data.action_link;
     } catch {
-      setError("Could not reach the Worker. Is wrangler dev running?");
+      setError("Could not reach the Worker. Check that wrangler dev is running.");
       setWorking(false);
     }
   }
@@ -184,186 +174,153 @@ function DevSignIn() {
   return (
     <div className="atlas-auth">
       <div className="atlas-auth__card">
-        <h1>Atlas</h1>
-        <p>Underwriting decision-support</p>
-        <div
-          style={{
-            marginBottom: 14,
-            padding: "8px 11px",
-            borderRadius: 6,
-            background: "var(--atlas-warn-bg)",
-            color: "#5c4708",
-            fontSize: 12,
-            fontFamily: "var(--atlas-mono)",
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-          }}
-        >
-          ⚠ Dev sign-in — local only
+        <AuthBrand />
+        <div className="atlas-auth__form">
+          <Notice tone="warning" title="Development sign-in">
+            This bypass exists only in local development and is not available in the pilot
+            environment.
+          </Notice>
+          <TextField
+            label="Work email"
+            type="email"
+            required
+            value={email}
+            placeholder="your.name@firm.co.za"
+            error={error}
+            onChange={(event) => setEmail(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void onSignIn();
+            }}
+          />
+          <Button
+            variant="primary"
+            block
+            loading={working}
+            loadingLabel="Signing in…"
+            disabled={!email.trim()}
+            onClick={onSignIn}
+          >
+            Sign in
+          </Button>
         </div>
-        <input
-          type="email"
-          placeholder="your.email@firm.co.za"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          style={{
-            width: "100%",
-            padding: "9px 11px",
-            border: "1px solid var(--atlas-line)",
-            borderRadius: 7,
-            fontSize: 14,
-            marginBottom: 12,
-            fontFamily: "var(--atlas-body)",
-          }}
-        />
-        {error && <div className="atlas-auth__denied">{error}</div>}
-        <button
-          className="atlas-btn atlas-btn--primary"
-          onClick={onSignIn}
-          disabled={working || !email.trim()}
-          style={{ width: "100%", marginTop: error ? 12 : 0 }}
-        >
-          {working ? "Signing in…" : "Dev sign-in"}
-        </button>
       </div>
     </div>
   );
 }
 
-function StaffApp({ role }: { role: AtlasUiRole }) {
-  const [view, setView] = useState<View>({ name: "dashboard" });
-  const [items, setItems] = useState<SubmissionListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  async function loadBoard() {
-    setLoading(true);
-    try {
-      const res = await listSubmissions();
-      setItems(res.submissions);
-    } finally {
-      setLoading(false);
-    }
-  }
+function StaffApp({ role, email }: { role: AtlasUiRole; email: string | null }) {
+  const [route, setRoute] = useState<Route>(() => routeFromHash());
+  // Search is shell-level so the global field can scope the queue from anywhere.
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
-    if (view.name === "dashboard") loadBoard();
-  }, [view.name]);
+    const onHistory = () => setRoute(routeFromHash());
+    window.addEventListener("popstate", onHistory);
+    window.addEventListener("hashchange", onHistory);
+    if (!window.location.hash) window.history.replaceState({}, "", "#submissions");
+    return () => {
+      window.removeEventListener("popstate", onHistory);
+      window.removeEventListener("hashchange", onHistory);
+    };
+  }, []);
 
-  if (view.name === "insurers") {
-    return (
-      <Insurers
-        role={role}
-        onOpen={(id) => setView({ name: "insurer", id })}
-        onBack={() => setView({ name: "dashboard" })}
-      />
-    );
-  }
+  const navigate = useCallback((next: Route, options: { replace?: boolean } = {}) => {
+    const hash = routeToHash(next);
+    setRoute(next);
+    if (window.location.hash !== hash) {
+      if (options.replace) window.history.replaceState({}, "", hash);
+      else window.history.pushState({}, "", hash);
+    }
+    // A route change is a new reading context; start at the top of it.
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }, []);
 
-  if (view.name === "manager") {
-    return <ManagerDashboard onBack={() => setView({ name: "dashboard" })} />;
-  }
-
-  if (view.name === "insurer") {
-    return (
-      <InsurerDetail
-        insurerId={view.id}
-        role={role}
-        onBack={() => setView({ name: "insurers" })}
-      />
-    );
-  }
-
-  if (view.name === "new") {
-    return (
-      <NewSubmission
-        onCancel={() => setView({ name: "dashboard" })}
-        onCreated={(id) => setView({ name: "detail", id })}
-      />
-    );
-  }
-
-  if (view.name === "detail") {
-    return (
-      <SubmissionDetail
-        submissionId={view.id}
-        role={role}
-        onBack={() => setView({ name: "dashboard" })}
-      />
-    );
-  }
-
-  // Dashboard
-  const byColumn = (key: string) =>
-    items.filter((s) =>
-      key === "completed" ? COMPLETED_GROUP.has(s.status) : s.status === key
-    );
+  const onSearch = useCallback(
+    (value: string) => {
+      setSearch(value);
+      if (value && route.name !== "queue") navigate({ name: "queue" });
+    },
+    [navigate, route.name]
+  );
 
   return (
-    <div>
-      <div className="atlas-page-head atlas-page-head--row">
-        <div>
-          <h1>Submissions</h1>
-          <p>Decision-support intake, extraction, and insurer recommendation.</p>
-        </div>
-        <div className="atlas-page-head__actions">
-          {canManage(role) && (
-            <button
-              className="atlas-btn"
-              onClick={() => setView({ name: "manager" })}
-            >
-              Manager visibility
-            </button>
-          )}
-          <button
-            className="atlas-btn"
-            onClick={() => setView({ name: "insurers" })}
-          >
-            Insurers
-          </button>
-          <button
-            className="atlas-btn atlas-btn--primary"
-            onClick={() => setView({ name: "new" })}
-            disabled={!canWrite(role)}
-          >
-            + New submission
-          </button>
-        </div>
-      </div>
-
-      <div className="atlas-board">
-        {STATUS_COLUMNS.map((col) => {
-          const cards = byColumn(col.key);
-          return (
-            <section className="atlas-col" key={col.key}>
-              <div className="atlas-col__head">
-                <span className="atlas-col__title">{col.title}</span>
-                <span className="atlas-col__count">{loading ? "·" : cards.length}</span>
-              </div>
-              <div className="atlas-col__body">
-                {cards.length === 0 ? (
-                  <div className="atlas-col__empty">
-                    {loading ? "Loading…" : "Nothing here"}
-                  </div>
-                ) : (
-                  cards.map((s) => (
-                    <button
-                      key={s.id}
-                      className="atlas-subcard"
-                      onClick={() => setView({ name: "detail", id: s.id })}
-                    >
-                      <div className="atlas-subcard__client">{s.client_name || "Untitled"}</div>
-                      <div className="atlas-subcard__meta">
-                        {s.request_type || "—"}
-                        {s.broker_name ? ` · ${s.broker_name}` : ""}
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
-            </section>
-          );
-        })}
-      </div>
-    </div>
+    <AppShell
+      route={route}
+      role={role}
+      email={email}
+      searchValue={search}
+      onSearch={onSearch}
+      onNavigate={(next) => navigate(next)}
+      onSignOut={() => supabase.auth.signOut()}
+    >
+      <RouteView route={route} role={role} search={search} onSearchChange={setSearch} navigate={navigate} />
+    </AppShell>
   );
+}
+
+function RouteView({
+  route,
+  role,
+  search,
+  onSearchChange,
+  navigate,
+}: {
+  route: Route;
+  role: AtlasUiRole;
+  search: string;
+  onSearchChange: (value: string) => void;
+  navigate: (route: Route, options?: { replace?: boolean }) => void;
+}) {
+  switch (route.name) {
+    case "new-submission":
+      return (
+        <NewSubmission
+          onCancel={() => navigate({ name: "queue" })}
+          onCreated={(id) => navigate({ name: "submission", id, tab: "overview" })}
+        />
+      );
+
+    case "submission":
+      return (
+        <SubmissionDetail
+          key={route.id}
+          submissionId={route.id}
+          tab={route.tab}
+          role={role}
+          onTabChange={(tab) => navigate({ name: "submission", id: route.id, tab }, { replace: true })}
+          onBack={() => navigate({ name: "queue" })}
+        />
+      );
+
+    case "insurers":
+      return <Insurers role={role} onOpen={(id) => navigate({ name: "insurer", id })} />;
+
+    case "insurer":
+      return (
+        <InsurerDetail
+          key={route.id}
+          insurerId={route.id}
+          role={role}
+          onBack={() => navigate({ name: "insurers" })}
+        />
+      );
+
+    case "oversight":
+      return <ManagerDashboard onOpenSubmission={(id) => navigate({ name: "submission", id, tab: "overview" })} />;
+
+    case "jobs":
+      return <ProcessingJobs onOpenSubmission={(id) => navigate({ name: "submission", id, tab: "overview" })} />;
+
+    case "queue":
+    default:
+      return (
+        <WorkQueue
+          role={role}
+          search={search}
+          onSearchChange={onSearchChange}
+          onNew={() => navigate({ name: "new-submission" })}
+          onOpen={(id) => navigate({ name: "submission", id, tab: "overview" })}
+        />
+      );
+  }
 }

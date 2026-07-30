@@ -1,105 +1,286 @@
 /**
- * Atlas Blueprint — Audit timeline panel
+ * Atlas — submission activity history
  * ----------------------------------------------------------------------------
- * Per-submission timeline. Read-only. Renders the audit_logs rows in
- * chronological order with friendly labels per action type, the actor email
- * (or "system" for cron/automation rows), a timestamp, and a metadata
- * one-liner where helpful.
+ * Read-only. The record of how this submission came to be where it is, which
+ * is what makes a decision defensible months later.
  *
- * The timeline lives in a collapsed `<details>` element by default — it
- * shouldn't dominate the page, but it should be one click away when a
- * manager wants to understand how a routing decision came to be.
+ * Two deliberate choices:
+ *  - human decisions are visually louder than system events, because when you
+ *    scan a history you are looking for who decided what;
+ *  - technical metadata stays behind a disclosure, so the timeline reads as
+ *    prose rather than as a JSON dump.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getAuditTimeline, type AuditEvent } from "../lib/decisions";
+import { Button, Card, EmptyState, ErrorState, Skeleton } from "../components/ui";
+import { Icon, type IconName } from "../components/Icon";
+import { formatDateTime, formatDayHeading, humanise } from "../lib/format";
 
-/** Human-readable label for each action type. */
-const ACTION_LABELS: Record<string, string> = {
-  submission_created: "Submission created",
-  document_uploaded: "Document uploaded",
-  extraction_run: "Extraction run",
-  extraction_denied: "Extraction denied (not a manager)",
-  extraction_reviewed: "Extraction reviewed",
-  recommendation_run: "Recommendation run",
-  decision_accepted: "AI recommendation accepted",
-  decision_overridden: "AI recommendation overridden",
-  decision_override_ruled_out: "Overridden to a ruled-out insurer",
-  decision_blocked_ruled_out_override: "Decision blocked (manager required)",
-  email_draft_generated: "Email draft generated",
-  insurer_created: "Insurer added",
-  insurer_edited: "Insurer edited",
-  insurer_document_uploaded: "Insurer guideline uploaded",
-  insurer_document_processed: "Insurer guideline processed",
-  appetite_confirmed: "Appetite rule confirmed",
-  appetite_edited: "Appetite rule edited",
-  appetite_deactivated: "Appetite rule deactivated",
-  appetite_manual_added: "Manual appetite rule added",
-  sign_in: "Signed in",
-  dev_sign_in: "Dev sign-in",
-};
+type EventGroup = "decisions" | "processing" | "documents" | "communications" | "changes";
 
-const FRIENDLY = (action: string) => ACTION_LABELS[action] ?? action;
-
-interface Props {
-  submissionId: string;
-  /** Bumps when the user does something that produces audit rows; refreshes
-   *  the timeline without a manual reload. */
-  refreshVersion?: number;
+interface EventMeta {
+  label: string;
+  group: EventGroup;
+  /** Human decisions read louder than automated steps. */
+  actor: "human" | "system";
+  tone?: "danger";
+  icon: IconName;
 }
 
-export default function AuditTimeline({ submissionId, refreshVersion = 0 }: Props) {
+const EVENTS: Record<string, EventMeta> = {
+  submission_created: { label: "Submission created", group: "changes", actor: "human", icon: "plus" },
+  document_uploaded: { label: "Document uploaded", group: "documents", actor: "human", icon: "upload" },
+  extraction_run: { label: "Extraction run", group: "processing", actor: "system", icon: "refresh" },
+  extraction_denied: {
+    label: "Extraction refused — not an underwriting manager",
+    group: "processing",
+    actor: "system",
+    tone: "danger",
+    icon: "x-circle",
+  },
+  extraction_reviewed: {
+    label: "Risk information reviewed and corrected",
+    group: "decisions",
+    actor: "human",
+    icon: "check-circle",
+  },
+  recommendation_run: {
+    label: "Insurer recommendation run",
+    group: "processing",
+    actor: "system",
+    icon: "refresh",
+  },
+  decision_accepted: {
+    label: "Decision recorded — Atlas recommendation accepted",
+    group: "decisions",
+    actor: "human",
+    icon: "check-circle",
+  },
+  decision_overridden: {
+    label: "Decision recorded — Atlas recommendation overridden",
+    group: "decisions",
+    actor: "human",
+    icon: "arrow-up-right",
+  },
+  decision_override_ruled_out: {
+    label: "Decision recorded — routed to an insurer that was ruled out",
+    group: "decisions",
+    actor: "human",
+    tone: "danger",
+    icon: "alert-triangle",
+  },
+  decision_blocked_ruled_out_override: {
+    label: "Decision blocked — a manager is required for this override",
+    group: "decisions",
+    actor: "system",
+    tone: "danger",
+    icon: "x-circle",
+  },
+  email_draft_generated: {
+    label: "Communication drafted",
+    group: "communications",
+    actor: "human",
+    icon: "copy",
+  },
+  insurer_created: { label: "Insurer added", group: "changes", actor: "human", icon: "plus" },
+  insurer_edited: { label: "Insurer edited", group: "changes", actor: "human", icon: "edit" },
+  insurer_document_uploaded: {
+    label: "Insurer guideline uploaded",
+    group: "documents",
+    actor: "human",
+    icon: "upload",
+  },
+  insurer_document_processed: {
+    label: "Insurer guideline processed",
+    group: "processing",
+    actor: "system",
+    icon: "refresh",
+  },
+  appetite_confirmed: { label: "Appetite rule confirmed", group: "changes", actor: "human", icon: "check" },
+  appetite_edited: { label: "Appetite rule edited", group: "changes", actor: "human", icon: "edit" },
+  appetite_deactivated: {
+    label: "Appetite rule deactivated",
+    group: "changes",
+    actor: "human",
+    icon: "minus-circle",
+  },
+  appetite_manual_added: {
+    label: "Appetite rule added manually",
+    group: "changes",
+    actor: "human",
+    icon: "plus",
+  },
+  sign_in: { label: "Signed in", group: "changes", actor: "human", icon: "user" },
+  dev_sign_in: { label: "Development sign-in", group: "changes", actor: "human", icon: "user" },
+};
+
+function metaFor(action: string): EventMeta {
+  return (
+    EVENTS[action] ?? {
+      label: humanise(action, "Activity"),
+      group: "changes",
+      actor: "system",
+      icon: "info",
+    }
+  );
+}
+
+const FILTERS: { id: "all" | EventGroup; label: string }[] = [
+  { id: "all", label: "All activity" },
+  { id: "decisions", label: "Decisions" },
+  { id: "processing", label: "Processing" },
+  { id: "documents", label: "Documents" },
+  { id: "communications", label: "Communications" },
+  { id: "changes", label: "Changes" },
+];
+
+export default function AuditTimeline({ submissionId }: { submissionId: string }) {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"all" | EventGroup>("all");
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
-    let active = true;
-    (async () => {
-      setLoading(true);
-      try {
-        const r = await getAuditTimeline(submissionId);
-        if (active) setEvents(r.events);
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
-    return () => { active = false; };
-  }, [submissionId, refreshVersion]);
+    let live = true;
+    setLoading(true);
+    getAuditTimeline(submissionId)
+      .then((result) => {
+        if (!live) return;
+        setEvents(result.events);
+        setError(null);
+      })
+      .catch(() => {
+        if (live) setError("The activity history could not be loaded.");
+      })
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [submissionId, reloadToken]);
+
+  const visible = useMemo(
+    () => (filter === "all" ? events : events.filter((event) => metaFor(event.action).group === filter)),
+    [events, filter]
+  );
+
+  // Group by calendar day once the history is long enough for it to help.
+  const days = useMemo(() => {
+    const buckets = new Map<string, AuditEvent[]>();
+    for (const event of visible) {
+      const key = formatDayHeading(event.created_at);
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(event);
+      else buckets.set(key, [event]);
+    }
+    return Array.from(buckets.entries());
+  }, [visible]);
 
   return (
-    <details className="atlas-card atlas-audit">
-      <summary className="atlas-audit__summary">
-        <span className="atlas-h3" style={{ margin: 0 }}>Audit timeline</span>
-        <span className="atlas-muted" style={{ fontSize: 12 }}>
-          {loading ? "…" : `${events.length} event${events.length === 1 ? "" : "s"}`}
-        </span>
-      </summary>
-
-      {loading ? (
-        <p className="atlas-muted">Loading…</p>
-      ) : events.length === 0 ? (
-        <p className="atlas-muted">No audit events for this submission yet.</p>
-      ) : (
-        <ol className="atlas-audit__list">
-          {events.map((e) => (
-            <li key={e.id} className="atlas-audit__item">
-              <div className="atlas-audit__action">{FRIENDLY(e.action)}</div>
-              <div className="atlas-audit__meta">
-                <span>{e.actor_email ?? (e.actor_id ? "user" : "system")}</span>
-                <span> · </span>
-                <span>{new Date(e.created_at).toLocaleString()}</span>
-              </div>
-              {e.metadata !== null && typeof e.metadata === "object" &&
-                Object.keys(e.metadata as object).length > 0 && (
-                <details className="atlas-audit__meta-detail">
-                  <summary>details</summary>
-                  <pre>{JSON.stringify(e.metadata, null, 2)}</pre>
-                </details>
-              )}
-            </li>
+    <Card
+      title="Activity history"
+      description="Every recorded action on this submission, newest first. This is the audit trail."
+      actions={
+        <div className="atlas-actions">
+          {FILTERS.map((option) => (
+            <Button
+              key={option.id}
+              size="sm"
+              variant={filter === option.id ? "primary" : "ghost"}
+              onClick={() => setFilter(option.id)}
+            >
+              {option.label}
+            </Button>
           ))}
-        </ol>
+        </div>
+      }
+    >
+      {loading ? (
+        <div aria-hidden="true">
+          <Skeleton width="30%" />
+          <Skeleton />
+          <Skeleton width="70%" />
+          <Skeleton width="55%" />
+        </div>
+      ) : error ? (
+        <ErrorState
+          title="The activity history could not be loaded"
+          message="Atlas could not read the audit log for this submission. The rest of the record is unaffected."
+          onRetry={() => setReloadToken((token) => token + 1)}
+        />
+      ) : visible.length === 0 ? (
+        <EmptyState
+          inline
+          title={filter === "all" ? "No activity recorded yet" : "No activity in this category"}
+          body={
+            filter === "all"
+              ? "Actions are recorded here as the submission moves through extraction, recommendation, review and decision."
+              : "Nothing in this category has happened on this submission. Switch to all activity to see the full history."
+          }
+        />
+      ) : (
+        <div>
+          {days.map(([day, dayEvents]) => (
+            <section key={day}>
+              <h3 className="atlas-timeline__daygroup">{day}</h3>
+              <ol className="atlas-timeline">
+                {dayEvents.map((event) => {
+                  const meta = metaFor(event.action);
+                  const metadata =
+                    event.metadata !== null &&
+                    typeof event.metadata === "object" &&
+                    Object.keys(event.metadata as object).length > 0
+                      ? (event.metadata as Record<string, unknown>)
+                      : null;
+                  return (
+                    <li
+                      className={`atlas-event atlas-event--${meta.actor}${
+                        meta.tone === "danger" ? " atlas-event--danger" : ""
+                      }`}
+                      key={event.id}
+                    >
+                      <span className="atlas-event__mark">
+                        <Icon name={meta.icon} size={14} />
+                      </span>
+                      <div>
+                        <p className="atlas-event__title">{meta.label}</p>
+                        <p className="atlas-event__meta">
+                          {event.actor_email ?? (event.actor_id ? "A user" : "Atlas (automated)")}
+                        </p>
+                        {metadata && (
+                          <details className="atlas-disclosure" style={{ marginTop: 4 }}>
+                            <summary>Recorded detail</summary>
+                            <div className="atlas-disclosure__body">
+                              <dl className="atlas-kv">
+                                {Object.entries(metadata).map(([key, value]) => (
+                                  <div className="atlas-kv__item" key={key}>
+                                    <dt className="atlas-kv__key">{humanise(key)}</dt>
+                                    <dd className="atlas-kv__value atlas-text-dense">
+                                      {typeof value === "object" && value !== null
+                                        ? JSON.stringify(value)
+                                        : String(value)}
+                                    </dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                      <time className="atlas-event__time" dateTime={event.created_at}>
+                        {formatDateTime(event.created_at)}
+                      </time>
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+          ))}
+        </div>
       )}
-    </details>
+    </Card>
   );
 }

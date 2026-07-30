@@ -1,6 +1,8 @@
 name = "atlas-worker"
 main = "src/index.ts"
-compatibility_date = "2026-07-27"
+# Keep this at or below the newest date supported by the installed Wrangler
+# runtime. Upgrade Wrangler before moving this date forward.
+compatibility_date = "2026-06-30"
 compatibility_flags = ["nodejs_compat"]
 
 # Secrets (set via `wrangler secret put`, NEVER committed):

@@ -32,6 +32,7 @@ export interface InsurerDocument {
   processed_at: string | null;
   proposed_count: number;
   processing_error: string | null;
+  scan_status?: "pending" | "clean" | "infected" | "failed" | "not_scanned";
   created_at: string;
 }
 
@@ -128,6 +129,9 @@ export async function uploadGuideline(
 export function processInsurerDocument(documentId: string, input: { force?: boolean } = {}) {
   return api<{
     ok: true;
+    queued?: boolean;
+    job_id?: string;
+    status?: string;
     skipped?: boolean;
     message?: string;
     insurer_summary: string;

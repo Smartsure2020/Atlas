@@ -1,215 +1,481 @@
-import { useEffect, useState } from "react";
+/**
+ * Atlas — manager overview
+ * ----------------------------------------------------------------------------
+ * Underwriting oversight, not platform operations — processing health now lives
+ * on its own screen.
+ *
+ * What changed and why:
+ *  - The filters were free-text boxes that expected internal enum values
+ *    ("refer, declined…"). They are now proper selects built from the status
+ *    taxonomy, so a manager cannot silently filter on a typo.
+ *  - Twelve identical metric cards, one of which rendered a boolean as "1", are
+ *    now a small set of counts that mean something operationally, followed by
+ *    ranked breakdowns rather than more boxes.
+ *  - Reviews needing attention are clickable through to the submission.
+ */
+
+import { useEffect, useMemo, useState } from "react";
 import { getManagerStatsFiltered, type ManagerStats } from "../lib/phase4";
-import { cleanupPreview, getSystemStatus, listJobs, type AtlasJob, type JobSummary, type SystemStatus } from "../lib/phase7";
+import {
+  Button,
+  Card,
+  CardSkeleton,
+  EmptyState,
+  ErrorState,
+  FilterChips,
+  Metric,
+  PageHeader,
+  RankedList,
+  StatusBadge,
+  type ActiveFilter,
+} from "../components/ui";
+import { DataTable, type Column } from "../components/DataTable";
+import type { QuoteReview } from "../lib/quote-reviews";
+import {
+  LINE_OF_BUSINESS_OPTIONS,
+  lineOfBusinessLabel,
+  QUOTE_REVIEW_STATUS,
+  quoteReviewStatus,
+} from "../lib/status";
+import { formatDateTime, formatRelative, humanise } from "../lib/format";
 
-export default function ManagerDashboard({ onBack }: { onBack: () => void }) {
+type DateRange = "7d" | "30d" | "90d" | "all";
+
+const DATE_RANGES: { value: DateRange; label: string }[] = [
+  { value: "7d", label: "Last 7 days" },
+  { value: "30d", label: "Last 30 days" },
+  { value: "90d", label: "Last 90 days" },
+  { value: "all", label: "All time" },
+];
+
+interface Filters {
+  dateRange: DateRange;
+  status: string;
+  outcome: string;
+  lineOfBusiness: string;
+  insurerId: string;
+  consultantId: string;
+}
+
+const EMPTY_FILTERS: Filters = {
+  dateRange: "30d",
+  status: "",
+  outcome: "",
+  lineOfBusiness: "",
+  insurerId: "",
+  consultantId: "",
+};
+
+export default function ManagerDashboard({
+  onOpenSubmission,
+}: {
+  onOpenSubmission: (id: string) => void;
+}) {
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [stats, setStats] = useState<ManagerStats | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [dateRange, setDateRange] = useState<"7d" | "30d" | "90d" | "all">("30d");
-  const [status, setStatus] = useState("");
-  const [outcome, setOutcome] = useState("");
-  const [insurerId, setInsurerId] = useState("");
-  const [consultantId, setConsultantId] = useState("");
-  const [lineOfBusiness, setLineOfBusiness] = useState("");
-  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
-  const [jobs, setJobs] = useState<AtlasJob[]>([]);
-  const [jobSummary, setJobSummary] = useState<JobSummary | null>(null);
-  const [cleanupCount, setCleanupCount] = useState<number | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
+    let live = true;
+    setLoading(true);
     getManagerStatsFiltered({
-      date_range: dateRange,
-      status: status || undefined,
-      outcome: outcome || undefined,
-      insurer_id: insurerId || undefined,
-      consultant_id: consultantId || undefined,
-      line_of_business: lineOfBusiness || undefined,
+      date_range: filters.dateRange,
+      status: filters.status || undefined,
+      outcome: filters.outcome || undefined,
+      insurer_id: filters.insurerId || undefined,
+      consultant_id: filters.consultantId || undefined,
+      line_of_business: filters.lineOfBusiness || undefined,
     })
-      .then((res) => setStats(res.stats))
-      .catch(() => setError("Could not load manager visibility."));
-  }, [dateRange, status, outcome, insurerId, consultantId, lineOfBusiness]);
-
-  useEffect(() => {
-    Promise.all([getSystemStatus(), listJobs(), cleanupPreview()])
-      .then(([system, jobRes, cleanup]) => {
-        setSystemStatus(system);
-        setJobs(jobRes.jobs);
-        setJobSummary(jobRes.summary);
-        setCleanupCount(cleanup.expired_active_documents.length);
+      .then((result) => {
+        if (!live) return;
+        setStats(result.stats);
+        setError(null);
       })
-      .catch(() => {
-        // Keep underwriting stats visible even if ops status fails.
+      .catch((cause: Error) => {
+        if (!live) return;
+        setError(
+          cause.message === "manager_only"
+            ? "This overview is available to underwriting managers and administrators only."
+            : "The manager overview could not be loaded. The Atlas API did not respond."
+        );
+      })
+      .finally(() => {
+        if (live) setLoading(false);
       });
-  }, []);
+    return () => {
+      live = false;
+    };
+  }, [filters, reloadToken]);
 
-  if (error) return <div className="atlas-card">{error}</div>;
-  if (!stats) return <div className="atlas-card">Loading...</div>;
+  const activeFilters: ActiveFilter[] = useMemo(() => {
+    const list: ActiveFilter[] = [];
+    if (filters.dateRange !== "30d") {
+      list.push({
+        key: "range",
+        label: "Period",
+        value: DATE_RANGES.find((range) => range.value === filters.dateRange)?.label ?? "",
+        onRemove: () => setFilters((current) => ({ ...current, dateRange: "30d" })),
+      });
+    }
+    if (filters.status) {
+      list.push({
+        key: "status",
+        label: "Review outcome",
+        value: quoteReviewStatus(filters.status).label,
+        onRemove: () => setFilters((current) => ({ ...current, status: "" })),
+      });
+    }
+    if (filters.outcome) {
+      list.push({
+        key: "outcome",
+        label: "Decision outcome",
+        value: quoteReviewStatus(filters.outcome).label,
+        onRemove: () => setFilters((current) => ({ ...current, outcome: "" })),
+      });
+    }
+    if (filters.lineOfBusiness) {
+      list.push({
+        key: "line",
+        label: "Line",
+        value: lineOfBusinessLabel(filters.lineOfBusiness),
+        onRemove: () => setFilters((current) => ({ ...current, lineOfBusiness: "" })),
+      });
+    }
+    if (filters.insurerId) {
+      list.push({
+        key: "insurer",
+        label: "Insurer",
+        value: filters.insurerId,
+        onRemove: () => setFilters((current) => ({ ...current, insurerId: "" })),
+      });
+    }
+    if (filters.consultantId) {
+      list.push({
+        key: "consultant",
+        label: "Consultant",
+        value: filters.consultantId,
+        onRemove: () => setFilters((current) => ({ ...current, consultantId: "" })),
+      });
+    }
+    return list;
+  }, [filters]);
+
+  const attentionColumns: Column<QuoteReview>[] = [
+    {
+      id: "outcome",
+      header: "Review outcome",
+      cell: (row) => <StatusBadge status={quoteReviewStatus(row.status)} />,
+      sortValue: (row) => quoteReviewStatus(row.status).label,
+    },
+    {
+      id: "confidence",
+      header: "Human review",
+      cell: (row) =>
+        row.manual_review_required ? (
+          <StatusBadge status={{ label: "Required", tone: "warning" }} />
+        ) : (
+          <StatusBadge status={{ label: "Not flagged", tone: "success" }} />
+        ),
+    },
+    {
+      id: "reviewed",
+      header: "Reviewed",
+      align: "right",
+      sortValue: (row) => new Date(row.created_at).getTime(),
+      cell: (row) => <span title={formatDateTime(row.created_at)}>{formatRelative(row.created_at)}</span>,
+    },
+    {
+      id: "actions",
+      header: "",
+      align: "right",
+      cell: (row) => (
+        <div className="atlas-table__rowactions">
+          <Button size="sm" iconAfter="chevron-right" onClick={() => onOpenSubmission(row.submission_id)}>
+            Open
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
+  if (error) {
+    return (
+      <div>
+        <PageHeader
+          eyebrow="Oversight"
+          title="Manager overview"
+          description="Review outcomes, outstanding information, referrals and overrides across the team."
+        />
+        <ErrorState
+          title="The manager overview could not be loaded"
+          message={error}
+          onRetry={() => setReloadToken((token) => token + 1)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>
-      <button className="atlas-btn" onClick={onBack} style={{ marginBottom: 16 }}>
-        Back to submissions
-      </button>
-      <div className="atlas-page-head">
-        <h1>Manager visibility</h1>
-        <p>Quote review outcomes, missing information, referrals, and overrides.</p>
-      </div>
-      <div className="atlas-card atlas-manager-filters">
-        <div className="atlas-form__row">
-          <label>Date range</label>
-          <select value={dateRange} onChange={(e) => setDateRange(e.target.value as typeof dateRange)}>
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-            <option value="90d">Last 90 days</option>
-            <option value="all">All time</option>
-          </select>
-        </div>
-        <div className="atlas-form__row">
-          <label>Status</label>
-          <input value={status} onChange={(e) => setStatus(e.target.value)} placeholder="refer, declined..." />
-        </div>
-        <div className="atlas-form__row">
-          <label>Outcome</label>
-          <input value={outcome} onChange={(e) => setOutcome(e.target.value)} placeholder="can_proceed, info_required..." />
-        </div>
-        <div className="atlas-form__row">
-          <label>Insurer ID</label>
-          <input value={insurerId} onChange={(e) => setInsurerId(e.target.value)} />
-        </div>
-        <div className="atlas-form__row">
-          <label>Consultant ID</label>
-          <input value={consultantId} onChange={(e) => setConsultantId(e.target.value)} />
-        </div>
-        <div className="atlas-form__row">
-          <label>Line of business</label>
-          <select value={lineOfBusiness} onChange={(e) => setLineOfBusiness(e.target.value)}>
-            <option value="">Any</option>
-            <option value="personal">Personal</option>
-            <option value="commercial">Commercial</option>
-          </select>
-        </div>
-      </div>
-      <div className="atlas-manager-grid">
-        <Metric label="Submissions" value={stats.total_submissions} />
-        <Metric label="Quote reviews" value={stats.quote_reviews_completed} />
-        <Metric label="Open missing info" value={stats.missing_info_open_count} />
-        <Metric label="Referrals" value={stats.referrals_count} />
-        <Metric label="Declined" value={stats.declined_count} />
-        <Metric label="Overrides" value={stats.overrides_count} />
-        <Metric label="Communications" value={stats.communications_generated_count} />
-        <Metric label="Sent manually" value={stats.communications_sent_manually_count} />
-      </div>
-      <div className="atlas-manager-grid atlas-manager-grid--wide">
-        <List title="Reviews by status" items={Object.entries(stats.reviews_by_status).map(([label, count]) => ({ label, count }))} />
-        <List title="Common missing information" items={stats.common_missing_information} />
-        <List title="Common referral triggers" items={stats.common_referral_triggers} />
-        <List title="Common declined reasons" items={stats.common_declined_reasons} />
-      </div>
-      <div className="atlas-card">
-        <h3 className="atlas-h3">Recent reviews needing attention</h3>
-        {stats.recent_reviews_needing_attention.length === 0 ? (
-          <p className="atlas-muted">No recent reviews needing attention.</p>
-        ) : (
-          <ul className="atlas-checklist">
-            {stats.recent_reviews_needing_attention.map((review) => (
-              <li key={review.id}>
-                <span className={`atlas-pri atlas-pri--${review.status === "declined" ? "high" : "medium"}`}>
-                  {review.status}
-                </span>
-                <span>{new Date(review.created_at).toLocaleString()}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-      <OperationsPanel
-        systemStatus={systemStatus}
-        jobs={jobs}
-        jobSummary={jobSummary}
-        cleanupCount={cleanupCount}
+      <PageHeader
+        eyebrow="Oversight"
+        title="Manager overview"
+        description="Where work is getting stuck, which decisions departed from the Atlas recommendation, and what the team is waiting on."
       />
-    </div>
-  );
-}
 
-function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="atlas-card atlas-manager-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
+      <section className="atlas-toolbar" aria-label="Filter the overview" style={{ marginBottom: "var(--atlas-space-4)" }}>
+        <div className="atlas-toolbar__field">
+          <label htmlFor="oversight-range">Period</label>
+          <select
+            id="oversight-range"
+            className="atlas-select"
+            value={filters.dateRange}
+            onChange={(event) =>
+              setFilters((current) => ({ ...current, dateRange: event.target.value as DateRange }))
+            }
+          >
+            {DATE_RANGES.map((range) => (
+              <option key={range.value} value={range.value}>
+                {range.label}
+              </option>
+            ))}
+          </select>
+        </div>
 
-function OperationsPanel({
-  systemStatus,
-  jobs,
-  jobSummary,
-  cleanupCount,
-}: {
-  systemStatus: SystemStatus | null;
-  jobs: AtlasJob[];
-  jobSummary: JobSummary | null;
-  cleanupCount: number | null;
-}) {
-  return (
-    <div className="atlas-card" style={{ marginTop: 16 }}>
-      <h3 className="atlas-h3">Operational status</h3>
-      {!systemStatus ? (
-        <p className="atlas-muted">Operational status is not available.</p>
-      ) : (
+        <div className="atlas-toolbar__field">
+          <label htmlFor="oversight-status">Review outcome</label>
+          <select
+            id="oversight-status"
+            className="atlas-select"
+            value={filters.status}
+            onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
+          >
+            <option value="">All outcomes</option>
+            {Object.entries(QUOTE_REVIEW_STATUS).map(([value, meta]) => (
+              <option key={value} value={value}>
+                {meta.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="atlas-toolbar__field">
+          <label htmlFor="oversight-outcome">Decision outcome</label>
+          <select
+            id="oversight-outcome"
+            className="atlas-select"
+            value={filters.outcome}
+            onChange={(event) => setFilters((current) => ({ ...current, outcome: event.target.value }))}
+          >
+            <option value="">All decisions</option>
+            {Object.entries(QUOTE_REVIEW_STATUS).map(([value, meta]) => (
+              <option key={value} value={value}>
+                {meta.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="atlas-toolbar__field">
+          <label htmlFor="oversight-line">Line of business</label>
+          <select
+            id="oversight-line"
+            className="atlas-select"
+            value={filters.lineOfBusiness}
+            onChange={(event) =>
+              setFilters((current) => ({ ...current, lineOfBusiness: event.target.value }))
+            }
+          >
+            <option value="">All lines</option>
+            {LINE_OF_BUSINESS_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="atlas-toolbar__field">
+          <label htmlFor="oversight-insurer">Insurer identifier</label>
+          <input
+            id="oversight-insurer"
+            className="atlas-input"
+            value={filters.insurerId}
+            placeholder="Optional"
+            onChange={(event) => setFilters((current) => ({ ...current, insurerId: event.target.value }))}
+          />
+        </div>
+
+        <div className="atlas-toolbar__field">
+          <label htmlFor="oversight-consultant">Consultant identifier</label>
+          <input
+            id="oversight-consultant"
+            className="atlas-input"
+            value={filters.consultantId}
+            placeholder="Optional"
+            onChange={(event) =>
+              setFilters((current) => ({ ...current, consultantId: event.target.value }))
+            }
+          />
+        </div>
+      </section>
+
+      <FilterChips filters={activeFilters} onClearAll={() => setFilters(EMPTY_FILTERS)} />
+
+      {loading && !stats ? (
+        <div className="atlas-stack" style={{ marginTop: "var(--atlas-space-4)" }}>
+          <CardSkeleton lines={2} />
+          <CardSkeleton lines={4} />
+        </div>
+      ) : !stats ? null : (
         <>
-          <div className="atlas-manager-grid">
-            <Metric label="Database" value={systemStatus.database.ok ? 1 : 0} />
-            <Metric label="Failed jobs 24h" value={systemStatus.jobs_24h.failed_count} />
-            <Metric label="Stuck jobs" value={systemStatus.jobs_24h.stuck_count} />
-            <Metric label="Expired active docs" value={cleanupCount ?? 0} />
-          </div>
-          <p className="atlas-muted">
-            Environment: {systemStatus.environment}. Storage: client bucket{" "}
-            {systemStatus.storage.client_docs_bucket_configured ? "configured" : "missing"}, guideline bucket{" "}
-            {systemStatus.storage.insurer_docs_bucket_configured ? "configured" : "missing"}.
-          </p>
-        </>
-      )}
-      <h4 className="atlas-h3">Recent failed or stuck jobs</h4>
-      {!jobSummary || (jobSummary.recent_failed_jobs.length === 0 && jobSummary.stuck_jobs.length === 0) ? (
-        <p className="atlas-muted">No recent failed or stuck jobs.</p>
-      ) : (
-        <ul className="atlas-checklist">
-          {[...jobSummary.recent_failed_jobs, ...jobSummary.stuck_jobs].slice(0, 8).map((job) => (
-            <li key={job.id}>
-              <span className="atlas-pri atlas-pri--high">{job.status}</span>
-              <span>
-                {job.job_type} {job.error_code ? `- ${job.error_code}` : ""}{" "}
-                {new Date(job.created_at).toLocaleString()}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {jobs.length > 0 && (
-        <p className="atlas-muted">Last job: {jobs[0].job_type} / {jobs[0].status}</p>
-      )}
-    </div>
-  );
-}
+          <section
+            className="atlas-metrics"
+            aria-label="Team workload"
+            style={{ margin: "var(--atlas-space-4) 0" }}
+          >
+            <Metric
+              label="Submissions"
+              value={stats.total_submissions}
+              loading={loading}
+              hint="Submissions created in the selected period."
+            />
+            <Metric
+              label="Quote reviews completed"
+              value={stats.quote_reviews_completed}
+              loading={loading}
+              hint="Reviews Atlas finished against an insurer's rules."
+            />
+            <Metric
+              label="Outstanding information"
+              value={stats.missing_info_open_count}
+              loading={loading}
+              tone={stats.missing_info_open_count > 0 ? "warning" : "default"}
+              hint="Items still open or awaiting a reply across the team."
+            />
+            <Metric
+              label="Referrals"
+              value={stats.referrals_count}
+              loading={loading}
+              tone={stats.referrals_count > 0 ? "warning" : "default"}
+              hint="Reviews that required insurer or senior authority."
+            />
+            <Metric
+              label="Declined"
+              value={stats.declined_count}
+              loading={loading}
+              hint="Reviews where the quote conflicted with the insurer's appetite."
+            />
+            <Metric
+              label="Recommendation overrides"
+              value={stats.overrides_count}
+              loading={loading}
+              tone={stats.overrides_count > 0 ? "warning" : "default"}
+              hint="Decisions that departed from the insurer Atlas ranked first. Each one carries a recorded reason."
+            />
+          </section>
 
-function List({ title, items }: { title: string; items: { label: string; count: number }[] }) {
-  return (
-    <div className="atlas-card">
-      <h3 className="atlas-h3">{title}</h3>
-      {items.length === 0 ? (
-        <p className="atlas-muted">No data yet.</p>
-      ) : (
-        <ul className="atlas-checklist">
-          {items.map((item) => (
-            <li key={item.label}>
-              <span>{item.label}</span>
-              <strong>{item.count}</strong>
-            </li>
-          ))}
-        </ul>
+          <div className="atlas-oversight__grid">
+            <Card
+              title="Reviews by outcome"
+              description="How the team's quote reviews resolved in this period."
+            >
+              <RankedList
+                items={Object.entries(stats.reviews_by_status).map(([status, count]) => ({
+                  label: quoteReviewStatus(status).label,
+                  count,
+                }))}
+                emptyLabel="No quote reviews completed in this period."
+              />
+            </Card>
+
+            <Card
+              title="Most common information gaps"
+              description="What the team is most often waiting on. Recurring gaps are usually an intake problem."
+            >
+              <RankedList
+                items={stats.common_missing_information.map((item) => ({
+                  label: humanise(item.label),
+                  count: item.count,
+                }))}
+                emptyLabel="No recurring information gaps in this period."
+              />
+            </Card>
+
+            <Card
+              title="Most common referral triggers"
+              description="Which appetite rules are sending work outside standard authority."
+            >
+              <RankedList
+                items={stats.common_referral_triggers.map((item) => ({
+                  label: humanise(item.label),
+                  count: item.count,
+                }))}
+                emptyLabel="No referral triggers recorded in this period."
+              />
+            </Card>
+
+            <Card
+              title="Most common decline reasons"
+              description="Why quotes are failing against insurer appetite."
+            >
+              <RankedList
+                items={stats.common_declined_reasons.map((item) => ({
+                  label: humanise(item.label),
+                  count: item.count,
+                }))}
+                emptyLabel="No declines recorded in this period."
+              />
+            </Card>
+          </div>
+
+          <div style={{ marginTop: "var(--atlas-space-4)" }}>
+            <Card
+              title="Reviews needing attention"
+              description="Referred, declined, or flagged for human review. Open one to see the findings and act."
+              flush
+            >
+              <div style={{ padding: "var(--atlas-space-4)" }}>
+                <DataTable
+                  caption="Quote reviews needing manager attention"
+                  columns={attentionColumns}
+                  rows={stats.recent_reviews_needing_attention}
+                  rowKey={(row) => row.id}
+                  loading={loading}
+                  dense
+                  onRowActivate={(row) => onOpenSubmission(row.submission_id)}
+                  rowAttention={() => true}
+                  empty={
+                    <EmptyState
+                      title="Nothing needs manager attention"
+                      body="No quote review in this period was referred, declined, or flagged for human review."
+                    />
+                  }
+                />
+              </div>
+            </Card>
+          </div>
+
+          <div className="atlas-oversight__grid" style={{ marginTop: "var(--atlas-space-4)" }}>
+            <Card
+              title="Communications"
+              description="Drafts Atlas produced, and how many the team actually sent."
+            >
+              <RankedList
+                items={[
+                  { label: "Drafted", count: stats.communications_generated_count },
+                  { label: "Sent by the team", count: stats.communications_sent_manually_count },
+                ]}
+              />
+              <p className="atlas-field__hint" style={{ marginTop: 12 }}>
+                Atlas never sends anything itself. A large gap between these two numbers usually means
+                drafts are being rewritten outside Atlas, so the audit history is incomplete.
+              </p>
+            </Card>
+          </div>
+        </>
       )}
     </div>
   );
