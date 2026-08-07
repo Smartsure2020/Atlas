@@ -13,7 +13,6 @@ import {
   transitionAlert,
 } from "../worker/src/phase8-core.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 

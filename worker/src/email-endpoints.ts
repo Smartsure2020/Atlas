@@ -22,6 +22,8 @@
 import { adminClient, audit, json, type AtlasUser } from "./auth";
 import type { Env } from "./config";
 import { logOperationError } from "./phase6-hardening";
+import { draftEmail, verifyEmailPolish, type EmailContext } from "./email-templates";
+import { emailMode } from "./pipeline-mode";
 
 const EMAIL_MODEL = "claude-sonnet-4-6";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -235,41 +237,75 @@ export async function handleGenerateEmail(
     `\nDraft the email per your instructions and return ONLY the JSON object.`
   );
 
-  // ---- Call Claude ----
+  // ---- Draft the email ----
+  //
+  // Default (ATLAS_EMAIL_MODE=template): deterministic template, no LLM call.
+  // Optional (ATLAS_EMAIL_MODE=polish): template + Haiku tone rewrite; the
+  //   verifier discards the polish if it drops any fact (client name, insurer,
+  //   referral flag, listed item, numeric token).
+  // Legacy (ATLAS_EMAIL_MODE=legacy): the original full-Sonnet path is kept
+  //   available as an emergency fallback.
+  const templateMode = emailMode(env);
   let result: { subject: string; body: string };
-  try {
-    const res = await fetch(ANTHROPIC_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": env.ANTHROPIC_API_KEY,
-        "anthropic-version": ANTHROPIC_VERSION,
+  let draftSource: "template" | "template_polished" | "legacy_sonnet" | "legacy_sonnet_error" = "template";
+
+  if (templateMode === "legacy") {
+    const legacy = await legacySonnetEmail(env, emailType, inputLines);
+    if ("error" in legacy) {
+      return json({ error: legacy.error, status: legacy.status, detail: legacy.detail }, legacy.httpStatus);
+    }
+    result = { subject: legacy.subject, body: legacy.body };
+    draftSource = "legacy_sonnet";
+  } else {
+    const ctx: EmailContext = {
+      submission: {
+        client_name: subRes.data.client_name,
+        broker_name: subRes.data.broker_name,
+        broker_email: subRes.data.broker_email,
+        request_type: subRes.data.request_type,
       },
-      body: JSON.stringify({
-        model: EMAIL_MODEL,
-        max_tokens: 2000,
-        system: SYSTEM_PROMPTS[emailType],
-        messages: [{ role: "user", content: inputLines.join("\n") }],
-      }),
-    });
-    if (!res.ok) {
-      let detail = "";
-      try { detail = (await res.text()).slice(0, 200).replace(/\s+/g, " "); } catch {}
-      console.error("email_anthropic_error", res.status, detail);
-      return json({ error: "email_generation_failed", status: res.status, detail }, 502);
-    }
-    const data = (await res.json()) as {
-      content?: { type: string; text?: string }[];
+      reviewedExtraction: (extractionForEmail as Record<string, unknown> | null) ?? null,
+      recommendation: recommendation
+        ? {
+            recommended_insurer: recommendation.recommended_insurer,
+            referral_required: recommendation.referral_required,
+            senior_review_required: recommendation.senior_review_required,
+            reasoning_json: recommendation.reasoning_json,
+            secondary_options_json: recommendation.secondary_options_json,
+          }
+        : null,
+      decision: decision
+        ? {
+            selected_insurer: decision.selected_insurer,
+            decision_status: decision.decision_status,
+            underwriter_notes: decision.underwriter_notes,
+            ai_recommendation_accepted: decision.ai_recommendation_accepted,
+            override_reason_code: decision.override_reason_code,
+            override_reason: decision.override_reason,
+          }
+        : null,
+      missingInformation:
+        ((extractionForEmail as Record<string, unknown> | null)?.missing_information as
+          | { field: string; reason_required?: string; priority?: string }[]
+          | undefined) ?? [],
+      redFlags:
+        ((extractionForEmail as Record<string, unknown> | null)?.red_flags as
+          | { issue: string; severity?: string }[]
+          | undefined) ?? [],
     };
-    const text = data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") ?? "";
-    const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-    if (typeof parsed?.subject !== "string" || typeof parsed?.body !== "string") {
-      return json({ error: "email_invalid_shape" }, 502);
+    const draft = draftEmail(emailType, ctx);
+    result = { subject: draft.subject, body: draft.body };
+
+    if (templateMode === "polish") {
+      const polished = await haikuTonePolish(env, result);
+      if (polished) {
+        const problems = verifyEmailPolish(draft, polished);
+        if (problems.length === 0) {
+          result = polished;
+          draftSource = "template_polished";
+        }
+      }
     }
-    result = { subject: parsed.subject, body: parsed.body };
-  } catch {
-    return json({ error: "email_parse_failed" }, 502);
   }
 
   // ---- Persist the draft as a communication record ----
@@ -325,6 +361,7 @@ export async function handleGenerateEmail(
       // Length only — we never log the email body itself (it contains client PII).
       body_length: result.body.length,
       subject_length: result.subject.length,
+      draft_source: draftSource,
     },
   });
 
@@ -335,6 +372,95 @@ export async function handleGenerateEmail(
     draft_persisted: Boolean(draftId),
     based_on: basedOnReviewed ? "reviewed_extraction" : "raw_extraction",
   });
+}
+
+// ---------------------------------------------------------------------------
+// Optional Haiku "tone polish" step. Small, no-op on failure — the caller
+// keeps the deterministic template if this returns null.
+// ---------------------------------------------------------------------------
+
+async function haikuTonePolish(
+  env: Env,
+  draft: { subject: string; body: string }
+): Promise<{ subject: string; body: string } | null> {
+  try {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": env.ANTHROPIC_API_KEY,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        max_tokens: 1500,
+        temperature: 0.2,
+        system:
+          "You rewrite the tone of the supplied email draft to sound natural and " +
+          "professional. RULES: never change or remove numbers, dates, client " +
+          "names, insurer names, referral flags, or listed items. Do not add " +
+          "facts. Return ONLY JSON: {\"subject\":\"...\",\"body\":\"...\"}.",
+        messages: [
+          { role: "user", content: "SUBJECT: " + draft.subject + "\n\nBODY:\n" + draft.body },
+        ],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { content?: { type: string; text?: string }[] };
+    const text = data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") ?? "";
+    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+    if (typeof parsed?.subject !== "string" || typeof parsed?.body !== "string") return null;
+    return { subject: parsed.subject, body: parsed.body };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy Sonnet path. Kept as an emergency fallback (ATLAS_EMAIL_MODE=legacy).
+// Returns an error record instead of throwing so the endpoint can surface a
+// tidy HTTP response.
+// ---------------------------------------------------------------------------
+
+type LegacyOk = { subject: string; body: string };
+type LegacyErr = { error: string; status: number; detail?: string; httpStatus: number };
+
+async function legacySonnetEmail(
+  env: Env,
+  emailType: EmailType,
+  inputLines: string[]
+): Promise<LegacyOk | LegacyErr> {
+  try {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": env.ANTHROPIC_API_KEY,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify({
+        model: EMAIL_MODEL,
+        max_tokens: 2000,
+        system: SYSTEM_PROMPTS[emailType],
+        messages: [{ role: "user", content: inputLines.join("\n") }],
+      }),
+    });
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.text()).slice(0, 200).replace(/\s+/g, " "); } catch {}
+      console.error("email_anthropic_error", res.status, detail);
+      return { error: "email_generation_failed", status: res.status, detail, httpStatus: 502 };
+    }
+    const data = (await res.json()) as { content?: { type: string; text?: string }[] };
+    const text = data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") ?? "";
+    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+    if (typeof parsed?.subject !== "string" || typeof parsed?.body !== "string") {
+      return { error: "email_invalid_shape", status: 200, httpStatus: 502 };
+    }
+    return { subject: parsed.subject, body: parsed.body };
+  } catch {
+    return { error: "email_parse_failed", status: 200, httpStatus: 502 };
+  }
 }
 
 export { emailTypeFromPath };

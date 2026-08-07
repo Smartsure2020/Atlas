@@ -656,6 +656,10 @@
   border-left: 2px solid var(--atlas-border);
 }
 
+.atlas-riskfield--wide {
+  grid-column: 1 / -1;
+}
+
 .atlas-riskfield--confirmed {
   border-left-color: var(--atlas-success);
 }

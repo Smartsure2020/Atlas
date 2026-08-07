@@ -1251,6 +1251,26 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   animation: atlas-indeterminate 1.3s var(--atlas-ease) infinite;
 }
 
+@keyframes atlas-pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15); }
+  50% { box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.08); }
+}
+
+.atlas-pulse-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--atlas-info);
+  animation: atlas-pulse-dot 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes atlas-pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+
 @keyframes atlas-indeterminate {
   0% {
     transform: translateX(-100%);

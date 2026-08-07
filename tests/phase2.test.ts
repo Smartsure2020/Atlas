@@ -3,7 +3,6 @@ import type { AppetiteRow } from "../worker/src/matcher-types.js";
 import { canonicalTaxonomyKey } from "../worker/src/taxonomy.js";
 import { validateIngestion } from "../worker/src/appetite-ingestion.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 

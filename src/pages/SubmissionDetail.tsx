@@ -16,8 +16,17 @@
  */
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { getSubmission, runExtraction, saveReview } from "../lib/atlas";
-import { updateAssignment } from "../lib/phase7";
+import {
+  getSubmission,
+  runExtraction,
+  saveReview,
+  updatePilotFlag,
+  listPilotIssues,
+  createPilotIssue,
+  updatePilotIssue,
+  type PilotIssue,
+} from "../lib/atlas";
+import { cancelJob, updateAssignment } from "../lib/phase7";
 import { getRecommendation, type Recommendation } from "../lib/recommendations";
 import { getQuoteReview, type QuoteReview, type QuoteReviewSection } from "../lib/quote-reviews";
 import { getDecision, type Decision } from "../lib/decisions";
@@ -35,6 +44,7 @@ import {
   StatusBadge,
   TabPanel,
   Tabs,
+  TextAreaField,
   TextField,
   useToast,
   type TabDefinition,
@@ -71,12 +81,14 @@ const EXPENSIVE_JOBS = ["extraction", "recommendation", "quote_review"] as const
 type ExpensiveJob = (typeof EXPENSIVE_JOBS)[number];
 
 interface JobRecord {
+  id?: string;
   status?: string;
   progress_percent?: number;
   current_step?: string | null;
   created_at?: string;
   completed_at?: string;
   error_message?: string | null;
+  cancellation_requested?: boolean;
 }
 
 interface SubmissionRecord {
@@ -93,6 +105,8 @@ interface SubmissionRecord {
   due_at: string | null;
   assigned_to: string | null;
   assigned_underwriter: string | null;
+  pilot_flag: boolean | null;
+  pilot_notes: string | null;
   assigned_to_email: string | null;
   created_at: string;
   updated_at: string;
@@ -142,6 +156,7 @@ export default function SubmissionDetail({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
+  const [forceRetry, setForceRetry] = useState(false);
   const [assignmentOpen, setAssignmentOpen] = useState(false);
 
   const load = useCallback(
@@ -151,7 +166,7 @@ export default function SubmissionDetail({
         // One round of parallel reads for the whole workspace. Failures on the
         // optional pieces must not blank the record.
         const [payload, recommendation, quote, decision, missing] = await Promise.all([
-          getSubmission(submissionId) as Promise<SubmissionPayload>,
+          getSubmission(submissionId) as unknown as Promise<SubmissionPayload>,
           getRecommendation(submissionId).catch(() => ({ recommendation: null })),
           getQuoteReview(submissionId).catch(() => ({ quote_review: null, sections: [] })),
           getDecision(submissionId).catch(() => ({ decision: null })),
@@ -272,19 +287,23 @@ export default function SubmissionDetail({
     { id: "history", label: "History" },
   ];
 
-  async function onExtract() {
+  async function onExtract(force = false) {
     setExtracting(true);
     setActionError(null);
     try {
-      await runExtraction(submissionId);
+      await runExtraction(submissionId, { force });
       await load({ silent: true });
       toast.notify("Extraction started. Atlas is reading the documents.", "success");
     } catch (cause) {
-      setActionError(
-        (cause as Error).message === "manager_only"
-          ? "Only an underwriting manager can run an extraction. Ask a manager to run it for this submission."
-          : "The extraction could not be started. Check the processing screen for the failure reason, then try again."
-      );
+      const msg = (cause as Error).message;
+      if (msg === "manager_only") {
+        setActionError("Only an underwriting manager can run an extraction. Ask a manager to run it for this submission.");
+      } else if ((msg === "job_already_running" || msg === "http_409") && !force) {
+        setActionError("A previous extraction is still recorded as running. Click the button again to force a new extraction.");
+        setForceRetry(true);
+      } else {
+        setActionError("The extraction could not be started. Check the processing screen for the failure reason, then try again.");
+      }
     } finally {
       setExtracting(false);
     }
@@ -300,7 +319,14 @@ export default function SubmissionDetail({
             action={nextAction}
             extracting={extracting}
             canWrite={canWrite}
-            onExtract={onExtract}
+            onExtract={() => {
+              if (forceRetry) {
+                setForceRetry(false);
+                onExtract(true);
+              } else {
+                onExtract();
+              }
+            }}
             onGoToTab={onTabChange}
           />
         }
@@ -353,7 +379,14 @@ export default function SubmissionDetail({
               canWrite={canWrite}
               canManage={canManage}
               extracting={extracting}
-              onExtract={onExtract}
+              onExtract={() => {
+                if (forceRetry) {
+                  setForceRetry(false);
+                  onExtract(true);
+                } else {
+                  onExtract();
+                }
+              }}
               onSave={async (extractionId, reviewedJson) => {
                 await saveReview(submissionId, extractionId, reviewedJson);
                 await load({ silent: true });
@@ -401,7 +434,14 @@ export default function SubmissionDetail({
               extraction={extraction}
               canManage={canManage}
               extracting={extracting}
-              onExtract={onExtract}
+              onExtract={() => {
+                if (forceRetry) {
+                  setForceRetry(false);
+                  onExtract(true);
+                } else {
+                  onExtract();
+                }
+              }}
             />
           </TabPanel>
 
@@ -420,7 +460,17 @@ export default function SubmissionDetail({
         </div>
 
         <aside className="atlas-workspace__rail" aria-label="Submission context">
-          <ProcessingRail jobs={jobs} />
+          <ProcessingRail
+            jobs={jobs}
+            onCancel={async (jobId) => {
+              try {
+                await cancelJob(jobId);
+                void load({ silent: true });
+              } catch {
+                // Cancellation is best-effort; polling will pick up the new state
+              }
+            }}
+          />
 
           <div className="atlas-workspace__rail-card">
             <h2 className="atlas-workspace__rail-title">Ownership</h2>
@@ -454,6 +504,15 @@ export default function SubmissionDetail({
               </div>
             )}
           </div>
+
+          <PilotRailCard
+            submissionId={submissionId}
+            pilotFlag={submission.pilot_flag ?? false}
+            pilotNotes={submission.pilot_notes ?? ""}
+            canWrite={canWrite}
+            canManage={canManage}
+            onSaved={() => load({ silent: true })}
+          />
 
           <div className="atlas-workspace__rail-card">
             <h2 className="atlas-workspace__rail-title">Outstanding</h2>
@@ -547,6 +606,11 @@ function WorkspaceHeader({
             <div className="atlas-workspace__tags">
               <StatusBadge status={workflowStatus(submission.status)} strong />
               <StatusBadge status={priorityStatus(submission.priority)} prefix="Priority" />
+              {submission.pilot_flag && (
+                <span className="atlas-badge atlas-badge--info">
+                  <span className="atlas-badge__label">Pilot</span>
+                </span>
+              )}
               <span className="atlas-badge atlas-badge--quiet">
                 <span className="atlas-badge__label">{lineOfBusinessLabel(submission.line_of_business)}</span>
               </span>
@@ -921,51 +985,601 @@ const JOB_LABELS: Record<ExpensiveJob, string> = {
   quote_review: "Review quote terms",
 };
 
-function ProcessingRail({ jobs }: { jobs: Partial<Record<ExpensiveJob, JobRecord>> | undefined }) {
-  if (!jobs) return null;
+const EXTRACTION_STEPS = [
+  { key: "reading_documents", label: "Reading documents", threshold: 0 },
+  { key: "calling_extraction_model", label: "Analysing with AI", threshold: 10 },
+  { key: "saving_extraction", label: "Saving extraction", threshold: 85 },
+  { key: "completed", label: "Extracted", threshold: 100 },
+];
+
+function stepIndex(currentStep: string | null | undefined, percent: number): number {
+  if (!currentStep && percent <= 0) return 0;
+  const idx = EXTRACTION_STEPS.findIndex((s) => s.key === currentStep);
+  if (idx >= 0) return idx;
+  for (let i = EXTRACTION_STEPS.length - 1; i >= 0; i--) {
+    if (percent >= EXTRACTION_STEPS[i].threshold) return i;
+  }
+  return 0;
+}
+
+function ExtractionStepTracker({ job }: { job: JobRecord | undefined }) {
+  const done = job?.status === "completed";
+  const failed = job?.status === "failed";
+  const running = job?.status === "queued" || job?.status === "running";
+  const current = done
+    ? EXTRACTION_STEPS.length - 1
+    : stepIndex(job?.current_step, job?.progress_percent ?? 0);
+
   return (
-    <div className="atlas-workspace__rail-card">
-      <h2 className="atlas-workspace__rail-title">Processing</h2>
-      <div className="atlas-stack atlas-stack--tight">
-        {EXPENSIVE_JOBS.map((key) => {
-          const job = jobs[key];
-          const stage = processingStage(job?.status, key);
-          const running = job?.status === "queued" || job?.status === "running";
+    <div style={{ padding: "4px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 0, position: "relative" }}>
+        {EXTRACTION_STEPS.map((step, i) => {
+          const isComplete = done || i < current;
+          const isCurrent = !done && i === current && running;
+          const isFailed = failed && i === current;
           return (
-            <div key={key}>
+            <div key={step.key} style={{ display: "contents" }}>
+              {i > 0 && (
+                <div
+                  style={{
+                    flex: 1,
+                    height: 2,
+                    backgroundColor: isComplete
+                      ? "var(--atlas-primary, #2563eb)"
+                      : "var(--atlas-border, #e2e5ea)",
+                    transition: "background-color 0.4s ease",
+                  }}
+                />
+              )}
               <div
                 style={{
+                  width: isCurrent ? 18 : 14,
+                  height: isCurrent ? 18 : 14,
+                  borderRadius: "50%",
+                  flexShrink: 0,
                   display: "flex",
                   alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 8,
+                  justifyContent: "center",
+                  transition: "all 0.3s ease",
+                  backgroundColor: isFailed
+                    ? "var(--atlas-danger, #dc2626)"
+                    : isComplete
+                    ? "var(--atlas-primary, #2563eb)"
+                    : isCurrent
+                    ? "#fff"
+                    : "var(--atlas-surface-sunken, #f0f2f5)",
+                  border: isCurrent
+                    ? "2.5px solid var(--atlas-primary, #2563eb)"
+                    : isComplete
+                    ? "none"
+                    : "2px solid var(--atlas-border, #e2e5ea)",
+                  boxShadow: isCurrent ? "0 0 0 3px rgba(37, 99, 235, 0.15)" : "none",
+                  animation: isCurrent ? "atlas-pulse-ring 2s ease infinite" : "none",
                 }}
               >
-                <span className="atlas-text-dense">{JOB_LABELS[key]}</span>
-                <StatusBadge status={stage} />
-              </div>
-              {running ? (
-                <div style={{ marginTop: 6 }}>
-                  <ProgressStages
-                    percent={job?.progress_percent ?? null}
-                    caption={
-                      job?.current_step
-                        ? job.current_step.replace(/_/g, " ")
-                        : "Working through the documents"
-                    }
+                {isComplete && (
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                    <path d="M2 6l3 3 5-5.5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+                {isCurrent && (
+                  <div
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      backgroundColor: "var(--atlas-primary, #2563eb)",
+                    }}
                   />
-                </div>
-              ) : (
-                (job?.completed_at || job?.created_at) && (
-                  <p className="atlas-text-muted" style={{ fontSize: 12, marginTop: 3 }}>
-                    {formatRelative(job.completed_at ?? job.created_at)}
-                  </p>
-                )
-              )}
+                )}
+              </div>
             </div>
           );
         })}
       </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
+        {EXTRACTION_STEPS.map((step, i) => {
+          const isComplete = done || i < current;
+          const isCurrent = !done && i === current && running;
+          return (
+            <span
+              key={step.key}
+              style={{
+                fontSize: 10,
+                fontWeight: isCurrent ? 600 : 400,
+                color: isComplete || isCurrent
+                  ? "var(--atlas-ink, #1a1a1a)"
+                  : "var(--atlas-ink-subtle, #999)",
+                textAlign: "center",
+                flex: 1,
+                lineHeight: 1.3,
+              }}
+            >
+              {step.label}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const EXTRACTION_TIPS = [
+  "Always cross-check the sum insured against the asset schedule — mismatches are the most common source of under-insurance.",
+  "A renewal date within 14 days of the quote date often signals urgency — flag it for the broker.",
+  "SASRIA cover is compulsory on most short-term policies in South Africa. If it's missing, that's a red flag.",
+  "Look for gaps between the current cover sections and what the broker is requesting — they may indicate intentional changes or oversights.",
+  "Claims history with a loss ratio above 60% in the last three years warrants closer scrutiny on excess levels.",
+  "Body corporate policies should always specify whether common property, owners' units, or both are covered.",
+  "When sums insured haven't changed in over two years, consider whether inflation has been accounted for.",
+  "Warranty compliance is one of the top reasons claims get repudiated — always verify the client can meet them.",
+  "A quote with no excess on all-risk items is unusual and may indicate the premium hasn't been optimised.",
+  "If the broker email mentions 'like-for-like', compare every section against the current schedule — don't assume it's identical.",
+  "Motor schedules should include VIN numbers. Duplicate or missing VINs are a sign of a copy-paste error.",
+  "Public liability limits below R10m for commercial risks are increasingly considered inadequate in the SA market.",
+  "Required documents lists are often buried in endorsements — Atlas pulls them out so you don't miss them.",
+  "When multiple insurers quote, compare not just premiums but excess structures and exclusion wording.",
+  "Sectional title schemes need separate sums for buildings, common property, and owners' improvements.",
+];
+
+function RotatingTip({ running }: { running: boolean }) {
+  const [index, setIndex] = useState(() => Math.floor(Math.random() * EXTRACTION_TIPS.length));
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => {
+      setIndex((prev) => (prev + 1) % EXTRACTION_TIPS.length);
+    }, 8000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
+  if (!running) return null;
+
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: "10px 12px",
+        borderRadius: 6,
+        backgroundColor: "var(--atlas-surface-raised, #f5f7fa)",
+        borderLeft: "3px solid var(--atlas-primary, #2563eb)",
+        fontSize: 12,
+        lineHeight: 1.5,
+        color: "var(--atlas-ink-secondary, #555)",
+      }}
+    >
+      <span style={{ fontWeight: 600, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--atlas-primary, #2563eb)" }}>
+        Underwriting tip
+      </span>
+      <p style={{ margin: "4px 0 0" }}>{EXTRACTION_TIPS[index]}</p>
+    </div>
+  );
+}
+
+function ProcessingRail({ jobs, onCancel }: { jobs: Partial<Record<ExpensiveJob, JobRecord>> | undefined; onCancel?: (jobId: string) => void }) {
+  if (!jobs) return null;
+  const extractionJob = jobs.extraction;
+  const extractionRunning = extractionJob?.status === "queued" || extractionJob?.status === "running";
+  const extractionCancelling = extractionRunning && extractionJob?.cancellation_requested;
+
+  return (
+    <div className="atlas-workspace__rail-card">
+      <h2 className="atlas-workspace__rail-title">Processing</h2>
+
+      <div style={{ marginBottom: 12 }}>
+        <span className="atlas-text-dense" style={{ display: "block", marginBottom: 8 }}>
+          {JOB_LABELS.extraction}
+        </span>
+        <ExtractionStepTracker job={extractionJob} />
+        {extractionRunning && extractionJob?.id && onCancel && (
+          <button
+            type="button"
+            className="atlas-btn atlas-btn--sm atlas-btn--ghost"
+            style={{ marginTop: 8, color: "var(--atlas-danger)" }}
+            disabled={!!extractionCancelling}
+            onClick={() => onCancel(extractionJob.id!)}
+          >
+            {extractionCancelling ? "Cancelling…" : "Cancel extraction"}
+          </button>
+        )}
+        {!extractionRunning && extractionJob?.status !== "completed" && (extractionJob?.completed_at || extractionJob?.created_at) && (
+          <p className="atlas-text-muted" style={{ fontSize: 12, marginTop: 4 }}>
+            {formatRelative(extractionJob.completed_at ?? extractionJob.created_at)}
+          </p>
+        )}
+      </div>
+
+      {(["recommendation", "quote_review"] as const).map((key) => {
+        const job = jobs[key];
+        const stage = processingStage(job?.status, key);
+        const running = job?.status === "queued" || job?.status === "running";
+        return (
+          <div key={key} style={{ marginBottom: 8 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
+            >
+              <span className="atlas-text-dense">{JOB_LABELS[key]}</span>
+              <StatusBadge status={stage} />
+            </div>
+            {running ? (
+              <div style={{ marginTop: 6 }}>
+                <ProgressStages
+                  percent={job?.progress_percent ?? null}
+                  caption={
+                    job?.current_step
+                      ? job.current_step.replace(/_/g, " ")
+                      : "Processing"
+                  }
+                />
+              </div>
+            ) : (
+              (job?.completed_at || job?.created_at) && (
+                <p className="atlas-text-muted" style={{ fontSize: 12, marginTop: 3 }}>
+                  {formatRelative(job.completed_at ?? job.created_at)}
+                </p>
+              )
+            )}
+          </div>
+        );
+      })}
+
+      <RotatingTip running={extractionRunning} />
+    </div>
+  );
+}
+
+/* ===========================================================================
+   Pilot rail card
+   =========================================================================== */
+
+function PilotRailCard({
+  submissionId,
+  pilotFlag,
+  pilotNotes,
+  canWrite,
+  canManage,
+  onSaved,
+}: {
+  submissionId: string;
+  pilotFlag: boolean;
+  pilotNotes: string;
+  canWrite: boolean;
+  canManage: boolean;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+  const [notes, setNotes] = useState(pilotNotes);
+  const [editingNotes, setEditingNotes] = useState(false);
+
+  const [issues, setIssues] = useState<PilotIssue[]>([]);
+  const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issuesExpanded, setIssuesExpanded] = useState(false);
+  const [creatingIssue, setCreatingIssue] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [newDescription, setNewDescription] = useState("");
+  const [newSeverity, setNewSeverity] = useState("medium");
+  const [editingIssueId, setEditingIssueId] = useState<string | null>(null);
+  const [editStatus, setEditStatus] = useState("");
+  const [editSeverity, setEditSeverity] = useState("");
+  const [editResolutionNotes, setEditResolutionNotes] = useState("");
+
+  useEffect(() => setNotes(pilotNotes), [pilotNotes]);
+
+  const loadIssues = useCallback(async () => {
+    if (!pilotFlag) return;
+    setIssuesLoading(true);
+    try {
+      const result = await listPilotIssues(submissionId);
+      setIssues(result.issues);
+    } catch {
+      // silent — issues are supplementary
+    } finally {
+      setIssuesLoading(false);
+    }
+  }, [submissionId, pilotFlag]);
+
+  useEffect(() => {
+    if (pilotFlag && issuesExpanded) void loadIssues();
+  }, [pilotFlag, issuesExpanded, loadIssues]);
+
+  async function togglePilot() {
+    setSaving(true);
+    try {
+      await updatePilotFlag(submissionId, {
+        pilot_flag: !pilotFlag,
+        pilot_notes: notes || null,
+      });
+      onSaved();
+      toast.notify(
+        pilotFlag ? "Pilot flag removed." : "Submission marked as pilot.",
+        "success"
+      );
+    } catch {
+      toast.notify("Could not update pilot status.", "danger");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveNotes() {
+    setSaving(true);
+    try {
+      await updatePilotFlag(submissionId, {
+        pilot_flag: pilotFlag,
+        pilot_notes: notes || null,
+      });
+      setEditingNotes(false);
+      onSaved();
+    } catch {
+      toast.notify("Could not save pilot notes.", "danger");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submitNewIssue() {
+    if (!newTitle.trim()) return;
+    setSaving(true);
+    try {
+      await createPilotIssue(submissionId, {
+        title: newTitle.trim(),
+        description: newDescription.trim() || undefined,
+        severity: newSeverity,
+      });
+      setNewTitle("");
+      setNewDescription("");
+      setNewSeverity("medium");
+      setCreatingIssue(false);
+      toast.notify("Pilot issue created.", "success");
+      await loadIssues();
+    } catch {
+      toast.notify("Could not create pilot issue.", "danger");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function startEditIssue(issue: PilotIssue) {
+    setEditingIssueId(issue.id);
+    setEditStatus(issue.status);
+    setEditSeverity(issue.severity);
+    setEditResolutionNotes(issue.resolution_notes ?? "");
+  }
+
+  async function saveIssueUpdate() {
+    if (!editingIssueId) return;
+    setSaving(true);
+    try {
+      await updatePilotIssue(editingIssueId, {
+        status: editStatus,
+        severity: editSeverity,
+        resolution_notes: editResolutionNotes || null,
+      });
+      setEditingIssueId(null);
+      toast.notify("Pilot issue updated.", "success");
+      await loadIssues();
+    } catch {
+      toast.notify("Could not update pilot issue.", "danger");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const openIssueCount = issues.filter((i) => i.status === "open" || i.status === "in_progress").length;
+
+  return (
+    <div className="atlas-workspace__rail-card">
+      <h2 className="atlas-workspace__rail-title">Pilot</h2>
+      <dl className="atlas-workspace__rail-facts">
+        <div className="atlas-workspace__rail-fact">
+          <dt>Pilot case</dt>
+          <dd>
+            <StatusBadge
+              status={
+                pilotFlag
+                  ? { label: "Yes", tone: "info" as const }
+                  : { label: "No", tone: "neutral" as const }
+              }
+            />
+          </dd>
+        </div>
+        {pilotFlag && pilotNotes && !editingNotes && (
+          <div className="atlas-workspace__rail-fact">
+            <dt>Notes</dt>
+            <dd className="atlas-text-dense">{pilotNotes}</dd>
+          </div>
+        )}
+      </dl>
+      {canWrite && (
+        <div style={{ marginTop: "var(--atlas-space-3)", display: "flex", flexDirection: "column", gap: "var(--atlas-space-2)" }}>
+          <Button size="sm" block loading={saving} onClick={togglePilot}>
+            {pilotFlag ? "Remove pilot flag" : "Mark as pilot"}
+          </Button>
+          {pilotFlag && !editingNotes && (
+            <Button size="sm" block onClick={() => setEditingNotes(true)}>
+              {pilotNotes ? "Edit notes" : "Add notes"}
+            </Button>
+          )}
+          {pilotFlag && editingNotes && (
+            <>
+              <textarea
+                className="atlas-input"
+                rows={3}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Pilot notes…"
+              />
+              <div style={{ display: "flex", gap: "var(--atlas-space-2)" }}>
+                <Button size="sm" variant="primary" loading={saving} onClick={saveNotes}>
+                  Save
+                </Button>
+                <Button size="sm" onClick={() => { setEditingNotes(false); setNotes(pilotNotes); }}>
+                  Cancel
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {pilotFlag && (
+        <div style={{ marginTop: "var(--atlas-space-4)", borderTop: "1px solid var(--atlas-border)", paddingTop: "var(--atlas-space-3)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--atlas-space-2)" }}>
+            <button
+              type="button"
+              className="atlas-btn atlas-btn--link"
+              style={{ fontWeight: 600, fontSize: 13, padding: 0 }}
+              onClick={() => setIssuesExpanded(!issuesExpanded)}
+            >
+              Issues {openIssueCount > 0 && `(${openIssueCount} open)`}
+              <Icon name={issuesExpanded ? "chevron-down" : "chevron-right"} size={12} />
+            </button>
+            {canWrite && issuesExpanded && !creatingIssue && (
+              <Button size="sm" onClick={() => setCreatingIssue(true)}>
+                New
+              </Button>
+            )}
+          </div>
+
+          {issuesExpanded && creatingIssue && (
+            <div className="atlas-form" style={{ marginBottom: "var(--atlas-space-3)" }}>
+              <TextField
+                label="Title"
+                value={newTitle}
+                placeholder="Brief description of the issue"
+                onChange={(e) => setNewTitle(e.target.value)}
+              />
+              <TextAreaField
+                label="Description"
+                value={newDescription}
+                placeholder="Additional context (optional)"
+                onChange={(e) => setNewDescription(e.target.value)}
+                rows={2}
+              />
+              <SelectField
+                label="Severity"
+                value={newSeverity}
+                options={[
+                  { value: "low", label: "Low" },
+                  { value: "medium", label: "Medium" },
+                  { value: "high", label: "High" },
+                  { value: "critical", label: "Critical" },
+                ]}
+                onChange={(e) => setNewSeverity(e.target.value)}
+              />
+              <div style={{ display: "flex", gap: "var(--atlas-space-2)" }}>
+                <Button size="sm" variant="primary" loading={saving} disabled={!newTitle.trim()} onClick={submitNewIssue}>
+                  Create issue
+                </Button>
+                <Button size="sm" onClick={() => { setCreatingIssue(false); setNewTitle(""); setNewDescription(""); setNewSeverity("medium"); }}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {issuesExpanded && issuesLoading && <p className="atlas-text-muted" style={{ fontSize: 12 }}>Loading issues…</p>}
+
+          {issuesExpanded && !issuesLoading && issues.length === 0 && (
+            <p className="atlas-text-muted" style={{ fontSize: 12 }}>No pilot issues recorded.</p>
+          )}
+
+          {issuesExpanded && !issuesLoading && issues.map((issue) => (
+            <div
+              key={issue.id}
+              style={{
+                padding: "var(--atlas-space-2)",
+                marginBottom: "var(--atlas-space-2)",
+                borderRadius: "var(--atlas-radius)",
+                border: "1px solid var(--atlas-border)",
+                fontSize: 13,
+              }}
+            >
+              {editingIssueId === issue.id ? (
+                <div className="atlas-form" style={{ gap: "var(--atlas-space-2)" }}>
+                  <p className="atlas-text-dense" style={{ fontWeight: 600, margin: 0 }}>{issue.title}</p>
+                  <SelectField
+                    label="Status"
+                    value={editStatus}
+                    options={[
+                      { value: "open", label: "Open" },
+                      { value: "in_progress", label: "In progress" },
+                      { value: "resolved", label: "Resolved" },
+                      { value: "wont_fix", label: "Won't fix" },
+                    ]}
+                    onChange={(e) => setEditStatus(e.target.value)}
+                  />
+                  <SelectField
+                    label="Severity"
+                    value={editSeverity}
+                    options={[
+                      { value: "low", label: "Low" },
+                      { value: "medium", label: "Medium" },
+                      { value: "high", label: "High" },
+                      { value: "critical", label: "Critical" },
+                    ]}
+                    onChange={(e) => setEditSeverity(e.target.value)}
+                  />
+                  <TextAreaField
+                    label="Resolution notes"
+                    value={editResolutionNotes}
+                    placeholder="Optional resolution notes"
+                    onChange={(e) => setEditResolutionNotes(e.target.value)}
+                    rows={2}
+                  />
+                  <div style={{ display: "flex", gap: "var(--atlas-space-2)" }}>
+                    <Button size="sm" variant="primary" loading={saving} onClick={saveIssueUpdate}>
+                      Save
+                    </Button>
+                    <Button size="sm" onClick={() => setEditingIssueId(null)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 4 }}>
+                    <p style={{ fontWeight: 600, margin: 0, lineHeight: 1.3 }}>{issue.title}</p>
+                    <StatusBadge status={severityMeta(issue.severity)} />
+                  </div>
+                  {issue.description && (
+                    <p className="atlas-text-muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{issue.description}</p>
+                  )}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+                    <StatusBadge
+                      status={{
+                        label: issue.status.replace(/_/g, " "),
+                        tone: issue.status === "resolved" ? "success" : issue.status === "wont_fix" ? "neutral" : issue.status === "in_progress" ? "info" : "warning",
+                      }}
+                    />
+                    <span className="atlas-text-muted" style={{ fontSize: 11 }}>
+                      {formatRelative(issue.created_at)}
+                    </span>
+                  </div>
+                  {issue.resolution_notes && (
+                    <p className="atlas-text-muted" style={{ fontSize: 12, margin: "4px 0 0", fontStyle: "italic" }}>
+                      {issue.resolution_notes}
+                    </p>
+                  )}
+                  {canManage && (
+                    <div style={{ marginTop: 6 }}>
+                      <Button size="sm" onClick={() => startEditIssue(issue)}>
+                        Update
+                      </Button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

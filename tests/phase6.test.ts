@@ -12,7 +12,6 @@ import {
   validateUploadInput,
 } from "../worker/src/phase6-hardening.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 
@@ -104,12 +103,29 @@ test("production/dev environment guard works for dev-only sign-in", () => {
     "development with a non-local redirect URI should block dev sign-in"
   );
   assert(validateEnv({ ...env, ATLAS_ENV: "production" }).includes("production_redirect_uri_is_local"), "production local redirect should be flagged");
+  assert(validateEnv({ ...env, ATLAS_ENV: "production" }).includes("production_oauth_state_secret_missing"), "missing ATLAS_OAUTH_STATE_SECRET in production should be flagged");
 });
 
-test("Phase 3/4/5 tables have RLS policy coverage listed", () => {
-  for (const table of ["atlas_quote_reviews", "atlas_quote_review_sections", "atlas_missing_info_items", "atlas_communications"]) {
+test("all RLS-enabled tables are listed in PHASE6_RLS_TABLES (static registry check)", () => {
+  // NOTE: This is a STATIC policy registry check — it verifies that the code
+  // tracks the expected set of RLS-enabled tables, NOT that the database
+  // policies actually enforce the expected access boundaries. For behavioural
+  // RLS verification against a live database, run scripts/rls-validation.sql
+  // against a local or staging Supabase instance.
+  const allRlsTables = [
+    "atlas_submissions", "atlas_documents", "atlas_extractions",
+    "atlas_insurer_appetite", "atlas_appetite_history",
+    "atlas_recommendations", "atlas_decisions", "atlas_audit_logs",
+    "atlas_insurers", "atlas_insurer_documents",
+    "atlas_quote_reviews", "atlas_quote_review_sections",
+    "atlas_missing_info_items", "atlas_communications",
+    "atlas_jobs", "atlas_cleanup_candidates", "atlas_operational_alerts",
+    "atlas_pilot_issues",
+  ];
+  for (const table of allRlsTables) {
     assert(PHASE6_RLS_TABLES.includes(table as (typeof PHASE6_RLS_TABLES)[number]), `${table} should be covered`);
   }
+  assertEqual(PHASE6_RLS_TABLES.length, allRlsTables.length, "no extra or missing tables");
 });
 
 test("audit events are tracked for decision, missing-info, and communication changes", () => {

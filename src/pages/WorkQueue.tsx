@@ -62,6 +62,7 @@ type Filters = {
   queue_status: string;
   line_of_business: "" | "personal" | "commercial";
   priority: "" | "low" | "normal" | "high" | "urgent";
+  pilot: boolean;
 };
 
 const EMPTY_FILTERS: Filters = {
@@ -69,6 +70,7 @@ const EMPTY_FILTERS: Filters = {
   queue_status: "",
   line_of_business: "",
   priority: "",
+  pilot: false,
 };
 
 /** A submission wants a human when it is overdue, escalated, or parked. */
@@ -138,18 +140,26 @@ export default function WorkQueue({
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
+  const hasActiveJobs = items.some((item) => item.active_job);
+  useEffect(() => {
+    if (!hasActiveJobs) return;
+    const timer = window.setInterval(() => setReloadToken((t) => t + 1), 5000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveJobs]);
+
   useEffect(() => {
     let live = true;
     // Debounce only the free-text search; dropdown changes should feel instant.
     const timer = window.setTimeout(
       () => {
-        setLoading(true);
+        if (items.length === 0) setLoading(true);
         listSubmissions({
           q: search || undefined,
           status: filters.status || undefined,
           queue_status: filters.queue_status || undefined,
           line_of_business: filters.line_of_business || undefined,
           priority: filters.priority || undefined,
+          pilot: filters.pilot || undefined,
         })
           .then((res) => {
             if (!live) return;
@@ -243,6 +253,14 @@ export default function WorkQueue({
       onRemove: () => setFilters((current) => ({ ...current, priority: "" })),
     });
   }
+  if (filters.pilot) {
+    activeFilters.push({
+      key: "pilot",
+      label: "Pilot",
+      value: "Pilot cases only",
+      onRemove: () => setFilters((current) => ({ ...current, pilot: false })),
+    });
+  }
   if (focus !== "all") {
     activeFilters.push({
       key: "focus",
@@ -260,14 +278,21 @@ export default function WorkQueue({
       sortValue: (row) => (row.client_name ?? "").toLowerCase(),
       cell: (row) => (
         <div className="atlas-table__cellstack">
-          <button
-            type="button"
-            className="atlas-table__primary atlas-truncate"
-            onClick={() => onOpen(row.id)}
-            title={row.client_name ?? "Untitled submission"}
-          >
-            {row.client_name || "Untitled submission"}
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--atlas-space-2)" }}>
+            <button
+              type="button"
+              className="atlas-table__primary atlas-truncate"
+              onClick={() => onOpen(row.id)}
+              title={row.client_name ?? "Untitled submission"}
+            >
+              {row.client_name || "Untitled submission"}
+            </button>
+            {row.pilot_flag && (
+              <span className="atlas-badge atlas-badge--info" style={{ flexShrink: 0 }}>
+                <span className="atlas-badge__label">Pilot</span>
+              </span>
+            )}
+          </div>
           <span className="atlas-table__sub atlas-truncate" title={row.request_type ?? undefined}>
             {submissionReference(row.id)} · {row.request_type || "Risk type not captured"}
           </span>
@@ -303,7 +328,28 @@ export default function WorkQueue({
       id: "stage",
       header: "Stage",
       sortValue: (row) => workflowStatus(row.status).label,
-      cell: (row) => <StatusBadge status={workflowStatus(row.status)} />,
+      cell: (row) => (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <StatusBadge status={workflowStatus(row.status)} />
+          {row.active_job && (
+            row.active_job.cancellation_requested ? (
+              <span className="atlas-badge atlas-badge--warning" style={{ fontSize: 11 }}>
+                <span className="atlas-badge__label">Cancelling</span>
+              </span>
+            ) : (
+              <span className="atlas-badge atlas-badge--info" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <span className="atlas-pulse-dot" />
+                <span className="atlas-badge__label">
+                  {row.active_job.job_type === "extraction" ? "Extracting" :
+                   row.active_job.job_type === "recommendation" ? "Recommending" :
+                   row.active_job.job_type === "quote_review" ? "Reviewing" : "Processing"}
+                  {row.active_job.progress_percent != null ? ` ${Math.round(row.active_job.progress_percent)}%` : "…"}
+                </span>
+              </span>
+            )
+          )}
+        </div>
+      ),
     },
     {
       id: "queue",
@@ -557,6 +603,18 @@ export default function WorkQueue({
           </select>
         </div>
 
+        <div className="atlas-toolbar__field" style={{ alignSelf: "flex-end" }}>
+          <button
+            type="button"
+            className={`atlas-btn atlas-btn--sm ${filters.pilot ? "atlas-btn--pressed" : "atlas-btn--ghost"}`}
+            aria-pressed={filters.pilot}
+            onClick={() => setFilters((current) => ({ ...current, pilot: !current.pilot }))}
+            title="Show only submissions flagged as pilot cases"
+          >
+            Pilot only
+          </button>
+        </div>
+
         {mode === "list" && (
           <div className="atlas-toolbar__field" style={{ alignSelf: "flex-end" }}>
             <ColumnPicker columns={columns} hidden={hiddenColumns} onChange={setHiddenColumns} />
@@ -693,6 +751,22 @@ function QueueBoard({
                     <span className="atlas-queue__tagcell">
                       <StatusBadge status={priorityStatus(item.priority)} />
                       {needsAttention(item) && <StatusBadge status={queueStatus(item.queue_status)} />}
+                      {item.active_job && (
+                        item.active_job.cancellation_requested ? (
+                          <span className="atlas-badge atlas-badge--warning" style={{ fontSize: 11 }}>
+                            <span className="atlas-badge__label">Cancelling</span>
+                          </span>
+                        ) : (
+                          <span className="atlas-badge atlas-badge--info" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                            <span className="atlas-pulse-dot" />
+                            <span className="atlas-badge__label">
+                              {item.active_job.job_type === "extraction" ? "Extracting" :
+                               item.active_job.job_type === "recommendation" ? "Recommending" : "Processing"}
+                              {item.active_job.progress_percent != null ? ` ${Math.round(item.active_job.progress_percent)}%` : "…"}
+                            </span>
+                          </span>
+                        )
+                      )}
                     </span>
                     <span className="atlas-board__card-next">
                       {item.next_action || defaultNextAction(item)}

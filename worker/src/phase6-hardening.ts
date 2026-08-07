@@ -37,13 +37,20 @@ export const PHASE6_RLS_TABLES = [
   "atlas_documents",
   "atlas_extractions",
   "atlas_insurer_appetite",
+  "atlas_appetite_history",
   "atlas_recommendations",
   "atlas_decisions",
   "atlas_audit_logs",
+  "atlas_insurers",
+  "atlas_insurer_documents",
   "atlas_quote_reviews",
   "atlas_quote_review_sections",
   "atlas_missing_info_items",
   "atlas_communications",
+  "atlas_jobs",
+  "atlas_cleanup_candidates",
+  "atlas_operational_alerts",
+  "atlas_pilot_issues",
 ] as const;
 
 export const PHASE6_AUDIT_EVENTS = [
@@ -97,6 +104,9 @@ export function validateEnv(env: Env): string[] {
     }
     if (!env.ATLAS_MALWARE_SCANNER_URL || !env.ATLAS_MALWARE_SCANNER_TOKEN) {
       problems.push("production_malware_scanner_missing");
+    }
+    if (!env.ATLAS_OAUTH_STATE_SECRET) {
+      problems.push("production_oauth_state_secret_missing");
     }
   }
   return problems;

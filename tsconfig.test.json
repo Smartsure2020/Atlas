@@ -7,7 +7,8 @@
     "strict": true,
     "skipLibCheck": true,
     "outDir": ".test-dist",
-    "rootDir": "."
+    "rootDir": ".",
+    "types": ["node"]
   },
   "include": [
     "tests/**/*.ts",
@@ -24,7 +25,21 @@
     "worker/src/phase7-jobs.ts",
     "worker/src/phase7-endpoints.ts",
     "worker/src/phase8-core.ts",
+    "worker/src/pipeline-types.ts",
+    "worker/src/pipeline-mode.ts",
+    "worker/src/pipeline-router.ts",
+    "worker/src/pipeline-telemetry.ts",
+    "worker/src/parser-local-pdf.ts",
+    "worker/src/parser-azure.ts",
+    "worker/src/anthropic-client.ts",
+    "worker/src/explanation-composer.ts",
+    "worker/src/email-templates.ts",
+    "worker/src/hybrid-shadow.ts",
+    "worker/src/hybrid-llm.ts",
+    "worker/src/pipeline-version.ts",
+    "worker/src/shadow-queue.ts",
     "src/lib/review-edit.ts",
-    "src/lib/upload.ts"
+    "src/lib/upload.ts",
+    "scripts/benchmark-pipeline.ts"
   ]
 }

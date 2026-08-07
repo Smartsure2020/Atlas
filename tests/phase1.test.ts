@@ -6,7 +6,6 @@ import { diffFieldPaths } from "../worker/src/review-diff.js";
 import { parseReviewFieldValue } from "../src/lib/review-edit.js";
 import { putSignedUpload } from "../src/lib/upload.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 

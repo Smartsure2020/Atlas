@@ -17,7 +17,7 @@
  */
 
 import { authorise, audit, adminClient, json, jsonError, type AtlasUser } from "./auth";
-import { handleLogin, handleCallback } from "./oauth";
+import { handleLogin, handleCallback, handleSignOut } from "./oauth";
 import { handleExtract } from "./extract-endpoint";
 import { handleGetSubmission, handleReview } from "./submission-endpoints";
 import {
@@ -78,11 +78,19 @@ import {
   handleRetryJob,
   handleUpdateAlert,
 } from "./phase8-endpoints";
+import {
+  handleCreatePilotIssue,
+  handleListPilotIssues,
+  handleUpdatePilotFlag,
+  handleUpdatePilotIssue,
+} from "./pilot-endpoints";
 import { buildHealthBody } from "./phase7-core";
 import { emailsForUserIds } from "./user-directory";
 import { runBackgroundMaintenance } from "./phase4-background";
 import { beginJob } from "./phase7-jobs";
 import { canAccessSubmission, canViewAllSubmissions, scopedSubmissionOr } from "./access-scope";
+import { handleShadowQueueBatch, type ShadowQueueMessage } from "./shadow-queue";
+import { runHybridExtraction } from "./hybrid-orchestrator";
 
 // ---------------------------------------------------------------------------
 // CORS — the Vite dev server (:5173) and the worker (:8787) are different
@@ -118,20 +126,39 @@ function withCors(res: Response, env: Env, requestOrigin?: string | null): Respo
 const CLIENT_DOCS_BUCKET = "atlas-client-docs";
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(env, request.headers.get("Origin")) });
     }
-    return withCors(await route(request, env), env, request.headers.get("Origin"));
+    return withCors(await route(request, env, ctx), env, request.headers.get("Origin"));
   },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runBackgroundMaintenance(env).catch((error) => {
       console.error("atlas_background_maintenance_failed", { error_name: (error as Error)?.name });
     }));
   },
+  /**
+   * Cloudflare Queue consumer entry for the shadow pipeline. Each message
+   * carries only identifiers (see ShadowQueueMessage). The consumer holds
+   * document processing responsibility — HTTP `waitUntil` no longer does.
+   *
+   * Never throws: handleShadowQueueBatch classifies each message's failure and
+   * calls ack() or retry() on the individual message. A throw here would
+   * retry the entire batch, so we swallow at the top level as a safety net.
+   */
+  async queue(batch: MessageBatch<ShadowQueueMessage>, env: Env, _ctx: ExecutionContext): Promise<void> {
+    try {
+      await handleShadowQueueBatch(batch, env, {
+        buildAdmin: adminClient,
+        runHybrid: runHybridExtraction,
+      });
+    } catch (err) {
+      console.warn("atlas_shadow_queue_batch_failed", (err as Error)?.message?.slice(0, 120) ?? "unknown");
+    }
+  },
 };
 
-async function route(request: Request, env: Env): Promise<Response> {
+async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
 
@@ -154,10 +181,13 @@ async function route(request: Request, env: Env): Promise<Response> {
       }
       // ---- Auth routes (no bearer token yet) ----
       if (pathname === "/auth/login" && request.method === "GET") {
-        return handleLogin(env);
+        return handleLogin(request, env);
       }
       if (pathname === "/auth/callback" && request.method === "GET") {
         return handleCallback(request, env);
+      }
+      if (pathname === "/auth/sign-out" && request.method === "POST") {
+        return handleSignOut(request, env);
       }
       if (pathname === "/dev/sign-in" && request.method === "GET") {
         return handleDevSignIn(request, env);
@@ -246,7 +276,7 @@ async function route(request: Request, env: Env): Promise<Response> {
         }
         if (sub === "/extract" && request.method === "POST") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot run extraction.");
-          return handleExtract(id, request, env, user);
+          return handleExtract(id, request, env, user, ctx);
         }
         if (sub === "/review" && request.method === "POST") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot save reviews.");
@@ -313,6 +343,15 @@ async function route(request: Request, env: Env): Promise<Response> {
         if (sub === "/audit" && request.method === "GET") {
           return handleGetAuditTimeline(id, env, user);
         }
+        if (sub === "/pilot" && request.method === "PATCH") {
+          return handleUpdatePilotFlag(id, request, env, user);
+        }
+        if (sub === "/pilot-issues" && request.method === "GET") {
+          return handleListPilotIssues(id, env, user);
+        }
+        if (sub === "/pilot-issues" && request.method === "POST") {
+          return handleCreatePilotIssue(id, request, env, user);
+        }
         if (sub && sub.startsWith("/emails/") && request.method === "POST") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot generate email drafts.");
           const emailType = emailTypeFromPath(sub.slice("/emails".length));
@@ -336,6 +375,13 @@ async function route(request: Request, env: Env): Promise<Response> {
         if (cm && request.method === "PATCH") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot update communications.");
           return handleUpdateCommunication(cm[1], request, env, user);
+        }
+      }
+
+      {
+        const pm = pathname.match(/^\/api\/pilot-issues\/([0-9a-fA-F-]{36})$/);
+        if (pm && request.method === "PATCH") {
+          return handleUpdatePilotIssue(pm[1], request, env, user);
         }
       }
 
@@ -432,12 +478,13 @@ async function listSubmissions(
   const queueStatus = params.get("queue_status");
   const lineOfBusiness = params.get("line_of_business");
   const priority = params.get("priority");
+  const pilotOnly = params.get("pilot") === "true";
   const sort = params.get("sort") === "oldest" ? "created_at" : "created_at";
   const ascending = params.get("sort") === "oldest";
   const baseColumns =
     "id, broker_name, client_name, request_type, status, assigned_underwriter, created_at, updated_at";
   const phase7Columns = `${baseColumns}, assigned_to, assigned_at, assigned_by, queue_status`;
-  const phase1Columns = `${phase7Columns}, line_of_business, priority, next_action, due_at`;
+  const phase1Columns = `${phase7Columns}, line_of_business, priority, next_action, due_at, pilot_flag`;
 
   let query = admin
     .from("atlas_submissions")
@@ -451,6 +498,7 @@ async function listSubmissions(
   if (queueStatus) query = query.eq("queue_status", queueStatus);
   if (lineOfBusiness) query = query.eq("line_of_business", lineOfBusiness);
   if (priority) query = query.eq("priority", priority);
+  if (pilotOnly) query = query.eq("pilot_flag", true);
   if (!canViewAllSubmissions(env, user)) query = query.or(scopedSubmissionOr(user));
   const { data, error } = await query.order(sort, { ascending }).limit(500);
 
@@ -497,18 +545,47 @@ async function withAssigneeEmails(
   const ids = typedRows
     .map((row) => row.assigned_to ?? row.assigned_underwriter)
     .filter((id): id is string => typeof id === "string" && id.length > 0);
-  const emails = await emailsForUserIds(admin, ids);
+  const submissionIds = typedRows
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === "string");
+
+  const [emails, activeJobs] = await Promise.all([
+    emailsForUserIds(admin, ids),
+    submissionIds.length > 0
+      ? admin
+          .from("atlas_jobs")
+          .select("submission_id, job_type, status, progress_percent, current_step, cancellation_requested")
+          .in("submission_id", submissionIds)
+          .in("status", ["queued", "running"])
+          .then((r) => r.data ?? [])
+      : Promise.resolve([]),
+  ]);
+
+  type ActiveJob = { submission_id: string; job_type: string; status: string; progress_percent: number | null; current_step: string | null; cancellation_requested: boolean | null };
+  const jobsBySubmission = new Map<string, ActiveJob>();
+  for (const job of activeJobs as ActiveJob[]) {
+    if (!jobsBySubmission.has(job.submission_id)) {
+      jobsBySubmission.set(job.submission_id, job);
+    }
+  }
+
   return json({
     ok: true,
-    submissions: typedRows.map((row) => ({
-      ...row,
-      assigned_to_email:
-        typeof row.assigned_to === "string"
-          ? emails.get(row.assigned_to) ?? null
-          : typeof row.assigned_underwriter === "string"
-          ? emails.get(row.assigned_underwriter) ?? null
+    submissions: typedRows.map((row) => {
+      const activeJob = jobsBySubmission.get(row.id as string);
+      return {
+        ...row,
+        assigned_to_email:
+          typeof row.assigned_to === "string"
+            ? emails.get(row.assigned_to) ?? null
+            : typeof row.assigned_underwriter === "string"
+            ? emails.get(row.assigned_underwriter) ?? null
+            : null,
+        active_job: activeJob
+          ? { job_type: activeJob.job_type, status: activeJob.status, progress_percent: activeJob.progress_percent, current_step: activeJob.current_step, cancellation_requested: !!activeJob.cancellation_requested }
           : null,
-    })),
+      };
+    }),
   });
 }
 

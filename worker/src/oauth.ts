@@ -13,13 +13,16 @@
  *                            app_metadata.atlas_role, which RLS trusts.
  *   5. We mint a Supabase session for the frontend.
  *
- * NOTE: this is the scaffold skeleton — the Microsoft token exchange and the
- * Supabase session mint are sketched with clear seams. The security-critical
- * logic (allow-list resolution, fail-closed, role stamping, audit) is real.
+ * Security:
+ *   - id_token signature is verified against Microsoft's JWKS (RS256).
+ *   - OAuth state is stored in an HMAC-signed, HttpOnly, short-lived cookie
+ *     so login and callback can be served by different Worker isolates.
+ *   - Token claims (iss, aud, exp, nbf) are validated.
  */
 
 import { adminClient, audit, json } from "./auth";
 import { resolveRoleFromAllowlist, type Env } from "./config";
+import { generateOAuthState, verifyMicrosoftIdToken } from "./jwks";
 import { findUserByEmail } from "./user-directory";
 
 const MS_AUTHORIZE = (env: Env) =>
@@ -27,24 +30,152 @@ const MS_AUTHORIZE = (env: Env) =>
 const MS_TOKEN = (env: Env) =>
   `https://login.microsoftonline.com/${env.AZURE_TENANT_ID}/oauth2/v2.0/token`;
 
+const STATE_TTL_MS = 10 * 60 * 1000;
+const STATE_COOKIE_NAME = "atlas_oauth_state";
+
+const SAFE_RETURN_PATH_RE = /^\/[a-zA-Z0-9/_-]*$/;
+
+function isProductionEnv(env: Env): boolean {
+  return env.ATLAS_ENV === "production";
+}
+
+async function hmacSign(data: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return btoa(String.fromCharCode(...new Uint8Array(sig)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+async function hmacVerify(data: string, signature: string, secret: string): Promise<boolean> {
+  const expected = await hmacSign(data, secret);
+  if (expected.length !== signature.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < expected.length; i++) {
+    mismatch |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+function hmacSecret(env: Env): string {
+  return env.ATLAS_OAUTH_STATE_SECRET || env.AZURE_CLIENT_SECRET;
+}
+
+function buildStateCookieValue(
+  state: string, expiresAt: number, returnPath: string,
+  nonce: string, codeVerifier: string,
+): string {
+  return `${state}|${expiresAt}|${returnPath}|${nonce}|${codeVerifier}`;
+}
+
+function parseStateCookieValue(value: string): {
+  state: string; expiresAt: number; returnPath: string;
+  nonce: string; codeVerifier: string;
+} | null {
+  const parts = value.split("|");
+  if (parts.length < 5) return null;
+  const state = parts[0];
+  const expiresAt = Number(parts[1]);
+  const returnPath = parts[2];
+  const nonce = parts[3];
+  const codeVerifier = parts[4];
+  if (!state || !Number.isFinite(expiresAt) || !nonce || !codeVerifier) return null;
+  return { state, expiresAt, returnPath, nonce, codeVerifier };
+}
+
+function stateCookieHeader(value: string, signature: string, env: Env, maxAge: number): string {
+  const secure = isProductionEnv(env) ? "; Secure" : "";
+  return `${STATE_COOKIE_NAME}=${encodeURIComponent(`${value}|${signature}`)}; HttpOnly; SameSite=Lax; Path=/auth/callback; Max-Age=${maxAge}${secure}`;
+}
+
+function clearStateCookieHeader(env: Env): string {
+  const secure = isProductionEnv(env) ? "; Secure" : "";
+  return `${STATE_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/auth/callback; Max-Age=0${secure}`;
+}
+
+function parseCookies(cookieHeader: string | null): Map<string, string> {
+  const cookies = new Map<string, string>();
+  if (!cookieHeader) return cookies;
+  for (const pair of cookieHeader.split(";")) {
+    const eqIdx = pair.indexOf("=");
+    if (eqIdx < 0) continue;
+    const name = pair.slice(0, eqIdx).trim();
+    const value = pair.slice(eqIdx + 1).trim();
+    cookies.set(name, decodeURIComponent(value));
+  }
+  return cookies;
+}
+
+async function computeS256Challenge(verifier: string): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return btoa(String.fromCharCode(...new Uint8Array(hash)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+export function safeReturnPath(input: string | null | undefined): string {
+  if (!input) return "/";
+  const trimmed = input.trim();
+  if (!SAFE_RETURN_PATH_RE.test(trimmed)) return "/";
+  if (trimmed.includes("//")) return "/";
+  return trimmed || "/";
+}
+
 /** Step 1: build the Microsoft sign-in URL and redirect the user to it. */
-export function handleLogin(env: Env): Response {
+export async function handleLogin(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const returnPath = safeReturnPath(url.searchParams.get("return"));
+  const state = generateOAuthState();
+  const nonce = generateOAuthState();
+  const codeVerifier = generateOAuthState();
+  const codeChallenge = await computeS256Challenge(codeVerifier);
+  const expiresAt = Date.now() + STATE_TTL_MS;
+  const cookiePayload = buildStateCookieValue(state, expiresAt, returnPath, nonce, codeVerifier);
+  const signature = await hmacSign(cookiePayload, hmacSecret(env));
+
   const params = new URLSearchParams({
     client_id: env.AZURE_CLIENT_ID,
     response_type: "code",
     redirect_uri: env.AZURE_REDIRECT_URI,
     response_mode: "query",
     scope: "openid email profile",
+    state,
+    nonce,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
   });
   const authorizeUrl = `${MS_AUTHORIZE(env)}?${params.toString()}`;
-  return Response.redirect(authorizeUrl, 302);
+  const maxAgeSec = Math.ceil(STATE_TTL_MS / 1000);
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: authorizeUrl,
+      "Set-Cookie": stateCookieHeader(cookiePayload, signature, env, maxAgeSec),
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+interface TokenExchangeResult {
+  email: string;
+  idTokenNonce: string | null;
 }
 
 /** Step 3: exchange the auth code for the verified Microsoft identity. */
 async function exchangeCodeForEmail(
   code: string,
-  env: Env
-): Promise<string | null> {
+  env: Env,
+  codeVerifier: string,
+): Promise<TokenExchangeResult | null> {
   const body = new URLSearchParams({
     client_id: env.AZURE_CLIENT_ID,
     client_secret: env.AZURE_CLIENT_SECRET,
@@ -52,6 +183,7 @@ async function exchangeCodeForEmail(
     redirect_uri: env.AZURE_REDIRECT_URI,
     grant_type: "authorization_code",
     scope: "openid email profile",
+    code_verifier: codeVerifier,
   });
 
   const res = await fetch(MS_TOKEN(env), {
@@ -64,25 +196,25 @@ async function exchangeCodeForEmail(
   const tokens = (await res.json()) as { id_token?: string };
   if (!tokens.id_token) return null;
 
-  // The id_token is a JWT; its payload carries the verified email claim.
-  // (Signature verification against Microsoft's JWKS is wired in the full
-  // implementation; the email is taken from the verified token, not the client.)
-  const payload = decodeJwtPayload(tokens.id_token);
+  const verified = await verifyMicrosoftIdToken(
+    tokens.id_token,
+    env.AZURE_TENANT_ID,
+    env.AZURE_CLIENT_ID,
+  );
+
+  if (!verified) return null;
+
+  const payload = verified.payload;
   const email =
     (payload?.email as string) ||
     (payload?.preferred_username as string) ||
     null;
-  return email ? email.toLowerCase() : null;
-}
+  if (!email) return null;
 
-function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
-  try {
-    const part = jwt.split(".")[1];
-    const b64 = part.replace(/-/g, "+").replace(/_/g, "/");
-    return JSON.parse(atob(b64));
-  } catch {
-    return null;
-  }
+  return {
+    email: email.toLowerCase(),
+    idTokenNonce: typeof payload.nonce === "string" ? payload.nonce : null,
+  };
 }
 
 /** Steps 3–5: the callback Microsoft redirects back to. */
@@ -92,10 +224,36 @@ export async function handleCallback(
 ): Promise<Response> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  if (!code) return json({ error: "missing_code" }, 400);
+  if (!code) return withClearCookie(json({ error: "missing_code" }, 400), env);
 
-  const email = await exchangeCodeForEmail(code, env);
-  if (!email) return json({ error: "auth_failed" }, 401);
+  const state = url.searchParams.get("state");
+  if (!state) return withClearCookie(json({ error: "missing_state" }, 400), env);
+
+  const cookies = parseCookies(request.headers.get("Cookie"));
+  const rawCookie = cookies.get(STATE_COOKIE_NAME);
+  if (!rawCookie) return withClearCookie(json({ error: "missing_state_cookie" }, 400), env);
+
+  const lastPipe = rawCookie.lastIndexOf("|");
+  if (lastPipe < 0) return withClearCookie(json({ error: "malformed_state_cookie" }, 400), env);
+  const cookiePayload = rawCookie.slice(0, lastPipe);
+  const cookieSignature = rawCookie.slice(lastPipe + 1);
+
+  const signatureValid = await hmacVerify(cookiePayload, cookieSignature, hmacSecret(env));
+  if (!signatureValid) return withClearCookie(json({ error: "invalid_state_signature" }, 400), env);
+
+  const parsed = parseStateCookieValue(cookiePayload);
+  if (!parsed) return withClearCookie(json({ error: "malformed_state_cookie" }, 400), env);
+  if (parsed.expiresAt < Date.now()) return withClearCookie(json({ error: "expired_state" }, 400), env);
+  if (parsed.state !== state) return withClearCookie(json({ error: "state_mismatch" }, 400), env);
+
+  const tokenResult = await exchangeCodeForEmail(code, env, parsed.codeVerifier);
+  if (!tokenResult) return json({ error: "auth_failed" }, 401);
+
+  if (tokenResult.idTokenNonce !== parsed.nonce) {
+    return withClearCookie(json({ error: "nonce_mismatch" }, 400), env);
+  }
+
+  const email = tokenResult.email;
 
   // ---- Authorisation: the allow-list decides, and it fails CLOSED. ----
   const role = resolveRoleFromAllowlist(email, env);
@@ -112,9 +270,6 @@ export async function handleCallback(
   // ---- Ensure a Supabase user exists and stamp the trusted role claim. ----
   const admin = adminClient(env);
 
-  // Find or create the Supabase user for this email.
-  // (createUser is idempotent enough for the scaffold via the catch; the full
-  // version looks up by email first.)
   let userId: string | null = null;
   const created = await admin.auth.admin.createUser({
     email,
@@ -124,8 +279,6 @@ export async function handleCallback(
   if (created.data?.user) {
     userId = created.data.user.id;
   } else {
-    // User already exists — fetch and UPDATE the role so allow-list changes
-    // (e.g. promotion to admin, or revocation handled elsewhere) take effect.
     const existing = await findUserByEmail(admin, email);
     if (existing) {
       userId = existing.id;
@@ -143,17 +296,50 @@ export async function handleCallback(
     metadata: { role },
   });
 
-  // Mint a session for the frontend. (Magic-link/session generation via the
-  // admin API is wired here in the full implementation; the seam is explicit.)
   const { data: link } = await admin.auth.admin.generateLink({
     type: "magiclink",
     email,
   });
 
-  return json({
+  const returnPath = parsed.returnPath || "/";
+
+  return withClearCookie(json({
     ok: true,
     user: { id: userId, email, role },
-    // The frontend completes session establishment from this action link.
     action_link: link?.properties?.action_link ?? null,
+    return_path: returnPath,
+  }), env);
+}
+
+function withClearCookie(response: Response, env: Env): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Set-Cookie", clearStateCookieHeader(env));
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
+}
+
+/** POST /auth/sign-out — invalidate the user's Supabase session. */
+export async function handleSignOut(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const auth = request.headers.get("Authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return json({ error: "missing_token" }, 400);
+
+  const admin = adminClient(env);
+  const { data, error: userErr } = await admin.auth.getUser(token);
+  if (userErr || !data?.user) return json({ error: "invalid_session" }, 401);
+
+  await admin.auth.admin.signOut(token, "local");
+
+  await audit(env, {
+    action: "sign_out",
+    actorId: data.user.id,
+  });
+
+  return json({ ok: true });
 }

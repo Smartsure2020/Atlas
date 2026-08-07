@@ -85,7 +85,7 @@ export async function beginJob(
   if (!opts.force && input.inputFingerprint) {
     const { data: running } = await admin
       .from("atlas_jobs")
-      .select("id, status")
+      .select("id, status, created_at, heartbeat_at")
       .eq("job_type", input.jobType)
       .eq("input_fingerprint", input.inputFingerprint)
       .in("status", ["queued", "running"])
@@ -93,11 +93,28 @@ export async function beginJob(
       .limit(1)
       .maybeSingle();
     if (running?.id) {
-      return {
-        action: "duplicate_running",
-        previousJobId: String(running.id),
-        message: "This job is already running for unchanged inputs.",
-      };
+      const age = Date.now() - new Date(running.created_at).getTime();
+      const heartbeatAge = running.heartbeat_at
+        ? Date.now() - new Date(running.heartbeat_at).getTime()
+        : age;
+      const stale = age > 15 * 60_000 || heartbeatAge > 10 * 60_000;
+      if (stale) {
+        await admin
+          .from("atlas_jobs")
+          .update({
+            status: "failed",
+            error_code: "stale_timeout",
+            error_message: "Job was abandoned (no heartbeat).",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", running.id);
+      } else {
+        return {
+          action: "duplicate_running",
+          previousJobId: String(running.id),
+          message: "This job is already running for unchanged inputs.",
+        };
+      }
     }
 
     const { data: completed } = await admin

@@ -15,12 +15,66 @@ compatibility_flags = ["nodejs_compat"]
 #   AZURE_REDIRECT_URI             # Atlas's callback, added to that registration
 #   ANTHROPIC_API_KEY              # extraction/reasoning (later phases)
 #   ATLAS_ALLOWLIST_JSON           # {"email":"consultant|manager|admin|readonly", ...}
+#   ATLAS_OAUTH_STATE_SECRET       # HMAC key for OAuth state cookies (NOT AZURE_CLIENT_SECRET)
 #
 # Vars (non-secret, configurable):
 [vars]
 ATLAS_DOC_RETENTION_DAYS = "7"   # configurable retention window for client docs
 ATLAS_ENV = "development"        # set to "production" in deployed Atlas
 ATLAS_CLEANUP_APPROVED = "false"
+
+# Hybrid document pipeline (phases 1-11 redesign). Defaults to legacy so the
+# existing Sonnet path stays authoritative until this is flipped. Values:
+#   legacy  — old path only (default)
+#   shadow  — new path runs alongside for comparison; NOT authoritative
+#   hybrid  — new path authoritative; legacy path is emergency fallback
+ATLAS_DOCUMENT_PIPELINE_MODE = "legacy"
+# Managed OCR/layout provider. Currently only "azure" is implemented.
+ATLAS_DOCUMENT_PROVIDER = "azure"
+# Fast-path cap; text-based PDFs above this bypass the fast path.
+ATLAS_HYBRID_MAX_TEXT_FASTPATH_PAGES = "40"
+# Recommendation explanation: deterministic composer (default) or Haiku polish.
+ATLAS_EXPLANATION_MODE = "deterministic"
+# Email drafts: template composer (default), template + Haiku polish, or legacy Sonnet.
+ATLAS_EMAIL_MODE = "template"
+# 0-100. Deterministic by input fingerprint. Default 0 = no shadow work.
+ATLAS_SHADOW_SAMPLE_PERCENT = "0"
+# Set to "true" to disable emergency legacy fallback in hybrid mode.
+ATLAS_LEGACY_FALLBACK_DISABLED = "false"
+
+# ---------------------------------------------------------------------------
+# Shadow-pipeline Cloudflare Queue (Phase 13).
+#
+# Why a queue rather than ctx.waitUntil(): HTTP `waitUntil` promises are
+# capped at ~30s after response, but Azure Document Intelligence polling is
+# permitted up to 60s and Sonnet resolution can extend past that. The queue
+# consumer has a substantially longer wall-clock budget and provides
+# reliable delivery + retries.
+#
+# The producer binding is named ATLAS_SHADOW_QUEUE. When missing, the shadow
+# path SKIPS (never falls back to waitUntil for document processing) and
+# records a privacy-safe metric with reason "queue_binding_missing".
+#
+# Provision the queue with (see docs/HYBRID_PIPELINE.md):
+#   wrangler queues create atlas-shadow-pipeline
+#   wrangler queues create atlas-shadow-pipeline-dlq
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "ATLAS_SHADOW_QUEUE"
+queue = "atlas-shadow-pipeline"
+
+[[queues.consumers]]
+queue = "atlas-shadow-pipeline"
+max_batch_size = 5
+max_batch_timeout = 5
+max_retries = 4
+dead_letter_queue = "atlas-shadow-pipeline-dlq"
+
+# Azure Document Intelligence secrets — SET WITH `wrangler secret put`:
+#   AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT   # e.g. https://<resource>.cognitiveservices.azure.com
+#   AZURE_DOCUMENT_INTELLIGENCE_KEY
+#   AZURE_DOCUMENT_INTELLIGENCE_MODEL      # default "prebuilt-layout"
+#   AZURE_DOCUMENT_INTELLIGENCE_API_VERSION  # default "2024-11-30"
 
 [triggers]
 # The queue worker polls every minute. Cleanup and alert escalation are
@@ -47,6 +101,9 @@ head_sampling_rate = 1
 [env.production.vars]
 ATLAS_ENV = "production"
 ATLAS_DOC_RETENTION_DAYS = "7"
+# Production defaults keep the hybrid pipeline OFF; shadow sampling zero.
+ATLAS_DOCUMENT_PIPELINE_MODE = "legacy"
+ATLAS_SHADOW_SAMPLE_PERCENT = "0"
 # Required before deploy — background scanning fails closed without it in production:
 ATLAS_MALWARE_SCANNER_URL = "https://scanner.yourcompany.com/scan"
 # ATLAS_MALWARE_SCANNER_TOKEN is a secret — set via:
@@ -58,3 +115,16 @@ ATLAS_STUCK_JOB_MINUTES = "20"
 ATLAS_ALERT_ESCALATE_MINUTES = "30"
 # Optional — escalation delivery target:
 # ATLAS_ALERT_WEBHOOK_URL = "https://hooks.yourcompany.com/atlas-alerts"
+
+# Shadow-pipeline queue for production. The queue + DLQ must be created with
+# `wrangler queues create` (see docs/HYBRID_PIPELINE.md) before deploy.
+[[env.production.queues.producers]]
+binding = "ATLAS_SHADOW_QUEUE"
+queue = "atlas-shadow-pipeline-production"
+
+[[env.production.queues.consumers]]
+queue = "atlas-shadow-pipeline-production"
+max_batch_size = 5
+max_batch_timeout = 5
+max_retries = 4
+dead_letter_queue = "atlas-shadow-pipeline-production-dlq"

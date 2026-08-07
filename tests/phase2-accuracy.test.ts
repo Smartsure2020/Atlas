@@ -15,7 +15,6 @@ import { canonicalTaxonomyKey, taxonomyKeysRelated } from "../worker/src/taxonom
 import { buildQuoteReview } from "../worker/src/quote-review.js";
 import type { AppetiteRow } from "../worker/src/matcher-types.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 

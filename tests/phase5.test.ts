@@ -8,7 +8,6 @@ import {
   withControlledHeader,
 } from "../worker/src/phase4-workflow.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 

@@ -44,6 +44,11 @@ export interface Env {
   // only an env update. (Could move to a table later without touching callers.)
   ATLAS_ALLOWLIST_JSON: string;
 
+  // --- OAuth state signing ---
+  // HMAC key for signing the OAuth state cookie. Must NOT be AZURE_CLIENT_SECRET.
+  // Set via: wrangler secret put ATLAS_OAUTH_STATE_SECRET
+  ATLAS_OAUTH_STATE_SECRET?: string;
+
   // --- Document retention (configurable; NOT hard-coded) ---
   // Days a client document file is kept before the expiry cron deletes it.
   // The extraction persists regardless. Default applied if unset.
@@ -67,6 +72,39 @@ export interface Env {
   ATLAS_WORKER_BATCH_SIZE?: string;
   ATLAS_STUCK_JOB_MINUTES?: string;
   ATLAS_ALERT_ESCALATE_MINUTES?: string;
+
+  // --- Hybrid document pipeline (phases 1-11 redesign) ---
+  // Mode gate for the new pipeline. Defaults to "legacy" so nothing changes
+  // until this env var is flipped. Values: legacy | hybrid | shadow.
+  ATLAS_DOCUMENT_PIPELINE_MODE?: string;
+  // Provider selector for the managed OCR/layout step. Currently only "azure".
+  ATLAS_DOCUMENT_PROVIDER?: string;
+  // Azure Document Intelligence (formerly Form Recognizer). Server-only.
+  AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT?: string;
+  AZURE_DOCUMENT_INTELLIGENCE_KEY?: string;
+  AZURE_DOCUMENT_INTELLIGENCE_MODEL?: string;
+  AZURE_DOCUMENT_INTELLIGENCE_API_VERSION?: string;
+  // Fast-path page cap; text PDFs longer than this bypass the fast path.
+  ATLAS_HYBRID_MAX_TEXT_FASTPATH_PAGES?: string;
+  // Recommendation explanation mode. Values: deterministic (default) | polish.
+  ATLAS_EXPLANATION_MODE?: string;
+  // Email drafting mode. Values: template (default) | polish | legacy.
+  ATLAS_EMAIL_MODE?: string;
+  // Percent (0-100) of extraction jobs to run through the shadow pipeline.
+  // Deterministic by input fingerprint. Default 0 = no shadow work.
+  ATLAS_SHADOW_SAMPLE_PERCENT?: string;
+  // Set to "true" to disable the emergency legacy fallback in hybrid mode.
+  ATLAS_LEGACY_FALLBACK_DISABLED?: string;
+
+  // Cloudflare Queue binding for shadow-pipeline processing.
+  //
+  // Populated only after the operator runs the wrangler commands documented in
+  // docs/HYBRID_PIPELINE.md. Absent binding => shadow is SKIPPED (never falls
+  // back to ctx.waitUntil for document work) and a `shadow_enqueue_skipped`
+  // metric is recorded with reason "queue_binding_missing".
+  ATLAS_SHADOW_QUEUE?: {
+    send(message: unknown, options?: { contentType?: "json" | "text" | "bytes" | "v8" }): Promise<void>;
+  };
 }
 
 export type AtlasRole = "underwriter" | "consultant" | "manager" | "admin" | "readonly";

@@ -89,8 +89,16 @@ export interface SubmissionListItem {
   next_action: string | null;
   due_at: string | null;
   updated_at: string;
+  pilot_flag: boolean | null;
   assigned_to_email: string | null;
   created_at: string;
+  active_job: {
+    job_type: string;
+    status: string;
+    progress_percent: number | null;
+    current_step: string | null;
+    cancellation_requested: boolean;
+  } | null;
 }
 
 export function listSubmissions(filters: {
@@ -100,10 +108,13 @@ export function listSubmissions(filters: {
   line_of_business?: "personal" | "commercial";
   priority?: "low" | "normal" | "high" | "urgent";
   sort?: "newest" | "oldest";
+  pilot?: boolean;
 } = {}) {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
-    if (value) params.set(key, value);
+    if (value !== undefined && value !== null && value !== false && value !== "") {
+      params.set(key, String(value));
+    }
   });
   const query = params.toString();
   return api<{ ok: true; submissions: SubmissionListItem[] }>(
@@ -125,8 +136,26 @@ export function createSubmission(input: {
   });
 }
 
+export interface SubmissionDetailResponse {
+  ok: true;
+  submission: Record<string, unknown>;
+  documents: Record<string, unknown>[];
+  extraction: {
+    id: string;
+    extracted_json: Record<string, unknown> | null;
+    reviewed_json: Record<string, unknown> | null;
+    extraction_confidence?: number;
+    missing_fields_json?: unknown;
+    red_flags_json?: unknown;
+    reviewed_by?: string | null;
+    reviewed_at?: string | null;
+    created_at?: string;
+  } | null;
+  jobs?: Record<string, unknown>;
+}
+
 export function getSubmission(id: string) {
-  return api<{ ok: true; submission: any; documents: any[]; extraction: any }>(
+  return api<SubmissionDetailResponse>(
     `/api/submissions/${id}`
   );
 }
@@ -194,5 +223,59 @@ export function saveReview(
       extraction_id: extractionId,
       reviewed_json: reviewedJson,
     }),
+  });
+}
+
+// ---- Pilot integration ----
+
+export interface PilotIssue {
+  id: string;
+  submission_id: string | null;
+  title: string;
+  description: string | null;
+  severity: "low" | "medium" | "high" | "critical";
+  status: "open" | "in_progress" | "resolved" | "wont_fix";
+  reported_by: string;
+  assigned_to: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolution_notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function listPilotIssues(submissionId: string) {
+  return api<{ ok: true; issues: PilotIssue[] }>(
+    `/api/submissions/${submissionId}/pilot-issues`
+  );
+}
+
+export function createPilotIssue(
+  submissionId: string,
+  input: { title: string; description?: string; severity?: string; assigned_to?: string }
+) {
+  return api<{ ok: true; id: string }>(
+    `/api/submissions/${submissionId}/pilot-issues`,
+    { method: "POST", body: JSON.stringify(input) }
+  );
+}
+
+export function updatePilotIssue(
+  issueId: string,
+  input: { status?: string; severity?: string; assigned_to?: string | null; resolution_notes?: string | null }
+) {
+  return api<{ ok: true }>(`/api/pilot-issues/${issueId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updatePilotFlag(
+  submissionId: string,
+  input: { pilot_flag: boolean; pilot_notes?: string | null }
+) {
+  return api<{ ok: true }>(`/api/submissions/${submissionId}/pilot`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
   });
 }

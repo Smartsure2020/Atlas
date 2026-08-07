@@ -39,6 +39,8 @@ import {
   validateReasoning,
   type ReasoningOutput,
 } from "./matcher-reasoning";
+import { composeExplanation, verifyPolish } from "./explanation-composer";
+import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
 import {
   beginJob,
@@ -309,51 +311,80 @@ export async function handleRunRecommendation(
     ctx.set(a.id, { source_quote: a.source_quote ?? a.notes ?? undefined, notes: a.notes });
   }
 
-  // ---- Reasoning pass (with deterministic fallback) ----
+  // ---- Explanation (deterministic default; LLM polish is optional) ----
+  //
+  // The matcher is authoritative. The explanation composer speaks strictly
+  // from its output — every sentence maps to a real score component, matched
+  // rule, referral flag, missing document, or red flag. This removes the
+  // blocking Sonnet call from the recommendation path.
+  //
+  // When ATLAS_EXPLANATION_MODE=polish, we still call the LLM afterwards to
+  // rewrite the tone, but a verifier rejects the polish if it drops any
+  // referral / missing-doc mention or reorders the ranking — the matcher
+  // remains the source of truth either way.
   const riskSummary = buildRiskSummary(reviewedJson);
-  await updateJobProgress(admin, job.jobId, 45, "generating_explanation");
+  await updateJobProgress(admin, job.jobId, 45, "preparing_recommendation");
   if (await isJobCancellationRequested(admin, job.jobId)) {
     return json({ error: "job_cancelled", job_id: job.jobId }, 409);
   }
+  const mode = explanationMode(env);
   let reasoning: ReasoningOutput;
   let usedFallbackReasoning = false;
-  try {
-    const inputText = buildReasoningInput({
-      riskSummary,
-      insurers: result.insurers,
-      appetiteContext: ctx,
-    });
+  let reasoningSource: "deterministic" | "polished_llm" | "fallback" | "llm" = "deterministic";
 
-    const res = await fetch(ANTHROPIC_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": env.ANTHROPIC_API_KEY,
-        "anthropic-version": ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify({
-        model: REASONING_MODEL,
-        max_tokens: 2048,
-        system: REASONING_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: inputText }],
-      }),
-    });
+  const deterministic = composeExplanation(result.insurers);
+  reasoning = { headline: deterministic.headline, per_insurer: deterministic.per_insurer };
 
-    if (!res.ok) throw new Error(`anthropic_${res.status}`);
-    const data = (await res.json()) as { content?: { type: string; text?: string }[] };
-    const text = data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") ?? "";
-    const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-    const validated = validateReasoning(parsed);
-    if (validated) {
-      reasoning = validated;
-    } else {
+  if (mode === "polish") {
+    try {
+      const inputText = buildReasoningInput({
+        riskSummary,
+        insurers: result.insurers,
+        appetiteContext: ctx,
+      });
+      const res = await fetch(ANTHROPIC_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": env.ANTHROPIC_API_KEY,
+          "anthropic-version": ANTHROPIC_VERSION,
+        },
+        body: JSON.stringify({
+          model: REASONING_MODEL,
+          max_tokens: 2048,
+          system: REASONING_SYSTEM_PROMPT,
+          messages: [{ role: "user", content: inputText }],
+        }),
+      });
+      if (!res.ok) throw new Error(`anthropic_${res.status}`);
+      const data = (await res.json()) as { content?: { type: string; text?: string }[] };
+      const text = data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") ?? "";
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      const validated = validateReasoning(parsed);
+      if (validated) {
+        const problems = verifyPolish(
+          deterministic,
+          validated,
+          result.insurers.map((i) => i.insurer_name)
+        );
+        if (problems.length === 0) {
+          reasoning = validated;
+          reasoningSource = "polished_llm";
+        } else {
+          // Polish tried to alter facts; keep deterministic version.
+          reasoningSource = "deterministic";
+        }
+      } else {
+        reasoning = fallbackReasoning(result.insurers);
+        usedFallbackReasoning = true;
+        reasoningSource = "fallback";
+      }
+    } catch {
       reasoning = fallbackReasoning(result.insurers);
       usedFallbackReasoning = true;
+      reasoningSource = "fallback";
     }
-  } catch {
-    reasoning = fallbackReasoning(result.insurers);
-    usedFallbackReasoning = true;
   }
 
   // ---- Cache the recommendation ----
@@ -388,7 +419,8 @@ export async function handleRunRecommendation(
       matcher_input: risk,
       matcher_version: MATCHER_VERSION,
       taxonomy_version: TAXONOMY_VERSION,
-      reasoning_source: usedFallbackReasoning ? "fallback" : "llm",
+      reasoning_source: reasoningSource,
+      explanation_mode: mode,
     },
     confidence_score: top?.confidence ?? 0,
     referral_required: top?.referral_required ?? false,
@@ -440,7 +472,10 @@ export async function handleRunRecommendation(
       manual_review_required: top?.manual_review_required ?? false,
       insurers_considered: result.insurers.length,
       no_data_for_count: result.no_data_for.length,
-      reasoning_source: usedFallbackReasoning ? "fallback" : "llm",
+      reasoning_source: reasoningSource,
+      explanation_mode: mode,
+      polish_used: reasoningSource === "polished_llm",
+      fallback_used: usedFallbackReasoning,
     },
   });
 

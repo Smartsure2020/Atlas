@@ -7,7 +7,6 @@ import {
   type RecommendationForGate,
 } from "../worker/src/decision-rules.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 

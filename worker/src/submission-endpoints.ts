@@ -29,7 +29,7 @@ export async function handleGetSubmission(
   const phase7SubmissionColumns =
     "id, broker_name, broker_email, client_name, request_type, status, " +
     "broker_email_body, assigned_underwriter, assigned_to, assigned_at, " +
-    "assigned_by, queue_status, created_by, created_at, updated_at";
+    "assigned_by, queue_status, pilot_flag, pilot_notes, created_by, created_at, updated_at";
 
   const { data: submission, error } = await admin
     .from("atlas_submissions")

@@ -3,7 +3,6 @@ import {
   type Phase0ControlOutcome,
 } from "./fixtures/phase0-golden-submissions.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void }[] = [];
 

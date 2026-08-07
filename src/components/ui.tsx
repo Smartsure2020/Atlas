@@ -889,8 +889,10 @@ export function CardSkeleton({ lines = 3 }: { lines?: number }) {
 }
 
 /**
- * Progress with honest semantics: a determinate bar only when the backend
- * reports real progress, otherwise a moving indicator plus a stage caption.
+ * Progress with smooth interpolation between backend milestones.
+ * The backend reports progress at a few hard-coded points (e.g. 10, 35, 85).
+ * This component fills the gaps with a gentle drift so the bar never looks
+ * frozen, while never overshooting the next known milestone.
  */
 export function ProgressStages({
   percent,
@@ -899,15 +901,43 @@ export function ProgressStages({
   percent?: number | null;
   caption: string;
 }) {
-  const determinate = typeof percent === "number" && percent > 0 && percent <= 100;
+  const target = typeof percent === "number" && percent > 0 && percent <= 100 ? percent : 0;
+  const determinate = target > 0;
+  const [display, setDisplay] = useState(target);
+  const displayRef = useRef(display);
+  displayRef.current = display;
+  const targetRef = useRef(target);
+
+  useEffect(() => {
+    if (target > targetRef.current) {
+      setDisplay(target);
+    }
+    targetRef.current = target;
+  }, [target]);
+
+  useEffect(() => {
+    if (!determinate || target >= 100) return;
+    const ceiling = target < 35 ? 34 : target < 85 ? 84 : 99;
+    const timer = window.setInterval(() => {
+      setDisplay((prev) => {
+        if (prev >= ceiling) return prev;
+        const step = 0.3 + Math.random() * 0.5;
+        return Math.min(prev + step, ceiling);
+      });
+    }, 800);
+    return () => window.clearInterval(timer);
+  }, [determinate, target]);
+
+  const shown = Math.round(display);
+
   return (
     <div className="atlas-progress">
       <div className="atlas-progress__track">
         <div
           className={`atlas-progress__bar ${determinate ? "" : "atlas-progress__bar--indeterminate"}`}
-          style={determinate ? { width: `${percent}%` } : undefined}
+          style={determinate ? { width: `${shown}%` } : undefined}
           role="progressbar"
-          aria-valuenow={determinate ? percent ?? undefined : undefined}
+          aria-valuenow={determinate ? shown : undefined}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-label={caption}
@@ -915,7 +945,7 @@ export function ProgressStages({
       </div>
       <p className="atlas-progress__caption" aria-live="polite">
         {caption}
-        {determinate ? ` — ${percent}%` : ""}
+        {determinate ? ` — ${shown}%` : ""}
       </p>
     </div>
   );

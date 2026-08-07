@@ -85,16 +85,16 @@ export default function ProcessingJobs({
     try {
       const [status, jobResult, cleanup, alertResult] = await Promise.all([
         getSystemStatus().catch(() => null),
-        listJobs(),
+        listJobs().catch(() => null),
         cleanupPreview().catch(() => null),
         listAlerts().catch(() => ({ alerts: [] })),
       ]);
       setSystemStatus(status);
-      setJobs(jobResult.jobs);
-      setSummary(jobResult.summary);
+      setJobs(jobResult?.jobs ?? []);
+      setSummary(jobResult?.summary ?? null);
       setExpiredDocuments(cleanup ? cleanup.expired_active_documents.length : null);
       setAlerts(alertResult.alerts);
-      setLoadError(null);
+      setLoadError(jobResult ? null : "Job history could not be loaded. You may not have permission, or the server may be temporarily unavailable.");
     } catch (cause) {
       setLoadError(
         (cause as Error).message === "not_authenticated"

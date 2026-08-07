@@ -168,6 +168,12 @@ export function countByBand(
   return total;
 }
 
+function isWideField(value: unknown): boolean {
+  if (Array.isArray(value) && value.length > 2) return true;
+  const text = formatFieldValue(value);
+  return text.length > 120 || text.includes("\n");
+}
+
 function formatFieldValue(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (Array.isArray(value)) return value.map(formatOne).filter(Boolean).join("\n");
@@ -476,6 +482,8 @@ function RiskField({
 }) {
   const band = confidenceBand(field.status, field.confidence, reviewed);
   const display = formatFieldValue(field.value);
+  const wide = isWideField(field.value);
+  const isArray = Array.isArray(field.value) && field.value.length > 0;
   const [text, setText] = useState(() => reviewValueToEditorText(field.value));
 
   useEffect(() => {
@@ -488,7 +496,7 @@ function RiskField({
   );
 
   return (
-    <div className={`atlas-riskfield atlas-riskfield--${band.band}`}>
+    <div className={`atlas-riskfield atlas-riskfield--${band.band}${wide ? " atlas-riskfield--wide" : ""}`}>
       <div className="atlas-riskfield__head">
         <span className="atlas-riskfield__label">{label}</span>
         <StatusBadge status={band} />
@@ -519,6 +527,12 @@ function RiskField({
             }}
           />
         )
+      ) : isArray && !editing ? (
+        <ul style={{ margin: 0, paddingLeft: 18, fontSize: "var(--atlas-fs-body)", color: "var(--atlas-ink)", lineHeight: 1.6 }}>
+          {(field.value as unknown[]).map((item, i) => (
+            <li key={i} style={{ marginBottom: 2 }}>{formatOne(item)}</li>
+          ))}
+        </ul>
       ) : (
         <p className={`atlas-riskfield__value ${display ? "" : "atlas-riskfield__value--empty"}`}>
           {display || "Not provided"}

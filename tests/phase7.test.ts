@@ -7,7 +7,6 @@ import {
   summarizeJobs,
 } from "../worker/src/phase7-core.js";
 
-declare const process: { exitCode?: number };
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 
