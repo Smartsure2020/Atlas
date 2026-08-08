@@ -1053,7 +1053,7 @@ function ExtractionStepTracker({ job }: { job: JobRecord | undefined }) {
                     : isComplete
                     ? "none"
                     : "2px solid var(--atlas-border, #e2e5ea)",
-                  boxShadow: isCurrent ? "0 0 0 3px rgba(37, 99, 235, 0.15)" : "none",
+                  boxShadow: isCurrent ? "0 0 0 3px var(--atlas-accent-glow)" : "none",
                   animation: isCurrent ? "atlas-pulse-ring 2s ease infinite" : "none",
                 }}
               >

@@ -419,7 +419,7 @@
 }
 
 .atlas-breadcrumbs__sep {
-  color: var(--atlas-ink-subtle);
+  color: var(--atlas-ink-decorative);
 }
 
 /* ===========================================================================
@@ -627,7 +627,7 @@ button.atlas-metric[aria-pressed="true"] {
 .atlas-textarea:focus-visible {
   outline: none;
   border-color: var(--atlas-focus-ring);
-  box-shadow: 0 0 0 3px rgba(28, 111, 184, 0.18);
+  box-shadow: 0 0 0 3px var(--atlas-focus-ring-glow);
 }
 
 .atlas-input:disabled,
@@ -652,7 +652,7 @@ button.atlas-metric[aria-pressed="true"] {
 
 .atlas-input--invalid:focus-visible,
 .atlas-textarea--invalid:focus-visible {
-  box-shadow: 0 0 0 3px rgba(159, 47, 47, 0.16);
+  box-shadow: 0 0 0 3px var(--atlas-danger-glow);
 }
 
 .atlas-input--sm,
@@ -769,7 +769,7 @@ button.atlas-metric[aria-pressed="true"] {
 .atlas-search__icon {
   position: absolute;
   left: 10px;
-  color: var(--atlas-ink-subtle);
+  color: var(--atlas-ink-decorative);
   pointer-events: none;
 }
 
@@ -917,7 +917,7 @@ button.atlas-metric[aria-pressed="true"] {
 }
 
 .atlas-table__sort-mark {
-  color: var(--atlas-ink-subtle);
+  color: var(--atlas-ink-decorative);
 }
 
 .atlas-table__sort[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark,
@@ -1192,7 +1192,7 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   background: linear-gradient(
     90deg,
     var(--atlas-surface-sunken) 25%,
-    #e7ebf1 37%,
+    var(--atlas-skeleton-highlight) 37%,
     var(--atlas-surface-sunken) 63%
   );
   background-size: 400% 100%;
@@ -1252,8 +1252,8 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
 }
 
 @keyframes atlas-pulse-ring {
-  0%, 100% { box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15); }
-  50% { box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.08); }
+  0%, 100% { box-shadow: 0 0 0 3px var(--atlas-accent-glow); }
+  50% { box-shadow: 0 0 0 5px var(--atlas-accent-glow-soft); }
 }
 
 .atlas-pulse-dot {
@@ -1611,7 +1611,7 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
 
 .atlas-event__mark {
   margin-top: 3px;
-  color: var(--atlas-ink-subtle);
+  color: var(--atlas-ink-decorative);
 }
 
 .atlas-event--human .atlas-event__mark {

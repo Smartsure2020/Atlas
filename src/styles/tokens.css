@@ -8,6 +8,22 @@
    Direction: an executive-grade underwriting workbench. Deep navy-charcoal ink,
    a cool off-white canvas, white elevated surfaces, and Atlas's established
    teal carried forward as the single primary action colour.
+
+   Two conventions used by the component layer:
+
+   1. Ink roles. `--atlas-ink-subtle` is TEXT that still needs to be read
+      (empty-data values, "(optional)", placeholder). It must clear WCAG AA
+      contrast against `--atlas-surface`. Anything genuinely decorative — an
+      icon mark, a separator glyph, a bullet — uses `--atlas-ink-decorative`
+      instead, which is deliberately lighter and is never used for text.
+
+   2. Button variant channel. `.atlas-btn` exposes five custom properties
+      (`--btn-bg`, `--btn-ink`, `--btn-border`, `--btn-bg-hover`,
+      `--btn-border-hover`) as its variant surface. Modifier classes
+      (`--primary`, `--danger`, `--ghost`, `--link`, `--pressed`) reassign
+      those channel variables to swap tone without any duplicated selectors,
+      and consumers may override them inline for one-off cases without
+      forking the button styles.
    =========================================================================== */
 
 :root {
@@ -71,7 +87,12 @@
   --atlas-ink: #101623;
   --atlas-ink-secondary: var(--a-slate-700);
   --atlas-ink-muted: var(--a-slate-500);
-  --atlas-ink-subtle: var(--a-slate-400);
+  /* Textual role: still needs to be read (empty values, placeholder,
+     "(optional)"). Slate-500 clears WCAG AA (5.16:1) on --atlas-surface. */
+  --atlas-ink-subtle: var(--a-slate-500);
+  /* Decorative-only role: icon marks, separators, bullets. Never used for
+     text — contrast is intentionally below AA. */
+  --atlas-ink-decorative: var(--a-slate-400);
   --atlas-ink-inverse: #ffffff;
   --atlas-nav-ink: #c3cddd;
   --atlas-nav-ink-active: #ffffff;
@@ -134,6 +155,27 @@
   /* ---- Focus ------------------------------------------------------------- */
   --atlas-focus-ring: #1c6fb8;
   --atlas-focus-ring-offset: var(--atlas-surface);
+  /* Soft glow used with an inline focus ring on inputs, selects, and
+     textareas — same hue as --atlas-focus-ring, at an alpha strong enough
+     to remain visible over the muted control surface. */
+  --atlas-focus-ring-glow: rgba(28, 111, 184, 0.35);
+  /* Danger equivalent, used when an invalid field takes focus. */
+  --atlas-danger-glow: rgba(159, 47, 47, 0.28);
+  /* Focus ring hue for the dark navigation surface, where the standard
+     focus-ring blue does not have enough contrast against navy. */
+  --atlas-focus-ring-nav: #7fb6e6;
+
+  /* ---- Accent glows ------------------------------------------------------ */
+  /* Soft ring used for the extraction-step "current stage" indicator; same
+     hue as --atlas-accent, at low alpha so the pulse reads as ambient. */
+  --atlas-accent-glow: rgba(38, 85, 143, 0.18);
+  --atlas-accent-glow-soft: rgba(38, 85, 143, 0.10);
+
+  /* ---- Skeleton --------------------------------------------------------- */
+  /* Highlight band that sweeps across --atlas-surface-sunken during the
+     shimmer keyframes. Deliberately just above the sunken tone so the sweep
+     reads as a highlight rather than a hard line. */
+  --atlas-skeleton-highlight: #e7ebf1;
 
   /* ---- Type -------------------------------------------------------------- */
   --atlas-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
