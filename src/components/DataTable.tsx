@@ -13,13 +13,19 @@
  *     overflow menu alone
  */
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { Icon } from "./Icon";
 import { EmptyState, TableSkeleton } from "./ui";
+import { Popover, PopoverContent, PopoverTrigger } from "./Popover";
 
 export interface Column<T> {
   id: string;
   header: string;
+  /**
+   * Screen-reader-only header text used when `header` is empty (e.g. the
+   * row-actions column). Defaults to "Actions".
+   */
+  srHeader?: string;
   /** Cell content. Keep it to what the user decides from in this view. */
   cell: (row: T) => ReactNode;
   /** Provide to make the column sortable. */
@@ -101,6 +107,27 @@ export function DataTable<T>({
 
   const showEmpty = !loading && sorted.length === 0;
 
+  // When the table has nothing to show, render the empty state OUTSIDE the
+  // horizontal-scroll wrapper. Wide operational tables scroll horizontally on
+  // narrow viewports, and putting the empty message inside that wrapper clips
+  // its content at 375px (Gate 0B finding). Placing it in the surrounding
+  // .atlas-table-wrap keeps it fully readable at every viewport.
+  if (showEmpty) {
+    return (
+      <div className="atlas-table-wrap">
+        <div role="status" aria-live="polite">
+          {empty ?? (
+            <EmptyState
+              title="Nothing to show"
+              body="No records match the current view."
+            />
+          )}
+        </div>
+        {footer && <div className="atlas-table__foot">{footer}</div>}
+      </div>
+    );
+  }
+
   return (
     <div className="atlas-table-wrap">
       <div className="atlas-table-scroll">
@@ -112,6 +139,7 @@ export function DataTable<T>({
           ]
             .filter(Boolean)
             .join(" ")}
+          aria-busy={loading ? true : undefined}
         >
           <caption className="atlas-sr-only">{caption}</caption>
           <thead>
@@ -125,6 +153,10 @@ export function DataTable<T>({
                   : column.sortValue
                   ? "none"
                   : undefined;
+                // Columns without a visible header (row-actions column) still
+                // need an accessible name — otherwise axe raises
+                // empty-table-header and screen readers announce nothing.
+                const hasHeader = column.header !== "";
                 return (
                   <th
                     key={column.id}
@@ -147,8 +179,12 @@ export function DataTable<T>({
                           className="atlas-table__sort-mark"
                         />
                       </button>
-                    ) : (
+                    ) : hasHeader ? (
                       column.header
+                    ) : (
+                      <span className="atlas-sr-only">
+                        {column.srHeader ?? "Actions"}
+                      </span>
                     )}
                   </th>
                 );
@@ -158,19 +194,6 @@ export function DataTable<T>({
 
           {loading ? (
             <TableSkeleton columns={visibleColumns.length} />
-          ) : showEmpty ? (
-            <tbody>
-              <tr>
-                <td colSpan={visibleColumns.length} style={{ padding: 0 }}>
-                  {empty ?? (
-                    <EmptyState
-                      title="Nothing to show"
-                      body="No records match the current view."
-                    />
-                  )}
-                </td>
-              </tr>
-            </tbody>
           ) : (
             <tbody>
               {sorted.map((row) => {
@@ -215,6 +238,11 @@ export function DataTable<T>({
 /**
  * Column visibility control. Only offered where a table has genuinely optional
  * columns — it is a power-user affordance, not decoration.
+ *
+ * Behaviour comes from @radix-ui/react-popover via the Atlas Popover wrapper:
+ * aria-expanded on the trigger, focus moves into the panel on open, Escape
+ * closes it, outside pointer interaction closes it, focus returns to the
+ * trigger on close, and Tab is scoped to the panel until it is closed.
  */
 export function ColumnPicker<T>({
   columns,
@@ -225,71 +253,44 @@ export function ColumnPicker<T>({
   hidden: string[];
   onChange: (hidden: string[]) => void;
 }) {
-  const [open, setOpen] = useState(false);
   const optional = columns.filter((column) => column.optional);
   if (optional.length === 0) return null;
 
   return (
-    <div style={{ position: "relative" }}>
-      <button
-        type="button"
-        className="atlas-btn atlas-btn--sm"
-        aria-expanded={open}
-        aria-haspopup="true"
-        onClick={() => setOpen((value) => !value)}
-      >
-        <Icon name="filter" size={13} />
-        <span>Columns</span>
-      </button>
-      {open && (
-        <>
-          <div
-            style={{ position: "fixed", inset: 0, zIndex: 40 }}
-            onClick={() => setOpen(false)}
-            aria-hidden="true"
-          />
-          <div
-            style={{
-              position: "absolute",
-              right: 0,
-              top: "calc(100% + 4px)",
-              zIndex: 41,
-              minWidth: 210,
-              padding: "var(--atlas-space-2)",
-              background: "var(--atlas-surface)",
-              border: "1px solid var(--atlas-border-strong)",
-              borderRadius: "var(--atlas-radius-control)",
-              boxShadow: "var(--atlas-shadow-md)",
-            }}
-            role="group"
-            aria-label="Visible columns"
-          >
-            {optional.map((column) => {
-              const isHidden = hidden.includes(column.id);
-              return (
-                <label
-                  key={column.id}
-                  className="atlas-checkbox"
-                  style={{ minHeight: 28, width: "100%" }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={!isHidden}
-                    onChange={() =>
-                      onChange(
-                        isHidden
-                          ? hidden.filter((id) => id !== column.id)
-                          : [...hidden, column.id]
-                      )
-                    }
-                  />
-                  <span>{column.header}</span>
-                </label>
-              );
-            })}
-          </div>
-        </>
-      )}
-    </div>
+    <Popover>
+      <PopoverTrigger asChild>
+        <button type="button" className="atlas-btn atlas-btn--sm">
+          <Icon name="filter" size={13} />
+          <span>Columns</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent aria-label="Visible columns">
+        <div role="group" aria-label="Visible columns">
+          {optional.map((column) => {
+            const isHidden = hidden.includes(column.id);
+            return (
+              <label
+                key={column.id}
+                className="atlas-checkbox"
+                style={{ minHeight: 28, width: "100%" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={!isHidden}
+                  onChange={() =>
+                    onChange(
+                      isHidden
+                        ? hidden.filter((id) => id !== column.id)
+                        : [...hidden, column.id]
+                    )
+                  }
+                />
+                <span>{column.header}</span>
+              </label>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }

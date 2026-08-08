@@ -415,6 +415,7 @@ export default function WorkQueue({
     {
       id: "actions",
       header: "",
+      srHeader: "Actions",
       align: "right",
       width: "1%",
       cell: (row) => (
@@ -633,6 +634,12 @@ export default function WorkQueue({
           loading ? "Loading…" : `${pluralise(visible.length, "submission")} shown`
         }
       />
+      {/* Polite screen-reader announcement of the visible result count.
+          The list fetch is debounced 220ms upstream, so this only updates
+          after search or filters settle — never per keystroke. */}
+      <span className="atlas-sr-only" role="status" aria-live="polite">
+        {loading ? "" : `${pluralise(visible.length, "submission")} shown`}
+      </span>
 
       <div style={{ marginTop: "var(--atlas-space-4)" }}>
         {error ? (

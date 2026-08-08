@@ -32,6 +32,7 @@
     "test:oauth": "tsc -p tsconfig.test.json && node .test-dist/tests/oauth.test.js"
   },
   "dependencies": {
+    "@radix-ui/react-popover": "^1.1.23",
     "@supabase/supabase-js": "^2.45.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
