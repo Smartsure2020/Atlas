@@ -32,5 +32,8 @@ jobs:
       - name: Run all phase test suites
         run: npm test
 
+      - name: Frontend component tests
+        run: npm run test:ui
+
       - name: Frontend production build
         run: npm run build
