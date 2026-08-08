@@ -21,7 +21,8 @@ import {
   StatusBadge,
   type ActiveFilter,
 } from "../components/ui";
-import { ColumnPicker, DataTable, type Column, type SortState } from "../components/DataTable";
+import { DataTable, type Column, type SortState } from "../components/DataTable";
+import ColumnPicker from "../components/ColumnPicker";
 import { Icon } from "../components/Icon";
 import { canWrite, type AtlasUiRole } from "../components/AppShell";
 import {

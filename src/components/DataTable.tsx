@@ -16,7 +16,6 @@
 import { useMemo, type ReactNode } from "react";
 import { Icon } from "./Icon";
 import { EmptyState, TableSkeleton } from "./ui";
-import { Popover, PopoverContent, PopoverTrigger } from "./Popover";
 
 export interface Column<T> {
   id: string;
@@ -235,62 +234,9 @@ export function DataTable<T>({
   );
 }
 
-/**
- * Column visibility control. Only offered where a table has genuinely optional
- * columns — it is a power-user affordance, not decoration.
- *
- * Behaviour comes from @radix-ui/react-popover via the Atlas Popover wrapper:
- * aria-expanded on the trigger, focus moves into the panel on open, Escape
- * closes it, outside pointer interaction closes it, focus returns to the
- * trigger on close, and Tab is scoped to the panel until it is closed.
- */
-export function ColumnPicker<T>({
-  columns,
-  hidden,
-  onChange,
-}: {
-  columns: Column<T>[];
-  hidden: string[];
-  onChange: (hidden: string[]) => void;
-}) {
-  const optional = columns.filter((column) => column.optional);
-  if (optional.length === 0) return null;
-
-  return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button type="button" className="atlas-btn atlas-btn--sm">
-          <Icon name="filter" size={13} />
-          <span>Columns</span>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent aria-label="Visible columns">
-        <div role="group" aria-label="Visible columns">
-          {optional.map((column) => {
-            const isHidden = hidden.includes(column.id);
-            return (
-              <label
-                key={column.id}
-                className="atlas-checkbox"
-                style={{ minHeight: 28, width: "100%" }}
-              >
-                <input
-                  type="checkbox"
-                  checked={!isHidden}
-                  onChange={() =>
-                    onChange(
-                      isHidden
-                        ? hidden.filter((id) => id !== column.id)
-                        : [...hidden, column.id]
-                    )
-                  }
-                />
-                <span>{column.header}</span>
-              </label>
-            );
-          })}
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-}
+// ColumnPicker moved to src/components/ColumnPicker.tsx so consumers can
+// React.lazy it — that way its @radix-ui/react-popover dependency
+// (Popper positioning, focus-scope, portal, dismissable-layer, presence)
+// only downloads when a screen with optional columns actually mounts.
+// A static re-export from this file would pull the Radix chunk back into
+// the DataTable module's graph, so we deliberately do not re-export.
