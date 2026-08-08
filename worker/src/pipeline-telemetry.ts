@@ -65,6 +65,23 @@ export interface PipelineMetricInput {
   escalatedToSonnet?: boolean;
   finalStatus: FinalStatus;
 
+  // Section-based extraction telemetry. Persisted via the sanitized metadata
+  // bag so no schema migration is required; every value here is a scalar and
+  // safe under the PII allow-list.
+  sectionCount?: number;
+  successfulSectionCount?: number;
+  failedSectionCount?: number;
+  timedOutSectionCount?: number;
+  maxConcurrency?: number;
+  sectionDetectionMs?: number;
+  slowestSectionMs?: number;
+  haikuTotalMs?: number;
+  boundedSonnetMs?: number;
+  boundedFallbackSectionCount?: number;
+  fullLegacyFallbackUsed?: boolean;
+  /** Redacted category enum, e.g. `haiku_timeout` / `haiku_rate_limited`. */
+  failureCategory?: string | null;
+
   metadata?: Record<string, unknown> | null;
 }
 
@@ -114,6 +131,22 @@ export async function emitPipelineMetric(
 ): Promise<void> {
   try {
     const hashPrefix = input.documentHash ? String(input.documentHash).slice(0, 12) : null;
+    // Fold section-based counters into a safe metadata bag so no schema
+    // migration is needed. Keys are scalar and under the PII allow-list.
+    const sectionMeta: Record<string, unknown> = {};
+    if (input.sectionCount != null) sectionMeta.section_count = intOrNull(input.sectionCount) ?? 0;
+    if (input.successfulSectionCount != null) sectionMeta.section_success = intOrNull(input.successfulSectionCount) ?? 0;
+    if (input.failedSectionCount != null) sectionMeta.section_failure = intOrNull(input.failedSectionCount) ?? 0;
+    if (input.timedOutSectionCount != null) sectionMeta.section_timeout = intOrNull(input.timedOutSectionCount) ?? 0;
+    if (input.maxConcurrency != null) sectionMeta.section_concurrency = intOrNull(input.maxConcurrency) ?? 0;
+    if (input.sectionDetectionMs != null) sectionMeta.section_detection_ms = intOrNull(input.sectionDetectionMs) ?? 0;
+    if (input.slowestSectionMs != null) sectionMeta.slowest_section_ms = intOrNull(input.slowestSectionMs) ?? 0;
+    if (input.haikuTotalMs != null) sectionMeta.haiku_total_ms = intOrNull(input.haikuTotalMs) ?? 0;
+    if (input.boundedSonnetMs != null) sectionMeta.bounded_sonnet_ms = intOrNull(input.boundedSonnetMs) ?? 0;
+    if (input.boundedFallbackSectionCount != null) sectionMeta.bounded_fallback_sections = intOrNull(input.boundedFallbackSectionCount) ?? 0;
+    if (input.fullLegacyFallbackUsed != null) sectionMeta.full_legacy_fallback_used = Boolean(input.fullLegacyFallbackUsed);
+    if (input.failureCategory) sectionMeta.failure_category = short(input.failureCategory, 40);
+    const mergedMetadata = { ...(input.metadata ?? {}), ...sectionMeta };
     const row = {
       job_id: input.jobId ?? null,
       submission_id: input.submissionId ?? null,
@@ -144,7 +177,7 @@ export async function emitPipelineMetric(
       fallback_reason: short(input.fallbackReason, MAX_REASON),
       escalated_to_sonnet: Boolean(input.escalatedToSonnet),
       final_status: input.finalStatus,
-      metadata: sanitizeMetadata(input.metadata),
+      metadata: sanitizeMetadata(mergedMetadata),
     };
     await admin.from("atlas_pipeline_metrics").insert(row);
   } catch (err) {

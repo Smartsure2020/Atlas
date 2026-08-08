@@ -28,6 +28,8 @@ import {
   parseJsonReply,
   type Usage,
 } from "./anthropic-client.js";
+import type { DocumentSection, SectionType } from "./section-splitter.js";
+import { schemaFor, mapFocusedReplyToPartial, type CanonicalPartial } from "./section-schemas.js";
 
 export type NormalisationUsage = Usage;
 
@@ -174,4 +176,66 @@ export async function runSonnetBoundedResolution(
     }
   }
   return { resolvedFields, usage: result.usage, model: result.model };
+}
+
+// ---------------------------------------------------------------------------
+// Bounded per-section Sonnet fallback
+// ---------------------------------------------------------------------------
+// Called ONLY when a single section failed or timed out in the Haiku pass.
+// Receives only that section's text (page-scoped), returns the SAME focused
+// section schema, and is mapped through mapFocusedReplyToPartial. This is
+// the mechanism that replaces sending the entire document through Sonnet.
+
+export interface SonnetSectionInput {
+  env: Env;
+  section: DocumentSection;
+  timeoutMs?: number;
+}
+
+export interface SonnetSectionOutput {
+  sectionType: SectionType;
+  partial: CanonicalPartial;
+  usage: Usage;
+  model: string;
+}
+
+export async function runSonnetSectionResolution(
+  input: SonnetSectionInput
+): Promise<SonnetSectionOutput> {
+  const schema = schemaFor(input.section.sectionType);
+  const system = [
+    {
+      type: "text",
+      text: `${schema.systemPromptFragment}\n\nYou are the BOUNDED SECTION RESOLVER: the primary extractor could not read this section. Return ONLY the JSON described below. Do not invent values.`,
+      cache_control: { type: "ephemeral" },
+    },
+    { type: "text", text: schema.schemaHint, cache_control: { type: "ephemeral" } },
+  ];
+  const userText = [
+    `SECTION HEADING: ${input.section.heading}`,
+    `SOURCE PAGES: ${input.section.pages.join(", ") || "unknown"}`,
+    "",
+    "SECTION TEXT:",
+    input.section.text.length > 20_000 ? input.section.text.slice(0, 20_000) : input.section.text,
+    "",
+    "Return the focused JSON described in the system message.",
+  ].join("\n");
+
+  const result = await anthropicCall({
+    model: ATLAS_MODEL_SONNET,
+    system,
+    messages: [{ role: "user", content: userText }],
+    maxTokens: Math.max(1500, schema.maxOutputTokens),
+    temperature: 0,
+    apiKey: input.env.ANTHROPIC_API_KEY,
+    timeoutMs: input.timeoutMs ?? 60_000,
+  });
+  const reply = parseJsonReply<Record<string, unknown>>(result.text);
+  const partial = mapFocusedReplyToPartial(input.section.sectionType, reply);
+  return {
+    sectionType: input.section.sectionType,
+    partial,
+    usage: result.usage,
+    model: result.model,
+  };
 }

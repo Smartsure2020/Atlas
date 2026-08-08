@@ -37,6 +37,39 @@ export function maxTextFastpathPages(env: PipelineEnv): number {
   return Number.isFinite(n) && n > 0 ? n : 40;
 }
 
+/**
+ * Section-based extraction knobs. All optional; safe conservative defaults
+ * apply when the env vars are missing.
+ */
+export interface SectionExtractionEnv extends PipelineEnv {
+  ATLAS_HYBRID_SECTION_CONCURRENCY?: string;
+  ATLAS_HYBRID_SECTION_TIMEOUT_MS?: string;
+  ATLAS_HYBRID_OVERALL_DEADLINE_MS?: string;
+  ATLAS_HYBRID_SECTION_CHAR_CAP?: string;
+}
+
+function numFromEnv(v: string | undefined, def: number, min: number, max: number): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < min || n > max) return def;
+  return Math.trunc(n);
+}
+
+export function sectionConcurrency(env: SectionExtractionEnv): number {
+  return numFromEnv(env.ATLAS_HYBRID_SECTION_CONCURRENCY, 2, 1, 8);
+}
+
+export function perSectionTimeoutMs(env: SectionExtractionEnv): number {
+  return numFromEnv(env.ATLAS_HYBRID_SECTION_TIMEOUT_MS, 25_000, 5_000, 90_000);
+}
+
+export function overallHybridDeadlineMs(env: SectionExtractionEnv): number {
+  return numFromEnv(env.ATLAS_HYBRID_OVERALL_DEADLINE_MS, 120_000, 30_000, 300_000);
+}
+
+export function sectionCharCap(env: SectionExtractionEnv): number {
+  return numFromEnv(env.ATLAS_HYBRID_SECTION_CHAR_CAP, 12_000, 2_000, 40_000);
+}
+
 export function explanationMode(env: PipelineEnv): "deterministic" | "polish" {
   return (env.ATLAS_EXPLANATION_MODE ?? "").toLowerCase() === "polish" ? "polish" : "deterministic";
 }
@@ -58,9 +91,14 @@ export const PIPELINE_STAGES = [
   "validating_document",
   "extracting_pdf_text",
   "processing_scanned_pages",
+  "identifying_document_sections",
+  "extracting_policy_details",
+  "extracting_cover_sections",
   "extracting_risk_information",
+  "merging_extracted_sections",
   "validating_extracted_fields",
   "resolving_uncertain_fields",
+  "using_compatibility_extraction",
   "running_insurer_matching",
   "preparing_recommendation",
   "ready_for_review",

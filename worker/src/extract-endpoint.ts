@@ -577,12 +577,16 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       return json({ error: "store_failed" }, 500);
     }
 
+    const overallConfidenceAvailable =
+      (hybrid.extraction as { overall_confidence_available?: unknown }).overall_confidence_available !== false;
     await audit(params.env, {
       submissionId: params.submissionId, action: "extraction_run", actorId: params.user.id,
       metadata: {
         extraction_id: saved.id, pdf_documents: hybrid.provenance.length,
         had_pasted_email: Boolean(params.loaded.submissionBrokerEmail),
-        overall_confidence: saved.confidence, pipeline_mode: "hybrid",
+        overall_confidence: saved.confidence,
+        overall_confidence_available: overallConfidenceAvailable,
+        pipeline_mode: "hybrid",
         route: hybrid.route, escalated_field_count: hybrid.escalatedFields.length,
       },
     });
@@ -590,7 +594,9 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       resultReferenceId: saved.id,
       metadata: {
         extraction_id: saved.id, pdf_documents: hybrid.provenance.length,
-        overall_confidence: saved.confidence, input_fingerprint: params.inputFp,
+        overall_confidence: saved.confidence,
+        overall_confidence_available: overallConfidenceAvailable,
+        input_fingerprint: params.inputFp,
         pipeline_mode: "hybrid", route: hybrid.route,
       },
     });
@@ -606,6 +612,9 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
   }
 
   if (hybrid.suggestLegacyFallback && fallbackEnabled) {
+    // Surface a specific UI stage — never leave the user on generic
+    // "Analysing with AI" once the section pipeline has bailed.
+    await updateJobProgress(params.admin, params.jobId, 65, "using_compatibility_extraction");
     // Record the escalation before we run legacy, so the reason survives even
     // if the legacy call itself fails.
     await params.admin.from("atlas_operational_alerts").insert(buildAlert({
@@ -647,6 +656,8 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       inputTokens: legacyOutcome.inputTokens, outputTokens: legacyOutcome.outputTokens,
       cachedInputTokens: legacyOutcome.cachedTokens, cacheWriteTokens: legacyOutcome.cacheWriteTokens,
       fallbackReason: hybrid.fallbackReason ?? "hybrid_failed",
+      fullLegacyFallbackUsed: true,
+      failureCategory: hybrid.fallbackReason ?? hybrid.errorCode ?? null,
     });
     return json({ ok: true, extraction_id: legacyOutcome.extractionId, overall_confidence: legacyOutcome.confidence, fallback: "legacy_emergency" });
   }

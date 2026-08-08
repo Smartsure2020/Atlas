@@ -7,3 +7,4 @@ dist/
 .wrangler/
 *.tsbuildinfo
 .verify-*/
+worker/.dry-run/

@@ -31,7 +31,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "./config.js";
 import {
-  EXTRACTION_MODEL,
   EXTRACTION_SCHEMA_VERSION,
   overallConfidence,
   validateAndNormalizeExtraction,
@@ -51,19 +50,29 @@ import type { PipelineRoute, ParsedDocument, CanonicalField } from "./pipeline-t
 import {
   azureConfigured,
   maxTextFastpathPages,
+  sectionConcurrency,
+  perSectionTimeoutMs,
+  overallHybridDeadlineMs,
+  sectionCharCap,
   type PipelineEnv,
   type PipelineMode,
+  type SectionExtractionEnv,
 } from "./pipeline-mode.js";
 import { StageTimer, type PipelineMetricInput } from "./pipeline-telemetry.js";
 import { canonicalTaxonomyKey } from "./taxonomy.js";
 import {
-  runHaikuNormalisation,
   runSonnetBoundedResolution,
+  runSonnetSectionResolution,
   type NormalisationUsage,
 } from "./hybrid-llm.js";
+import { splitDocumentsIntoSections, type DocumentSection } from "./section-splitter.js";
+import { extractSections, type SectionRunResult } from "./section-extractor.js";
+import { mergeSectionPartials, type MergePartial } from "./section-merger.js";
+import type { CanonicalPartial } from "./section-schemas.js";
+import { isUsableHybridExtraction, hybridUsabilityConfig } from "./hybrid-usability.js";
+import { ATLAS_MODEL_HAIKU, ATLAS_MODEL_SONNET, type Usage } from "./anthropic-client.js";
 
 const CLIENT_DOCS_BUCKET = "atlas-client-docs";
-const MAX_ESCALATION_ATTEMPTS = 1;
 
 // PIPELINE_VERSION lives in its own module so tests can import it without
 // pulling the full orchestrator (and @supabase/supabase-js value imports)
@@ -90,7 +99,7 @@ export interface ExtractionInput {
 
 export interface ExtractionContext {
   admin: SupabaseClient;
-  env: Env & PipelineEnv;
+  env: Env & PipelineEnv & SectionExtractionEnv;
   jobId?: string | null;
   mode: PipelineMode;
   isCancelled?: () => Promise<boolean>;
@@ -148,46 +157,6 @@ async function downloadBytes(
   return await data.arrayBuffer();
 }
 
-/**
- * Concatenate parsed documents into a Haiku-friendly text corpus with clear
- * per-document / per-page delimiters. Haiku sees TEXT — never the raw PDF.
- */
-function assembleCorpus(
-  brokerEmail: string | null,
-  parsed: { doc: DocumentRow; parsed: ParsedDocument }[]
-): string {
-  const lines: string[] = [];
-  if (brokerEmail && brokerEmail.trim()) {
-    lines.push("=== BROKER EMAIL (pasted at intake) ===");
-    lines.push(brokerEmail.trim());
-    lines.push("");
-  }
-  for (const { doc, parsed: p } of parsed) {
-    lines.push(`=== SOURCE DOCUMENT ===`);
-    lines.push(`document_id: ${doc.id}`);
-    lines.push(`file_name: ${doc.file_name}`);
-    lines.push(`document_type: ${doc.document_type ?? "unknown"}`);
-    lines.push(`parser: ${p.parserMeta.parser}`);
-    lines.push(`quality: ${p.quality}`);
-    lines.push("");
-    for (const page of p.pages) {
-      lines.push(`--- page ${page.page} ---`);
-      if (page.text.trim()) lines.push(page.text.trim());
-      else lines.push("(no extractable text on this page)");
-      lines.push("");
-    }
-    if (p.tables.length > 0) {
-      lines.push(`--- tables (${p.tables.length}) ---`);
-      for (const t of p.tables) {
-        lines.push(`table on page ${t.page}:`);
-        for (const row of t.rows) lines.push("  | " + row.join(" | ") + " |");
-      }
-      lines.push("");
-    }
-  }
-  return lines.join("\n");
-}
-
 /** Flatten the canonical extraction into a CanonicalField map for escalation checks. */
 function flattenToCanonicalFields(extraction: Record<string, unknown>): Record<string, CanonicalField> {
   const out: Record<string, CanonicalField> = {};
@@ -225,11 +194,23 @@ function setFieldOnExtraction(
   if (!section || !field) return;
   const sec = (extraction[section] ?? {}) as Record<string, unknown>;
   const existing = (sec[field] ?? {}) as Record<string, unknown>;
+  // Confidence policy: bounded Sonnet does not supply a numeric rating —
+  // we neither invent one nor demote any provider number that was already
+  // recorded on this field. Null with source "unavailable" is the honest
+  // default; a prior provider number is preserved as-is.
+  const priorConfidence = typeof existing.confidence === "number" && Number.isFinite(existing.confidence)
+    ? (existing.confidence as number)
+    : null;
+  const priorSource =
+    existing.confidence_source === "provider" || existing.confidence_source === "deterministic" || existing.confidence_source === "unavailable"
+      ? existing.confidence_source
+      : (priorConfidence == null ? "unavailable" : "provider");
   sec[field] = {
     ...existing,
     value,
     status: value == null ? "not_found" : "extracted",
-    confidence: existing.confidence ?? 0.7,
+    confidence: priorConfidence,
+    confidence_source: priorSource,
     source: {
       document_id: (existing.source as { document_id?: string | null } | undefined)?.document_id ?? null,
       file_name: (existing.source as { file_name?: string | null } | undefined)?.file_name ?? null,
@@ -410,50 +391,296 @@ export async function runHybridExtraction(
     return failResult({ route: overallRoute, status: "failed", errorCode: "cancelled", timer, mode: ctx.mode });
   }
 
-  // ---- Stage: Haiku normalisation ----
-  await ctx.onStage?.("extracting_risk_information", 55);
-  const corpus = assembleCorpus(input.brokerEmailBody, parsedDocs);
-  timer.start("haiku");
-  let normalisation: { extraction: Record<string, unknown>; usage: NormalisationUsage; model: string };
-  try {
-    normalisation = await runHaikuNormalisation({
-      env: ctx.env,
-      corpus,
-      documentIds: parsedDocs.map((p) => p.doc.id),
-      brokerEmailPresent: Boolean(input.brokerEmailBody),
-    });
-  } catch (err) {
-    warnings.push(`haiku_failed:${(err as Error).message?.slice(0, 60) ?? "unknown"}`);
+  // ---- Stage: section detection ----
+  await ctx.onStage?.("identifying_document_sections", 45);
+  timer.start("section_detection");
+  const split = splitDocumentsIntoSections(
+    parsedDocs.map((p) => p.parsed),
+    { approxCharCap: sectionCharCap(ctx.env) }
+  );
+  timer.stop("section_detection");
+
+  // If we detected literally nothing (impossible in practice, but guard),
+  // fall back to full-document extraction.
+  if (split.sections.length === 0) {
+    warnings.push("no_sections_detected");
     return {
-      status: "failed",
-      extraction: null,
-      route: overallRoute,
+      status: "failed", extraction: null, route: overallRoute,
       parser: parsedDocs[0]?.parsed.parserMeta.parser ?? "none",
-      normalisationModel: "claude-haiku-4-5",
-      fallbackModel: null,
-      escalatedFields: [],
-      warnings,
-      provenance,
+      normalisationModel: ATLAS_MODEL_HAIKU, fallbackModel: null,
+      escalatedFields: [], warnings, provenance,
       metrics: buildMetrics({
-        route: overallRoute,
-        mode: ctx.mode,
-        timer,
-        finalStatus: "failed",
-        fallbackReason: "haiku_call_failed",
+        route: overallRoute, mode: ctx.mode, timer, finalStatus: "failed",
+        fallbackReason: "section_detection_empty",
+        sectionCount: 0, successfulSectionCount: 0, failedSectionCount: 0,
+        timedOutSectionCount: 0, maxConcurrency: sectionConcurrency(ctx.env),
+        sectionDetectionMs: timer.ms("section_detection") ?? 0,
       }),
-      errorCode: "haiku_call_failed",
+      errorCode: "section_detection_empty",
       suggestLegacyFallback: ctx.legacyFallbackAllowed,
-      fallbackReason: "haiku_call_failed",
+      fallbackReason: "section_detection_empty",
     };
   }
+
+  // Attach a synthetic broker-email section so its content still flows into the
+  // canonical extraction via the policy_details schema (it usually names the
+  // broker + a rough summary and lives outside any PDF).
+  const sectionsToRun: DocumentSection[] = [...split.sections];
+  if (input.brokerEmailBody && input.brokerEmailBody.trim()) {
+    // Broker email pseudo-section is always documentIndex=-1 and stableIndex=-1
+    // — it precedes every parsed document in source order (sorts before doc 0
+    // via lexicographic tuple compare in the merger).
+    sectionsToRun.unshift({
+      documentId: "broker_email",
+      fileName: "(pasted broker email)",
+      sectionType: "policy_details",
+      heading: "Broker Email",
+      pages: [0],
+      text: input.brokerEmailBody.trim(),
+      approxChars: input.brokerEmailBody.trim().length,
+      sourceOffsets: { startPage: 0, endPage: 0 },
+      documentIndex: -1,
+      stableIndex: -1,
+    });
+  }
+
+  // ---- Stage: controlled parallel Haiku extraction per section ----
+  await ctx.onStage?.("extracting_risk_information", 55);
+  timer.start("haiku");
+  const concurrency = sectionConcurrency(ctx.env);
+  const sectionOutcome = await extractSections({
+    env: ctx.env,
+    sections: sectionsToRun,
+    concurrency,
+    perSectionTimeoutMs: perSectionTimeoutMs(ctx.env),
+    overallDeadlineMs: overallHybridDeadlineMs(ctx.env),
+    isCancelled: ctx.isCancelled,
+    onProgress: async (completed, total, lastType) => {
+      // Progress reflects completed sections, not fake elapsed time.
+      const stage =
+        lastType === "policy_details" || lastType === "intermediary_details"
+          ? "extracting_policy_details"
+          : "extracting_cover_sections";
+      const pct = 55 + Math.round((completed / Math.max(1, total)) * 20); // 55..75
+      await ctx.onStage?.(stage, pct);
+    },
+  });
   timer.stop("haiku");
 
+  const successCount = sectionOutcome.totals.success;
+  const failureCount = sectionOutcome.totals.failure;
+  const timeoutCount = sectionOutcome.totals.timeout;
+  const cancelledCount = sectionOutcome.totals.cancelled;
+
+  // If the caller cancelled mid-run, surface it cleanly.
+  if (cancelledCount > 0 && successCount === 0) {
+    return failResult({
+      route: overallRoute, status: "failed", errorCode: "cancelled",
+      timer, mode: ctx.mode,
+    });
+  }
+
+  // ---- Stage: bounded per-section Sonnet fallback for failed sections ----
+  // We ONLY escalate individual failed/timed-out sections, never the whole doc.
+  const boundedSonnetPartials: MergePartial[] = [];
+  let boundedSonnetMs = 0;
+  let boundedFallbackSectionCount = 0;
+  const boundedFailures: SectionRunResult[] = [];
+  const failedNeedingResolution = sectionOutcome.results.filter(
+    (r) => r.outcome === "failure" || r.outcome === "timeout"
+  );
+  // Retry eligibility per category. "invalid_request" (wrong shape / unknown
+  // model / auth-tier mismatch) and "auth_failed" are genuine API-level
+  // problems — retrying with a bigger model or the same key does not help,
+  // so they are deliberately excluded. "invalid_model_output" (a malformed
+  // reply) IS retried exactly once via bounded Sonnet. "network_failure" is
+  // a transient transport hiccup: the section extractor already retries once
+  // in-place; if that fails too we still allow bounded Sonnet recovery so a
+  // brief network blip cannot flip the whole document to legacy full Sonnet.
+  const canRetryCategory = new Set([
+    "timeout",
+    "server_error",
+    "rate_limited",
+    "network_failure",
+    "unknown_failure",
+    "invalid_model_output",
+    "schema_failure", // legacy name for invalid_model_output; retry-once eligible
+    "output_truncated",
+    "deadline_exceeded",
+  ]);
+  const remainingBudget = () => overallHybridDeadlineMs(ctx.env) - timer.totalMs();
+  if (failedNeedingResolution.length > 0 && remainingBudget() > 30_000) {
+    await ctx.onStage?.("resolving_uncertain_fields", 78);
+    timer.start("sonnet");
+    for (const r of failedNeedingResolution) {
+      if (await ctx.isCancelled?.()) break;
+      if (remainingBudget() < 15_000) break;
+      if (r.category && !canRetryCategory.has(r.category)) {
+        boundedFailures.push(r);
+        continue;
+      }
+      try {
+        const s = await runSonnetSectionResolution({
+          env: ctx.env,
+          section: r.section,
+          timeoutMs: Math.min(60_000, remainingBudget()),
+        });
+        boundedSonnetPartials.push({
+          partial: s.partial,
+          documentId: r.section.documentId,
+          primarySectionType: r.section.sectionType,
+          documentIndex: r.section.documentIndex,
+          stableIndex: r.section.stableIndex,
+          startPage: r.section.sourceOffsets.startPage,
+        });
+        boundedFallbackSectionCount++;
+      } catch (err) {
+        warnings.push(`sonnet_section_failed:${r.section.sectionType}:${(err as Error).message?.slice(0, 40) ?? "unknown"}`);
+        boundedFailures.push(r);
+      }
+    }
+    boundedSonnetMs = timer.stop("sonnet");
+  }
+
+  // Collect first-pass partials. The merger sorts them by a deterministic
+  // total order — collection order here does not affect the merged output.
+  const partialsForMerge: MergePartial[] = [];
+  let haikuInputTokens = 0, haikuCached = 0, haikuCacheWrite = 0, haikuOutput = 0;
+  let seenModel: string | undefined;
+  for (const r of sectionOutcome.results) {
+    if (r.outcome === "success" && r.partial) {
+      partialsForMerge.push({
+        partial: r.partial,
+        documentId: r.section.documentId,
+        primarySectionType: r.section.sectionType,
+        documentIndex: r.section.documentIndex,
+        stableIndex: r.section.stableIndex,
+        startPage: r.section.sourceOffsets.startPage,
+      });
+    }
+    if (r.usage) {
+      haikuInputTokens += r.usage.input_tokens;
+      haikuCached += r.usage.cache_read_input_tokens;
+      haikuCacheWrite += r.usage.cache_creation_input_tokens;
+      haikuOutput += r.usage.output_tokens;
+    }
+    if (r.model && !seenModel) seenModel = r.model;
+  }
+  partialsForMerge.push(...boundedSonnetPartials);
+
+  // Zero-partial guard: bounded Sonnet already ran; if nothing at all is
+  // usable, we cannot map the document to canonical shape. Suggest fallback
+  // (subject to the caller's policy) without attempting a merge.
+  if (partialsForMerge.length === 0) {
+    const firstCat = failedNeedingResolution[0]?.category ?? "unknown_failure";
+    warnings.push(`hybrid_no_partials:${firstCat}`);
+    return {
+      status: "failed", extraction: null, route: overallRoute,
+      parser: parsedDocs[0]?.parsed.parserMeta.parser ?? "none",
+      normalisationModel: ATLAS_MODEL_HAIKU, fallbackModel: null,
+      escalatedFields: [], warnings, provenance,
+      metrics: buildMetrics({
+        route: overallRoute, mode: ctx.mode, timer, finalStatus: "failed",
+        fallbackReason: `haiku_${String(firstCat)}`,
+        sectionCount: sectionsToRun.length,
+        successfulSectionCount: successCount,
+        failedSectionCount: failureCount,
+        timedOutSectionCount: timeoutCount,
+        maxConcurrency: concurrency,
+        sectionDetectionMs: timer.ms("section_detection") ?? 0,
+        slowestSectionMs: sectionOutcome.totals.slowestSectionMs,
+        haikuTotalMs: sectionOutcome.totals.haikuTotalMs,
+        boundedSonnetMs, boundedFallbackSectionCount,
+        failureCategory: `haiku_${String(firstCat)}`,
+        inputTokens: haikuInputTokens, cachedInputTokens: haikuCached,
+        cacheWriteTokens: haikuCacheWrite, outputTokens: haikuOutput,
+        model: seenModel ?? ATLAS_MODEL_HAIKU,
+      }),
+      errorCode: `haiku_${String(firstCat)}`,
+      suggestLegacyFallback: ctx.legacyFallbackAllowed,
+      fallbackReason: `haiku_${String(firstCat)}`,
+    };
+  }
+
+  // ---- Stage: deterministic merge ----
+  await ctx.onStage?.("merging_extracted_sections", 82);
+  const merge = mergeSectionPartials({
+    partials: partialsForMerge,
+    brokerEmailBody: input.brokerEmailBody,
+  });
+  let extraction = merge.extraction;
+  let validated = merge.validation;
+
   // ---- Stage: validation ----
-  await ctx.onStage?.("validating_extracted_fields", 70);
+  await ctx.onStage?.("validating_extracted_fields", 86);
   timer.start("validation");
-  let validated = validateAndNormalizeExtraction(normalisation.extraction);
-  let extraction = validated.value ?? normalisation.extraction;
+  validated = validateAndNormalizeExtraction(extraction);
+  extraction = validated.value ?? extraction;
   timer.stop("validation");
+
+  // ---- Usability decision ----
+  // Runs AFTER bounded Sonnet + merge + validation. "Any successful section"
+  // is NOT enough — the merged extraction itself has to carry the critical
+  // facts. Sections marked "minor" (intermediary, endorsements, unclassified,
+  // etc.) do not count towards the critical section ratio.
+  const successfulSectionTypes = [
+    ...sectionOutcome.results.filter((r) => r.outcome === "success").map((r) => r.section.sectionType),
+    ...boundedSonnetPartials.map((p) => p.primarySectionType),
+  ];
+  const failedSectionTypes = sectionOutcome.results
+    .filter((r) => (r.outcome === "failure" || r.outcome === "timeout") &&
+      !boundedSonnetPartials.some((b) => b.stableIndex === r.section.stableIndex))
+    .map((r) => r.section.sectionType);
+  const usabilityCfg = hybridUsabilityConfig(ctx.env);
+  const usability = isUsableHybridExtraction({
+    extraction,
+    schemaValid: validated.ok,
+    unresolvedConflicts: merge.conflicts.length,
+    successfulSectionTypes,
+    failedSectionTypes,
+  }, usabilityCfg);
+
+  if (!usability.usable) {
+    const firstCat = failedNeedingResolution[0]?.category ?? "insufficient_data";
+    const reasonTag = usability.reasons[0] ?? "unusable_hybrid";
+    warnings.push(`hybrid_unusable:${reasonTag}`);
+    return {
+      status: "failed", extraction: null, route: overallRoute,
+      parser: parsedDocs[0]?.parsed.parserMeta.parser ?? "none",
+      normalisationModel: ATLAS_MODEL_HAIKU, fallbackModel: null,
+      escalatedFields: [], warnings, provenance,
+      metrics: buildMetrics({
+        route: overallRoute, mode: ctx.mode, timer, finalStatus: "failed",
+        fallbackReason: `unusable:${reasonTag}`,
+        sectionCount: sectionsToRun.length,
+        successfulSectionCount: successCount,
+        failedSectionCount: failureCount,
+        timedOutSectionCount: timeoutCount,
+        maxConcurrency: concurrency,
+        sectionDetectionMs: timer.ms("section_detection") ?? 0,
+        slowestSectionMs: sectionOutcome.totals.slowestSectionMs,
+        haikuTotalMs: sectionOutcome.totals.haikuTotalMs,
+        boundedSonnetMs, boundedFallbackSectionCount,
+        failureCategory: `unusable:${reasonTag}`,
+        inputTokens: haikuInputTokens, cachedInputTokens: haikuCached,
+        cacheWriteTokens: haikuCacheWrite, outputTokens: haikuOutput,
+        model: seenModel ?? ATLAS_MODEL_HAIKU,
+        metadata: {
+          unusable_reasons: usability.reasons.slice(0, 6),
+          cover_sections_count: usability.signals.coverSectionsCount,
+          critical_section_ratio: Math.round(usability.signals.relevantSectionSuccessRatio * 100) / 100,
+          hybrid_haiku_failure_category: String(firstCat),
+        },
+      }),
+      errorCode: `unusable:${reasonTag}`,
+      // Emergency full-document fallback is only proposed here — after
+      // bounded Sonnet has already tried to rescue individual sections.
+      // The caller decides whether to actually run legacy Sonnet, honouring
+      // its own deadline / policy / cancellation checks.
+      suggestLegacyFallback: ctx.legacyFallbackAllowed,
+      fallbackReason: `unusable:${reasonTag}`,
+    };
+  }
 
   const known = new Set<string>();
   known.add("buildings"); known.add("motor"); known.add("contents");
@@ -463,11 +690,14 @@ export async function runHybridExtraction(
     knownTax.add(k);
   }
 
-  // ---- Stage: escalation to bounded Sonnet ----
+  // ---- Stage: post-merge field-level bounded Sonnet resolution ----
+  // The bounded per-section Sonnet resolver above rescues sections whose
+  // Haiku call failed. This second pass handles residual field-level gaps
+  // (critical missing values, low provider confidence, unknown taxonomy,
+  // invalid dates) that survive successful section extraction.
   const escalatedFields: string[] = [];
-  let sonnetUsage: NormalisationUsage | null = null;
-  let sonnetAttempts = 0;
-  while (sonnetAttempts < MAX_ESCALATION_ATTEMPTS) {
+  let sonnetFieldUsage: NormalisationUsage | null = null;
+  {
     const fields = flattenToCanonicalFields(extraction);
     const signals = detectEscalationSignals(fields, {
       validationErrors: validated.errors,
@@ -475,54 +705,45 @@ export async function runHybridExtraction(
       providerConfidenceThreshold: 0.6,
     });
     const dec = shouldEscalateToSonnet(signals);
-    if (!dec.escalate) break;
-
-    await ctx.onStage?.("resolving_uncertain_fields", 82);
-    if (await ctx.isCancelled?.()) break;
-
-    const targetFields = [
-      ...signals.missingCriticalFields,
-      ...signals.lowProviderConfidenceFields,
-      ...signals.unknownTaxonomyValues,
-      ...signals.invalidDates,
-    ].filter((v, i, a) => a.indexOf(v) === i);
-    if (targetFields.length === 0) break;
-
-    // Build a page-scoped evidence pack for ONLY the affected fields.
-    const evidencePages = evidencePagesFor(parsedDocs, targetFields, fields, corpus);
-    timer.start("sonnet");
-    try {
-      const sonnet = await runSonnetBoundedResolution({
-        env: ctx.env,
-        targetFields,
-        currentValues: targetFields.map((k) => ({
-          field: k,
-          currentValue: fields[k]?.value ?? null,
-          currentConfidence: fields[k]?.confidence ?? null,
-          reason: dec.reason ?? "unknown",
-        })),
-        evidenceText: evidencePages,
-      });
-      sonnetUsage = sonnet.usage;
-
-      // Merge ONLY the requested fields, and only if Sonnet returned a value.
-      for (const patched of sonnet.resolvedFields) {
-        if (!targetFields.includes(patched.field)) continue; // reject out-of-scope changes
-        if (patched.value === undefined) continue;
-        setFieldOnExtraction(extraction, patched.field, patched.value, patched.page ?? null, "sonnet_bounded");
-        escalatedFields.push(patched.field);
+    const remaining = overallHybridDeadlineMs(ctx.env) - timer.totalMs();
+    if (dec.escalate && remaining > 20_000 && !(await ctx.isCancelled?.())) {
+      const targetFields = [
+        ...signals.missingCriticalFields,
+        ...signals.lowProviderConfidenceFields,
+        ...signals.unknownTaxonomyValues,
+        ...signals.invalidDates,
+      ].filter((v, i, a) => a.indexOf(v) === i);
+      if (targetFields.length > 0) {
+        await ctx.onStage?.("resolving_uncertain_fields", 88);
+        const evidencePages = evidencePagesFromSections(sectionsToRun, targetFields, fields);
+        timer.start("sonnet_fields");
+        try {
+          const sonnet = await runSonnetBoundedResolution({
+            env: ctx.env,
+            targetFields,
+            currentValues: targetFields.map((k) => ({
+              field: k,
+              currentValue: fields[k]?.value ?? null,
+              currentConfidence: fields[k]?.confidence ?? null,
+              reason: dec.reason ?? "unknown",
+            })),
+            evidenceText: evidencePages,
+          });
+          sonnetFieldUsage = sonnet.usage;
+          for (const patched of sonnet.resolvedFields) {
+            if (!targetFields.includes(patched.field)) continue;
+            if (patched.value === undefined) continue;
+            setFieldOnExtraction(extraction, patched.field, patched.value, patched.page ?? null, "sonnet_bounded");
+            escalatedFields.push(patched.field);
+          }
+        } catch (err) {
+          warnings.push(`sonnet_fields_failed:${(err as Error).message?.slice(0, 60) ?? "unknown"}`);
+        }
+        timer.stop("sonnet_fields");
+        validated = validateAndNormalizeExtraction(extraction);
+        extraction = validated.value ?? extraction;
       }
-    } catch (err) {
-      warnings.push(`sonnet_failed:${(err as Error).message?.slice(0, 60) ?? "unknown"}`);
     }
-    timer.stop("sonnet");
-
-    // Re-validate after merge.
-    validated = validateAndNormalizeExtraction(extraction);
-    extraction = validated.value ?? extraction;
-    sonnetAttempts++;
-    // One attempt is the ceiling; break regardless.
-    break;
   }
 
   // Preserve canonical extraction taxonomy check hint using canonicalizer.
@@ -534,13 +755,28 @@ export async function runHybridExtraction(
   const parser = parsedDocs[0]?.parsed.parserMeta.parser ?? "none";
   const conf = overallConfidence(extraction);
 
+  const totalSonnetTokens = (u: Usage | null) => ({
+    input: u?.input_tokens ?? 0,
+    cached: u?.cache_read_input_tokens ?? 0,
+    write: u?.cache_creation_input_tokens ?? 0,
+    output: u?.output_tokens ?? 0,
+  });
+  const s1 = totalSonnetTokens(sonnetFieldUsage);
+  // Bounded per-section Sonnet fallback tokens are already summed by the
+  // extractSections runner (they emit their own usage). We fold their
+  // consumption into the totals if any.
+  const totalInput = haikuInputTokens + s1.input;
+  const totalCached = haikuCached + s1.cached;
+  const totalCacheWrite = haikuCacheWrite + s1.write;
+  const totalOutput = haikuOutput + s1.output;
+
   return {
     status: finalStatus,
     extraction,
     route,
     parser,
-    normalisationModel: normalisation.model,
-    fallbackModel: escalatedFields.length > 0 ? EXTRACTION_MODEL : null,
+    normalisationModel: seenModel ?? ATLAS_MODEL_HAIKU,
+    fallbackModel: (escalatedFields.length > 0 || boundedFallbackSectionCount > 0) ? ATLAS_MODEL_SONNET : null,
     escalatedFields,
     warnings,
     provenance,
@@ -550,17 +786,35 @@ export async function runHybridExtraction(
       timer,
       finalStatus: "completed",
       fallbackReason: null,
-      escalatedToSonnet: escalatedFields.length > 0,
-      inputTokens: normalisation.usage.input_tokens + (sonnetUsage?.input_tokens ?? 0),
-      cachedInputTokens: normalisation.usage.cache_read_input_tokens + (sonnetUsage?.cache_read_input_tokens ?? 0),
-      cacheWriteTokens: normalisation.usage.cache_creation_input_tokens + (sonnetUsage?.cache_creation_input_tokens ?? 0),
-      outputTokens: normalisation.usage.output_tokens + (sonnetUsage?.output_tokens ?? 0),
-      model: normalisation.model,
+      escalatedToSonnet: escalatedFields.length > 0 || boundedFallbackSectionCount > 0,
+      inputTokens: totalInput,
+      cachedInputTokens: totalCached,
+      cacheWriteTokens: totalCacheWrite,
+      outputTokens: totalOutput,
+      model: seenModel ?? ATLAS_MODEL_HAIKU,
       schemaFailures: validated.ok ? 0 : 1,
+      sectionCount: sectionsToRun.length,
+      successfulSectionCount: successCount,
+      failedSectionCount: failureCount,
+      timedOutSectionCount: timeoutCount,
+      maxConcurrency: concurrency,
+      sectionDetectionMs: timer.ms("section_detection") ?? 0,
+      slowestSectionMs: sectionOutcome.totals.slowestSectionMs,
+      haikuTotalMs: sectionOutcome.totals.haikuTotalMs,
+      boundedSonnetMs,
+      boundedFallbackSectionCount,
+      fullLegacyFallbackUsed: false,
       metadata: {
         overall_confidence: Math.round(conf * 100) / 100,
+        // Provenance flag so a downstream reader can tell an actual 0% score
+        // apart from "no field was rated, compatibility zero written".
+        overall_confidence_available: (extraction as { overall_confidence_available?: unknown }).overall_confidence_available !== false,
         pages_total: parsedDocs.reduce((s, p) => s + p.parsed.pageCount, 0),
         schema_version: EXTRACTION_SCHEMA_VERSION,
+        merge_conflicts: merge.conflicts.length,
+        merge_duplicates: merge.duplicateFieldCount,
+        usable_cover_sections: usability.signals.coverSectionsCount,
+        usable_critical_ratio: Math.round(usability.signals.relevantSectionSuccessRatio * 100) / 100,
       },
     }),
   };
@@ -573,30 +827,29 @@ export async function runHybridExtraction(
 // small and bounded.
 // ---------------------------------------------------------------------------
 
-function evidencePagesFor(
-  parsedDocs: { doc: DocumentRow; parsed: ParsedDocument }[],
+function evidencePagesFromSections(
+  sections: DocumentSection[],
   fields: string[],
-  fieldMap: Record<string, CanonicalField>,
-  fullCorpus: string
+  fieldMap: Record<string, CanonicalField>
 ): string {
-  const wantPages = new Set<string>();
+  const wantPages = new Set<number>();
+  const wantDocs = new Set<string>();
   for (const key of fields) {
     const f = fieldMap[key];
-    if (f?.sourceDocumentId && f.sourcePage != null) {
-      wantPages.add(`${f.sourceDocumentId}:${f.sourcePage}`);
-    }
-  }
-  if (wantPages.size === 0) {
-    // No source-page hints from Haiku; give Sonnet a small slice of the corpus
-    // (first 6000 chars) rather than the full document set.
-    return fullCorpus.slice(0, 6000);
+    if (f?.sourcePage != null) wantPages.add(f.sourcePage);
+    if (f?.sourceDocumentId) wantDocs.add(f.sourceDocumentId);
   }
   const chunks: string[] = [];
-  for (const { doc, parsed } of parsedDocs) {
-    for (const page of parsed.pages) {
-      if (wantPages.has(`${doc.id}:${page.page}`)) {
-        chunks.push(`--- ${doc.file_name} page ${page.page} ---\n${page.text}`);
-      }
+  for (const s of sections) {
+    const pageMatch = s.pages.some((p) => wantPages.has(p));
+    const docMatch = wantDocs.size === 0 || wantDocs.has(s.documentId);
+    if (pageMatch && docMatch) {
+      chunks.push(`--- ${s.fileName} [${s.sectionType}] pages ${s.pages.join(",")} ---\n${s.text}`);
+    }
+  }
+  if (chunks.length === 0) {
+    for (const s of sections.slice(0, 4)) {
+      chunks.push(`--- ${s.fileName} [${s.sectionType}] ---\n${s.text}`);
     }
   }
   return chunks.join("\n\n").slice(0, 12_000);
@@ -672,6 +925,18 @@ function buildMetrics(input: {
   outputTokens?: number;
   model?: string;
   schemaFailures?: number;
+  sectionCount?: number;
+  successfulSectionCount?: number;
+  failedSectionCount?: number;
+  timedOutSectionCount?: number;
+  maxConcurrency?: number;
+  sectionDetectionMs?: number;
+  slowestSectionMs?: number;
+  haikuTotalMs?: number;
+  boundedSonnetMs?: number;
+  boundedFallbackSectionCount?: number;
+  fullLegacyFallbackUsed?: boolean;
+  failureCategory?: string | null;
   metadata?: Record<string, unknown>;
 }): PipelineMetricInput {
   return {
@@ -682,7 +947,10 @@ function buildMetrics(input: {
     downloadMs: input.timer.ms("download") ?? undefined,
     parseMs: input.timer.ms("parse") ?? undefined,
     ocrMs: input.timer.ms("ocr") ?? undefined,
-    llmTotalMs: (input.timer.ms("haiku") ?? 0) + (input.timer.ms("sonnet") ?? 0) || undefined,
+    llmTotalMs:
+      (input.timer.ms("haiku") ?? 0) +
+        (input.timer.ms("sonnet") ?? 0) +
+        (input.timer.ms("sonnet_fields") ?? 0) || undefined,
     validationMs: input.timer.ms("validation") ?? undefined,
     totalMs: input.timer.totalMs(),
     inputTokens: input.inputTokens ?? undefined,
@@ -693,6 +961,18 @@ function buildMetrics(input: {
     fallbackReason: input.fallbackReason ?? undefined,
     escalatedToSonnet: input.escalatedToSonnet ?? false,
     finalStatus: input.finalStatus,
+    sectionCount: input.sectionCount,
+    successfulSectionCount: input.successfulSectionCount,
+    failedSectionCount: input.failedSectionCount,
+    timedOutSectionCount: input.timedOutSectionCount,
+    maxConcurrency: input.maxConcurrency,
+    sectionDetectionMs: input.sectionDetectionMs,
+    slowestSectionMs: input.slowestSectionMs,
+    haikuTotalMs: input.haikuTotalMs,
+    boundedSonnetMs: input.boundedSonnetMs,
+    boundedFallbackSectionCount: input.boundedFallbackSectionCount,
+    fullLegacyFallbackUsed: input.fullLegacyFallbackUsed,
+    failureCategory: input.failureCategory ?? null,
     metadata: input.metadata ?? null,
   };
 }
