@@ -565,27 +565,60 @@ test("15. Queue delay and processing duration are recorded separately", async ()
   const admin = makeAdminMock({ uniqueIndexes: RESERVATION_INDEX });
   seedSubmissionAndDocs(admin);
   const { env } = makeEnvWithQueue();
-  const runHybrid = (async () => {
-    await new Promise((r) => setTimeout(r, 15));
-    return fakeHybridResult();
-  }) as unknown as Parameters<typeof handleShadowQueueBatch>[2]["runHybrid"];
 
-  // enqueuedAt was 25ms ago in baseMessage() — queue delay must be > 0.
-  await handleShadowQueueBatch(makeBatch([baseMessage()]), env, { buildAdmin: () => admin.client, runHybrid });
+  // This test used to measure both durations off the real wall clock (a
+  // fixed "-25ms" enqueuedAt offset against a real 15ms setTimeout inside
+  // runHybrid). On coarse OS timer ticks (Windows in particular defaults to
+  // ~15.6ms resolution) a "15ms" real sleep can land anywhere in roughly the
+  // 15-31ms range, which overlaps the ~25-27ms the queue-delay side actually
+  // measured — so the two independently-measured integers could legitimately
+  // come out equal, failing the `!==` check without any real bug. Pin both
+  // clocks to known values instead: a fake `Date.now()` that only advances
+  // when *this test* tells it to, so each duration is deterministic and
+  // exact, and provably comes from its own timestamp boundary rather than
+  // the other one.
+  const FIXED_ENQUEUED_AT = 1_700_000_000_000;
+  const EXPECTED_QUEUE_DELAY_MS = 25_000;
+  const EXPECTED_PROCESSING_MS = 7_777;
+
+  const realDateNow = Date.now;
+  let virtualNow = FIXED_ENQUEUED_AT + EXPECTED_QUEUE_DELAY_MS;
+  Date.now = () => virtualNow;
+
+  try {
+    const runHybrid = (async () => {
+      // Advance the virtual clock only here, i.e. strictly between
+      // processingStartedAt and the final Date.now() read — proving
+      // shadow_processing_ms measures this span and nothing else.
+      virtualNow += EXPECTED_PROCESSING_MS;
+      return fakeHybridResult();
+    }) as unknown as Parameters<typeof handleShadowQueueBatch>[2]["runHybrid"];
+
+    await handleShadowQueueBatch(
+      makeBatch([baseMessage({ enqueuedAt: FIXED_ENQUEUED_AT })]),
+      env,
+      { buildAdmin: () => admin.client, runHybrid }
+    );
+  } finally {
+    Date.now = realDateNow;
+  }
 
   const comparisons = admin.tables.get("atlas_pipeline_shadow_comparisons") ?? [];
   eq(comparisons.length, 1, "one comparison row");
   const md = (comparisons[0] as Record<string, unknown>).metadata as Record<string, unknown>;
-  assert(typeof md.shadow_queue_delay_ms === "number" && md.shadow_queue_delay_ms >= 0, "queue delay recorded");
+  eq(md.shadow_queue_delay_ms, EXPECTED_QUEUE_DELAY_MS, "comparison row records the exact queue delay");
 
   const metrics = admin.tables.get("atlas_pipeline_metrics") ?? [];
   const successMetric = metrics.find((m) => (m as { fallback_reason?: string | null }).fallback_reason == null) as Record<string, unknown> | undefined;
   assert(successMetric, "success metric present");
   const mMd = successMetric!.metadata as Record<string, unknown>;
-  assert(typeof mMd.shadow_queue_delay_ms === "number", "metric records queue delay");
-  assert(typeof mMd.shadow_processing_ms === "number" && (mMd.shadow_processing_ms as number) >= 0, "metric records processing ms");
-  // The two are distinct fields.
-  assert(mMd.shadow_queue_delay_ms !== mMd.shadow_processing_ms, "queue delay and processing recorded as separate values");
+  // Exact values, not just "a number" — this proves shadow_queue_delay_ms
+  // comes from the enqueuedAt boundary (unaffected by however long runHybrid
+  // takes) and shadow_processing_ms comes from the processingStartedAt
+  // boundary (unaffected by the queue-delay offset), rather than merely
+  // asserting the two numbers differ.
+  eq(mMd.shadow_queue_delay_ms, EXPECTED_QUEUE_DELAY_MS, "metric records the exact queue delay");
+  eq(mMd.shadow_processing_ms, EXPECTED_PROCESSING_MS, "metric records the exact processing duration");
 });
 
 // ---------------------------------------------------------------------------
