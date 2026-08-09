@@ -28,10 +28,29 @@ export interface FieldSource {
   snippet: string | null;
 }
 
+/**
+ * Where an extracted field's confidence number came from. This lets downstream
+ * consumers tell "the provider rated this 0.4" apart from "no provider score
+ * was available; do NOT interpret 0 as low quality" apart from "our own
+ * deterministic rule set the number".
+ *
+ *   provider      — the LLM/OCR provider returned a numeric confidence.
+ *   deterministic — a deterministic Atlas rule chose the number.
+ *   unavailable   — no rating is available; confidence MUST be null.
+ */
+export type ConfidenceSource = "provider" | "deterministic" | "unavailable";
+
 export interface ExtractedField {
   value: unknown;
   status: FieldStatus;
-  confidence: number;
+  /**
+   * Nullable by contract. `null` means unavailable (see `confidence_source`);
+   * do NOT synthesize a value to fill it. Downstream consumers must treat
+   * `null` as "no information", never as "low quality".
+   */
+  confidence: number | null;
+  /** Optional provenance marker. Absent means legacy/unspecified. */
+  confidence_source?: ConfidenceSource;
   source: FieldSource;
   notes: string | null;
 }
@@ -251,10 +270,14 @@ function emptySource(): FieldSource {
 }
 
 function defaultField(arrayValue = false): ExtractedField {
+  // A default/scaffolded field has no value to rate. `null` (unavailable) is
+  // the only honest confidence — 0 was previously synthesized here and it
+  // was silently indistinguishable from a rated 0.
   return {
     value: arrayValue ? [] : null,
     status: "not_found",
-    confidence: 0,
+    confidence: null,
+    confidence_source: "unavailable",
     source: emptySource(),
     notes: null,
   };
@@ -286,25 +309,48 @@ function normalizeField(
   }
 
   const status = typeof raw.status === "string" ? raw.status : undefined;
-  const confidence = Number(raw.confidence);
+  const rawConfidence = raw.confidence;
+  const rawSource: ConfidenceSource | undefined =
+    raw.confidence_source === "provider" || raw.confidence_source === "deterministic" || raw.confidence_source === "unavailable"
+      ? raw.confidence_source
+      : undefined;
+
+  // Confidence semantics:
+  //   - Explicit null   → unavailable (kept as null, never fabricated).
+  //   - Missing         → unavailable (kept as null, never fabricated).
+  //   - Numeric [0,1]   → preserved as-is; provenance preserved if supplied.
+  //   - Anything else   → validation error; unavailable-null used as fallback.
+  let confidence: number | null;
+  let confidenceSource: ConfidenceSource;
+  if (rawConfidence === null || rawConfidence === undefined) {
+    confidence = null;
+    confidenceSource = rawSource ?? "unavailable";
+  } else {
+    const n = Number(rawConfidence);
+    if (!Number.isFinite(n) || n < 0 || n > 1) {
+      errors.push(`${path}.confidence must be between 0 and 1 (or null when unavailable)`);
+      confidence = null;
+      confidenceSource = "unavailable";
+    } else {
+      confidence = n;
+      confidenceSource = rawSource ?? "provider";
+    }
+  }
+
   const normalized: ExtractedField = {
     value: raw.value,
     status: ALLOWED_STATUS.has(status ?? "") ? (status as FieldStatus) : "extracted",
     confidence,
+    confidence_source: confidenceSource,
     source: normalizeSource(raw.source),
     notes: typeof raw.notes === "string" && raw.notes.trim() ? raw.notes : null,
   };
 
   if (!status) {
     if (raw.value === null || raw.value === undefined) normalized.status = "not_found";
-    else if (confidence > 0 && confidence <= 0.5) normalized.status = "low_confidence_extracted";
+    else if (confidence != null && confidence > 0 && confidence <= 0.5) normalized.status = "low_confidence_extracted";
   } else if (!ALLOWED_STATUS.has(status)) {
     errors.push(`${path}.status is invalid`);
-  }
-
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
-    errors.push(`${path}.confidence must be between 0 and 1`);
-    normalized.confidence = 0;
   }
 
   if (arrayValue && !Array.isArray(normalized.value)) {
@@ -417,12 +463,50 @@ export function validateAndNormalizeExtraction(raw: unknown): ValidationResult {
     "note",
   ]);
 
-  const overall = Number(raw.overall_confidence);
-  if (!Number.isFinite(overall) || overall < 0 || overall > 1) {
-    errors.push("overall_confidence must be between 0 and 1");
+  // overall_confidence provenance.
+  //
+  // The canonical numeric field is retained (a NOT NULL constraint on
+  // atlas_extractions.extraction_confidence and every existing downstream
+  // reader relies on a number, so switching to null would be a schema-wide
+  // change). To stop the compatibility 0 being read as "the provider rated
+  // this run 0% confident", we ALSO write an explicit provenance flag:
+  //
+  //   overall_confidence_source        : "provider" | "unavailable"
+  //   overall_confidence_available     : boolean  (mirrors the above for
+  //                                       consumers that only want a flag)
+  //
+  // The UI, escalation router, matching pipeline and persistence layer treat
+  // `overall_confidence_available === false` as "no rating" — the numeric 0
+  // MUST NOT be surfaced or scored as a genuine provider confidence of zero.
+  const rawOverall = raw.overall_confidence;
+  const overall = Number(rawOverall);
+  const providedNumeric =
+    rawOverall !== null &&
+    rawOverall !== undefined &&
+    Number.isFinite(overall) &&
+    overall >= 0 &&
+    overall <= 1;
+  const explicitlyUnavailable =
+    rawOverall === null ||
+    rawOverall === undefined ||
+    raw.overall_confidence_available === false ||
+    raw.overall_confidence_source === "unavailable";
+  if (!providedNumeric && !explicitlyUnavailable) {
+    errors.push("overall_confidence must be between 0 and 1 (or null when unavailable)");
     normalized.overall_confidence = 0;
-  } else {
+    normalized.overall_confidence_source = "unavailable";
+    normalized.overall_confidence_available = false;
+  } else if (providedNumeric && !explicitlyUnavailable) {
     normalized.overall_confidence = overall;
+    normalized.overall_confidence_source =
+      raw.overall_confidence_source === "unavailable" ? "unavailable" : "provider";
+    normalized.overall_confidence_available =
+      raw.overall_confidence_source !== "unavailable";
+  } else {
+    // Unavailable: retain the compatibility 0 for downstream numeric readers.
+    normalized.overall_confidence = 0;
+    normalized.overall_confidence_source = "unavailable";
+    normalized.overall_confidence_available = false;
   }
 
   return { ok: errors.length === 0, value: normalized, errors };

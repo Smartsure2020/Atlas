@@ -237,6 +237,14 @@ interface RunParams {
   inputFp: string;
   loaded: LoadedDocsResult;
   ctx?: ExtractExecutionContext;
+  /**
+   * Lower bound for progress updates emitted inside runLegacyCore. When the
+   * hybrid emergency fallback invokes legacy after already advancing the job
+   * to 65%, the legacy stages (10/35/85) would otherwise regress the UI back
+   * to 10 and thrash through the sequence. Setting this floor keeps the
+   * progress bar monotonic while preserving the current_step vocabulary.
+   */
+  progressFloor?: number;
 }
 
 interface LegacyRunOutcome {
@@ -256,8 +264,13 @@ interface LegacyRunOutcome {
 async function runLegacyCore(params: RunParams): Promise<LegacyRunOutcome> {
   const started = Date.now();
   const { admin, env, submissionId, jobId, user, loaded } = params;
+  const progressFloor = params.progressFloor ?? 0;
+  // Wraps updateJobProgress so the numeric percent never regresses below the
+  // floor set by the caller. current_step (stage name) is preserved as-is.
+  const progress = (pct: number, stage: string) =>
+    updateJobProgress(admin, jobId, Math.max(pct, progressFloor), stage);
 
-  await updateJobProgress(admin, jobId, 10, "validating_document");
+  await progress(10, "validating_document");
 
   const content: unknown[] = [];
   if (loaded.submissionBrokerEmail) {
@@ -297,7 +310,7 @@ async function runLegacyCore(params: RunParams): Promise<LegacyRunOutcome> {
     };
   }
 
-  await updateJobProgress(admin, jobId, 35, "extracting_risk_information");
+  await progress(35, "extracting_risk_information");
   if (await isJobCancellationRequested(admin, jobId)) {
     return { ok: false, totalMs: Date.now() - started, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, attachedCount, errorResponse: json({ error: "job_cancelled", job_id: jobId }, 409) };
   }
@@ -361,7 +374,7 @@ async function runLegacyCore(params: RunParams): Promise<LegacyRunOutcome> {
   }
   extraction = validated.value;
 
-  await updateJobProgress(admin, jobId, 85, "validating_extracted_fields");
+  await progress(85, "validating_extracted_fields");
 
   const saved = await persistExtraction(admin, submissionId, extraction, {
     model: EXTRACTION_MODEL,
@@ -525,6 +538,21 @@ async function runLegacyAuthoritativeWithHybridShadow(params: RunParams): Promis
 async function runHybridAuthoritative(params: RunParams): Promise<Response> {
   const fallbackEnabled = params.env.ATLAS_LEGACY_FALLBACK_DISABLED !== "true";
 
+  // High-water progress across the ENTIRE hybrid-authoritative run — both the
+  // orchestrator's onStage updates and the endpoint's own persist/fallback
+  // updates flow through this helper. Guarantees the percentage never
+  // regresses even when a later stage's nominal value is lower than an
+  // earlier stage that already ran (e.g. hybrid reached 88 then fell back to
+  // the "using_compatibility_extraction" nominal 65). current_step is
+  // preserved so observability still shows the stage transitions.
+  let progressHighWater = 0;
+  const bumpProgress = async (pct: number, stage: string): Promise<number> => {
+    const clamped = Math.max(pct, progressHighWater);
+    progressHighWater = clamped;
+    await updateJobProgress(params.admin, params.jobId, clamped, stage);
+    return clamped;
+  };
+
   let hybrid: HybridExtractionResult;
   try {
     hybrid = await runHybridExtraction(
@@ -540,7 +568,7 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
         mode: "hybrid",
         legacyFallbackAllowed: fallbackEnabled,
         isCancelled: async () => isJobCancellationRequested(params.admin, params.jobId),
-        onStage: async (stage, pct) => updateJobProgress(params.admin, params.jobId, pct, stage),
+        onStage: async (stage, pct) => { await bumpProgress(pct, stage); },
       }
     );
   } catch (err) {
@@ -560,7 +588,7 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
 
   // Successful hybrid: persist and return.
   if (hybrid.status === "completed_hybrid" && hybrid.extraction) {
-    await updateJobProgress(params.admin, params.jobId, 90, "preparing_recommendation");
+    await bumpProgress(90, "preparing_recommendation");
     const saved = await persistExtraction(params.admin, params.submissionId, hybrid.extraction, {
       model: hybrid.normalisationModel ?? "claude-haiku-4-5",
       prompt: "hybrid-orchestrator-v1",
@@ -577,12 +605,16 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       return json({ error: "store_failed" }, 500);
     }
 
+    const overallConfidenceAvailable =
+      (hybrid.extraction as { overall_confidence_available?: unknown }).overall_confidence_available !== false;
     await audit(params.env, {
       submissionId: params.submissionId, action: "extraction_run", actorId: params.user.id,
       metadata: {
         extraction_id: saved.id, pdf_documents: hybrid.provenance.length,
         had_pasted_email: Boolean(params.loaded.submissionBrokerEmail),
-        overall_confidence: saved.confidence, pipeline_mode: "hybrid",
+        overall_confidence: saved.confidence,
+        overall_confidence_available: overallConfidenceAvailable,
+        pipeline_mode: "hybrid",
         route: hybrid.route, escalated_field_count: hybrid.escalatedFields.length,
       },
     });
@@ -590,7 +622,9 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       resultReferenceId: saved.id,
       metadata: {
         extraction_id: saved.id, pdf_documents: hybrid.provenance.length,
-        overall_confidence: saved.confidence, input_fingerprint: params.inputFp,
+        overall_confidence: saved.confidence,
+        overall_confidence_available: overallConfidenceAvailable,
+        input_fingerprint: params.inputFp,
         pipeline_mode: "hybrid", route: hybrid.route,
       },
     });
@@ -606,6 +640,13 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
   }
 
   if (hybrid.suggestLegacyFallback && fallbackEnabled) {
+    // Surface a specific UI stage — never leave the user on generic
+    // "Analysing with AI" once the section pipeline has bailed. If the
+    // hybrid orchestrator already advanced progress above 65 (e.g. reached
+    // the 88% resolving_uncertain_fields stage before bailing), keep that
+    // higher value — current_step changes to "using_compatibility_extraction"
+    // but the bar itself never regresses.
+    const fallbackStagePct = await bumpProgress(65, "using_compatibility_extraction");
     // Record the escalation before we run legacy, so the reason survives even
     // if the legacy call itself fails.
     await params.admin.from("atlas_operational_alerts").insert(buildAlert({
@@ -621,7 +662,10 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       ...hybrid.metrics, jobId: params.jobId, submissionId: params.submissionId,
       finalStatus: "failed", fallbackReason: hybrid.fallbackReason ?? hybrid.errorCode ?? "hybrid_failed",
     });
-    const legacyOutcome = await runLegacyCore(params);
+    // Pass the same high-water value to runLegacyCore so its own 10/35/85
+    // stages cannot regress the UI. When hybrid ran to a later stage before
+    // bailing, the floor is that later value — never merely 65.
+    const legacyOutcome = await runLegacyCore({ ...params, progressFloor: fallbackStagePct });
     if (!legacyOutcome.ok) return legacyOutcome.errorResponse!;
     await audit(params.env, {
       submissionId: params.submissionId, action: "extraction_run", actorId: params.user.id,
@@ -647,6 +691,8 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       inputTokens: legacyOutcome.inputTokens, outputTokens: legacyOutcome.outputTokens,
       cachedInputTokens: legacyOutcome.cachedTokens, cacheWriteTokens: legacyOutcome.cacheWriteTokens,
       fallbackReason: hybrid.fallbackReason ?? "hybrid_failed",
+      fullLegacyFallbackUsed: true,
+      failureCategory: hybrid.fallbackReason ?? hybrid.errorCode ?? null,
     });
     return json({ ok: true, extraction_id: legacyOutcome.extractionId, overall_confidence: legacyOutcome.confidence, fallback: "legacy_emergency" });
   }

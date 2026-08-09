@@ -38,6 +38,13 @@
     "worker/src/hybrid-llm.ts",
     "worker/src/pipeline-version.ts",
     "worker/src/shadow-queue.ts",
+    "worker/src/section-splitter.ts",
+    "worker/src/section-schemas.ts",
+    "worker/src/section-extractor.ts",
+    "worker/src/section-merger.ts",
+    "worker/src/hybrid-usability.ts",
+    "worker/src/parser-local-pdf.ts",
+    "worker/src/hybrid-orchestrator.ts",
     "src/lib/review-edit.ts",
     "src/lib/upload.ts",
     "scripts/benchmark-pipeline.ts"

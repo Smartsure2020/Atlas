@@ -65,6 +65,23 @@ export interface PipelineMetricInput {
   escalatedToSonnet?: boolean;
   finalStatus: FinalStatus;
 
+  // Section-based extraction telemetry. Persisted via the sanitized metadata
+  // bag so no schema migration is required; every value here is a scalar and
+  // safe under the PII allow-list.
+  sectionCount?: number;
+  successfulSectionCount?: number;
+  failedSectionCount?: number;
+  timedOutSectionCount?: number;
+  maxConcurrency?: number;
+  sectionDetectionMs?: number;
+  slowestSectionMs?: number;
+  haikuTotalMs?: number;
+  boundedSonnetMs?: number;
+  boundedFallbackSectionCount?: number;
+  fullLegacyFallbackUsed?: boolean;
+  /** Redacted category enum, e.g. `haiku_timeout` / `haiku_rate_limited`. */
+  failureCategory?: string | null;
+
   metadata?: Record<string, unknown> | null;
 }
 
@@ -83,27 +100,77 @@ function intOrNull(v: number | null | undefined): number | null {
 }
 
 /**
- * Strip anything that looks like free-form document/PII from the metadata bag.
- * We intentionally keep only known numeric keys and boolean flags. Strings are
- * preserved only when they match an allow-list of short provider diagnostic
- * codes AND the key does not look like a PII holder.
+ * Metadata sanitiser — EXACT-KEY ALLOW-LIST.
+ *
+ * Rationale: the previous approach used a PII deny-list regex. Deny-lists
+ * failed open on plurals (`notes`), camelCase (`phoneNumber`, `emailAddress`)
+ * and unlisted synonyms (`insured`, `client`, `policyholder`, `vin`, ...).
+ * Adding new keys silently escaped every guard. An allow-list fails closed:
+ * unknown keys are dropped by default, so a new caller cannot accidentally
+ * leak PII into `atlas_pipeline_metrics.metadata` by choosing a novel name.
+ *
+ * To add a new operational key, add it explicitly here. Keys must NOT hold
+ * document text, provider output, prompts, extracted field values, PII, or
+ * anything a curious future contributor might read for insight into the
+ * insured. Only durations, counts, boolean flags, short enum codes, and
+ * pre-agreed provenance labels belong here.
  */
-const PII_KEY_PATTERN =
-  /(?:^|_)(?:name|email|phone|address|id_number|passport|ssn|dob|birthdate|surname|firstname|lastname|contact|snippet|text|body|content|description|note|value|raw)(?:$|_)/i;
+const ALLOWED_METADATA_KEYS = new Set<string>([
+  // --- Legacy + shadow path ---
+  "pdf_documents",
+  "shadow_sampled",
+  // --- Hybrid pipeline usability + provenance ---
+  "unusable_reasons",              // array of short enum strings
+  "cover_sections_count",
+  "critical_section_ratio",
+  "hybrid_haiku_failure_category",
+  "overall_confidence",
+  "overall_confidence_available",
+  "pages_total",
+  "schema_version",
+  "merge_conflicts",
+  "merge_duplicates",
+  "usable_cover_sections",
+  "usable_critical_ratio",
+  "escalated_to_sonnet",
+  // --- Section-based extractor telemetry (auto-folded from typed fields) ---
+  "section_count",
+  "section_success",
+  "section_failure",
+  "section_timeout",
+  "section_concurrency",
+  "section_detection_ms",
+  "slowest_section_ms",
+  "haiku_total_ms",
+  "bounded_sonnet_ms",
+  "bounded_fallback_sections",
+  "full_legacy_fallback_used",
+  "failure_category",
+  // --- Shadow queue telemetry ---
+  "shadow_queue_delay_ms",
+  "shadow_processing_ms",
+  "shadow_failure_class",
+  "shadow_enqueue_status",
+]);
 
 function sanitizeMetadata(md: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
   if (!md) return null;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(md)) {
     if (v == null) continue;
-    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
-    else if (typeof v === "boolean") out[k] = v;
-    else if (typeof v === "string" && v.length <= 80 && !/[\r\n]/.test(v) && !PII_KEY_PATTERN.test(k)) {
+    if (!ALLOWED_METADATA_KEYS.has(k)) continue;         // unknown key → dropped
+    if (typeof v === "number" && Number.isFinite(v)) {
       out[k] = v;
-    } else if (Array.isArray(v) && v.every((x) => typeof x === "string" && x.length <= 40) && !PII_KEY_PATTERN.test(k)) {
+    } else if (typeof v === "boolean") {
+      out[k] = v;
+    } else if (typeof v === "string" && v.length <= 80 && !/[\r\n]/.test(v)) {
+      out[k] = v;
+    } else if (Array.isArray(v) && v.every((x) => typeof x === "string" && x.length <= 40)) {
+      // Bounded array of short enum-like strings (unusable_reasons etc.).
+      // Nested objects and mixed-type arrays are rejected upstream.
       out[k] = v.slice(0, 10);
     }
-    // objects, long strings, unknown shapes, PII-shaped keys: dropped by design
+    // Nested objects, long strings, mixed arrays, non-primitive shapes: dropped.
   }
   return Object.keys(out).length > 0 ? out : null;
 }
@@ -114,6 +181,22 @@ export async function emitPipelineMetric(
 ): Promise<void> {
   try {
     const hashPrefix = input.documentHash ? String(input.documentHash).slice(0, 12) : null;
+    // Fold section-based counters into a safe metadata bag so no schema
+    // migration is needed. Keys are scalar and under the PII allow-list.
+    const sectionMeta: Record<string, unknown> = {};
+    if (input.sectionCount != null) sectionMeta.section_count = intOrNull(input.sectionCount) ?? 0;
+    if (input.successfulSectionCount != null) sectionMeta.section_success = intOrNull(input.successfulSectionCount) ?? 0;
+    if (input.failedSectionCount != null) sectionMeta.section_failure = intOrNull(input.failedSectionCount) ?? 0;
+    if (input.timedOutSectionCount != null) sectionMeta.section_timeout = intOrNull(input.timedOutSectionCount) ?? 0;
+    if (input.maxConcurrency != null) sectionMeta.section_concurrency = intOrNull(input.maxConcurrency) ?? 0;
+    if (input.sectionDetectionMs != null) sectionMeta.section_detection_ms = intOrNull(input.sectionDetectionMs) ?? 0;
+    if (input.slowestSectionMs != null) sectionMeta.slowest_section_ms = intOrNull(input.slowestSectionMs) ?? 0;
+    if (input.haikuTotalMs != null) sectionMeta.haiku_total_ms = intOrNull(input.haikuTotalMs) ?? 0;
+    if (input.boundedSonnetMs != null) sectionMeta.bounded_sonnet_ms = intOrNull(input.boundedSonnetMs) ?? 0;
+    if (input.boundedFallbackSectionCount != null) sectionMeta.bounded_fallback_sections = intOrNull(input.boundedFallbackSectionCount) ?? 0;
+    if (input.fullLegacyFallbackUsed != null) sectionMeta.full_legacy_fallback_used = Boolean(input.fullLegacyFallbackUsed);
+    if (input.failureCategory) sectionMeta.failure_category = short(input.failureCategory, 40);
+    const mergedMetadata = { ...(input.metadata ?? {}), ...sectionMeta };
     const row = {
       job_id: input.jobId ?? null,
       submission_id: input.submissionId ?? null,
@@ -144,7 +227,7 @@ export async function emitPipelineMetric(
       fallback_reason: short(input.fallbackReason, MAX_REASON),
       escalated_to_sonnet: Boolean(input.escalatedToSonnet),
       final_status: input.finalStatus,
-      metadata: sanitizeMetadata(input.metadata),
+      metadata: sanitizeMetadata(mergedMetadata),
     };
     await admin.from("atlas_pipeline_metrics").insert(row);
   } catch (err) {

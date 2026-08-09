@@ -91,7 +91,22 @@ export interface MatchInputRisk {
   risk_candidates: string[];
   features: FeatureInput[];
   available_documents: string[];
+  /**
+   * The provider-supplied overall confidence for the extraction this match is
+   * running against. The numeric value alone is NOT enough — a value of 0 can
+   * mean either "provider rated everything zero" (available) OR "no rating
+   * available, compatibility numeric" (unavailable). Consult the availability
+   * flag for that distinction.
+   */
   overall_confidence: number;
+  /**
+   * Explicit availability of the overall confidence rating.
+   *   true       — a provider rating exists (numeric may be any value in [0,1])
+   *   false      — no rating available; the numeric is compatibility-only 0
+   *   undefined  — legacy-compatible: treated as available (historical rows
+   *                predate the flag). NEVER treat undefined as unavailable.
+   */
+  overall_confidence_available?: boolean;
 }
 
 export interface MatchedRuleRef {
@@ -120,7 +135,14 @@ export interface InsurerScore {
   score: number;
   band: AppetiteLevel | "ruled_out" | "insufficient_rule_match";
   rule_status: AppetiteLevel | "referral" | "ruled_out" | "insufficient_rule_match";
+  /**
+   * Compatibility numeric — 0 when the underlying extraction confidence is
+   * unavailable. Consumers MUST NOT read this in isolation; use
+   * `confidence_available` to distinguish "provider rated 0" from "no rating".
+   */
   confidence: number;
+  /** Explicit provenance flag for `confidence` (see MatchInputRisk). */
+  confidence_available: boolean;
   referral_required: boolean;
   manual_review_required: boolean;
   senior_review_required: boolean;
@@ -498,7 +520,35 @@ export function matchInsurers(
       seen.add(r.doc.toLowerCase());
       if (!hasRequiredDoc(risk.available_documents, r.doc)) missingDocs.push(r.doc);
     }
-    let confidence = Math.max(0, Math.min(1, risk.overall_confidence || 0.7));
+    // Confidence provenance is preserved end-to-end (see MatchInputRisk).
+    //   - explicitly unavailable  → compatibility 0, confidence_available=false
+    //   - provider rating in [0,1] → that number, confidence_available=true
+    //   - absent flag AND no valid number → 0.7 legacy default, available=true
+    // The old `risk.overall_confidence || 0.7` collapsed a provider-rated 0
+    // into 0.7 (a fabricated value) and silently hid unavailability. Truthiness
+    // fallback is forbidden here — use explicit availability + finite-number
+    // checks.
+    const explicitlyUnavailable = risk.overall_confidence_available === false;
+    const raw = risk.overall_confidence;
+    const hasValidNumber =
+      typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1;
+    let confidence: number;
+    let confidenceAvailable: boolean;
+    if (explicitlyUnavailable) {
+      confidence = 0;
+      confidenceAvailable = false;
+      notes.push(
+        "Extraction confidence unavailable — score reflects appetite match only; do not read the numeric 0 as a provider rating."
+      );
+    } else if (hasValidNumber) {
+      confidence = raw;
+      confidenceAvailable = true;
+    } else {
+      // Legacy-compatibility default. Preserves historical behaviour for rows
+      // that never carried a confidence at all (predates the extraction contract).
+      confidence = 0.7;
+      confidenceAvailable = true;
+    }
     if (missingDocs.length > 0) {
       const drop = Math.min(missingDocs.length * DOC_GAP_CONFIDENCE_PENALTY, DOC_GAP_CONFIDENCE_CAP);
       confidence = Math.max(0, confidence - drop);
@@ -537,6 +587,7 @@ export function matchInsurers(
       band,
       rule_status: ruleStatus,
       confidence,
+      confidence_available: confidenceAvailable,
       referral_required: referralRequired,
       manual_review_required: manualReviewRequired,
       senior_review_required: seniorReview,
@@ -588,7 +639,11 @@ function ruleOut(
     score: 0,
     band: "ruled_out",
     rule_status: "ruled_out",
+    // Ruled-out insurers do not participate in confidence semantics — their
+    // score is 0 by rule, not by extraction quality. Mark unavailable so no
+    // downstream consumer misreads the 0 as a provider rating.
     confidence: 0,
+    confidence_available: false,
     referral_required: false,
     manual_review_required: false,
     senior_review_required: false,

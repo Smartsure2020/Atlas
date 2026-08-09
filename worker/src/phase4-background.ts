@@ -270,9 +270,38 @@ async function escalateAlerts(env: Env, admin: ReturnType<typeof adminClient>) {
 
 async function monitorSignals(env: Env, admin: ReturnType<typeof adminClient>) {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  // "Low confidence" now requires the confidence to be AVAILABLE.
+  //
+  // A hybrid run with unavailable rating persists `extraction_confidence = 0`
+  // (compatibility numeric) with `extracted_json.overall_confidence_available
+  // = false` (provenance). A naive `< 0.5` filter would count that as a
+  // low-confidence output — false alerts, and worse, the limit(100) could
+  // fill with unavailable rows and hide real ones. The filter below excludes
+  // rows whose JSON provenance is explicitly "false", while retaining
+  // historical/legacy rows (no flag → available) exactly as before. Applied
+  // at the query layer so limit(100) counts only genuine low-confidence rows.
+  //
+  // Provider-rated 0 (available:true) → still counted as low.
+  // Legacy row (no flag) with < 0.5 → still counted as low.
+  const notUnavailableExtraction =
+    "extracted_json->>overall_confidence_available.is.null,extracted_json->>overall_confidence_available.eq.true";
+  const notUnavailableRecommendation =
+    "reasoning_json->>overall_confidence_available.is.null,reasoning_json->>overall_confidence_available.eq.true";
   const [extractions, recommendations, reviews, decisions] = await Promise.all([
-    admin.from("atlas_extractions").select("id, submission_id, extraction_confidence").lt("extraction_confidence", 0.5).gte("created_at", since).limit(100),
-    admin.from("atlas_recommendations").select("id, recommended_insurer, confidence_score").lt("confidence_score", 0.5).gte("created_at", since).limit(100),
+    admin
+      .from("atlas_extractions")
+      .select("id, submission_id, extraction_confidence")
+      .lt("extraction_confidence", 0.5)
+      .or(notUnavailableExtraction)
+      .gte("created_at", since)
+      .limit(100),
+    admin
+      .from("atlas_recommendations")
+      .select("id, recommended_insurer, confidence_score")
+      .lt("confidence_score", 0.5)
+      .or(notUnavailableRecommendation)
+      .gte("created_at", since)
+      .limit(100),
     admin.from("atlas_quote_reviews").select("id, submission_id, overall_confidence, manual_review_required").lt("overall_confidence", 0.5).gte("created_at", since).limit(100),
     admin.from("atlas_decisions").select("id, ai_recommendation_accepted").gte("decided_at", since).limit(500),
   ]);

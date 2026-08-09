@@ -160,11 +160,11 @@ test("telemetry sanitizer strips long strings, deep objects, PII-shaped values",
     finalStatus: "completed",
     totalMs: 1234,
     metadata: {
-      // These should survive.
+      // These should survive (approved allow-list keys).
       pages_total: 12,
       escalated_to_sonnet: false,
-      short_tag: "text_fast",
-      // These should be dropped:
+      failure_category: "text_fast",
+      // These should be dropped by the allow-list (unknown keys):
       client_name: "Very Sensitive Person Name That Should Be Redacted And Is Rather Long",
       email: "someone@example.com\n",
       description: { deep: "object", not: "allowed" },
@@ -177,12 +177,12 @@ test("telemetry sanitizer strips long strings, deep objects, PII-shaped values",
   // Kept
   eq(meta.pages_total, 12, "numeric kept");
   eq(meta.escalated_to_sonnet, false, "bool kept");
-  eq(meta.short_tag, "text_fast", "short tag kept");
+  eq(meta.failure_category, "text_fast", "short enum kept");
   // Dropped
   assert(!("description" in meta), "deep object dropped");
   assert(!("raw_page_text" in meta), "long string dropped");
-  assert(!("email" in meta), "newline-containing string dropped");
-  assert(!("client_name" in meta), "long name dropped");
+  assert(!("email" in meta), "PII-shaped key dropped by allow-list");
+  assert(!("client_name" in meta), "unknown key dropped by allow-list");
 });
 
 test("telemetry never throws when insertion fails", async () => {
