@@ -106,6 +106,16 @@ export interface ExtractionContext {
   onStage?: (stage: string, progressPercent: number) => Promise<void>;
   /** Explicitly allow the emergency legacy fallback. Off for shadow (never falls back). */
   legacyFallbackAllowed: boolean;
+  /**
+   * Test-only override for the bounded per-section Sonnet resolver. Real
+   * callers omit — production always uses runSonnetSectionResolution. The
+   * override matches its signature so tests can inject exact Usage numbers
+   * (and thrown errors carrying a `usage` property) to verify token
+   * accounting is correct across the recovery path.
+   */
+  runSonnetSectionOverride?: typeof runSonnetSectionResolution;
+  /** Test-only override matching the extractSections callOverride shape. */
+  sectionCallOverride?: import("./section-extractor.js").ExtractSectionsOptions["callOverride"];
 }
 
 export type OrchestratorStatus =
@@ -259,12 +269,17 @@ export async function runHybridExtraction(
   timer.stop("download");
 
   const unavailable = downloaded.filter((d) => !d.bytes).map((d) => d.doc);
-  if (unavailable.length > 0 && downloaded.every((d) => !d.bytes)) {
+  // Fail closed on ANY unavailable document — matches the legacy path's
+  // decision-quality boundary (extract-endpoint.ts:runLegacyCore). A partial
+  // proceed would silently drop schedules or documents an underwriter is
+  // relying on to make a decision, without surfacing the loss.
+  if (unavailable.length > 0) {
+    const idHint = unavailable.map((d) => d.id.slice(0, 8)).join(",");
     return failResult({
       route: "failed",
       status: "failed",
       errorCode: "document_unavailable",
-      errorDetail: `${unavailable.length}_documents_unreachable`,
+      errorDetail: `${unavailable.length}_documents_unreachable:${idHint}`,
       timer,
       mode: ctx.mode,
       suggestLegacyFallback: ctx.legacyFallbackAllowed,
@@ -455,6 +470,7 @@ export async function runHybridExtraction(
     perSectionTimeoutMs: perSectionTimeoutMs(ctx.env),
     overallDeadlineMs: overallHybridDeadlineMs(ctx.env),
     isCancelled: ctx.isCancelled,
+    callOverride: ctx.sectionCallOverride,
     onProgress: async (completed, total, lastType) => {
       // Progress reflects completed sections, not fake elapsed time.
       const stage =
@@ -486,6 +502,13 @@ export async function runHybridExtraction(
   let boundedSonnetMs = 0;
   let boundedFallbackSectionCount = 0;
   const boundedFailures: SectionRunResult[] = [];
+  // Bounded per-section Sonnet fallback token accounting. extractSections
+  // ONLY sums Haiku usage from its own runs; every Sonnet call fired here
+  // must be tallied explicitly or its cost is invisible in telemetry.
+  let sonnetSectionInputTokens = 0;
+  let sonnetSectionCached = 0;
+  let sonnetSectionCacheWrite = 0;
+  let sonnetSectionOutput = 0;
   const failedNeedingResolution = sectionOutcome.results.filter(
     (r) => r.outcome === "failure" || r.outcome === "timeout"
   );
@@ -520,7 +543,8 @@ export async function runHybridExtraction(
         continue;
       }
       try {
-        const s = await runSonnetSectionResolution({
+        const sonnetFn = ctx.runSonnetSectionOverride ?? runSonnetSectionResolution;
+        const s = await sonnetFn({
           env: ctx.env,
           section: r.section,
           timeoutMs: Math.min(60_000, remainingBudget()),
@@ -533,8 +557,25 @@ export async function runHybridExtraction(
           stableIndex: r.section.stableIndex,
           startPage: r.section.sourceOffsets.startPage,
         });
+        if (s.usage) {
+          sonnetSectionInputTokens += s.usage.input_tokens;
+          sonnetSectionCached += s.usage.cache_read_input_tokens;
+          sonnetSectionCacheWrite += s.usage.cache_creation_input_tokens;
+          sonnetSectionOutput += s.usage.output_tokens;
+        }
         boundedFallbackSectionCount++;
       } catch (err) {
+        // If the provider produced output but the reply then failed to
+        // parse or map, the tokens WERE consumed. Test hooks / a future
+        // real path may attach a `usage` field on the thrown error; when
+        // present we tally it so cost telemetry is still accurate.
+        const errUsage = (err as { usage?: Usage }).usage;
+        if (errUsage) {
+          sonnetSectionInputTokens += errUsage.input_tokens ?? 0;
+          sonnetSectionCached += errUsage.cache_read_input_tokens ?? 0;
+          sonnetSectionCacheWrite += errUsage.cache_creation_input_tokens ?? 0;
+          sonnetSectionOutput += errUsage.output_tokens ?? 0;
+        }
         warnings.push(`sonnet_section_failed:${r.section.sectionType}:${(err as Error).message?.slice(0, 40) ?? "unknown"}`);
         boundedFailures.push(r);
       }
@@ -592,8 +633,13 @@ export async function runHybridExtraction(
         haikuTotalMs: sectionOutcome.totals.haikuTotalMs,
         boundedSonnetMs, boundedFallbackSectionCount,
         failureCategory: `haiku_${String(firstCat)}`,
-        inputTokens: haikuInputTokens, cachedInputTokens: haikuCached,
-        cacheWriteTokens: haikuCacheWrite, outputTokens: haikuOutput,
+        // Include bounded-Sonnet section tokens even on the zero-partial
+        // early-return path — tokens consumed by a failed recovery are still
+        // billed by the provider and must appear in cost telemetry.
+        inputTokens: haikuInputTokens + sonnetSectionInputTokens,
+        cachedInputTokens: haikuCached + sonnetSectionCached,
+        cacheWriteTokens: haikuCacheWrite + sonnetSectionCacheWrite,
+        outputTokens: haikuOutput + sonnetSectionOutput,
         model: seenModel ?? ATLAS_MODEL_HAIKU,
       }),
       errorCode: `haiku_${String(firstCat)}`,
@@ -662,8 +708,12 @@ export async function runHybridExtraction(
         haikuTotalMs: sectionOutcome.totals.haikuTotalMs,
         boundedSonnetMs, boundedFallbackSectionCount,
         failureCategory: `unusable:${reasonTag}`,
-        inputTokens: haikuInputTokens, cachedInputTokens: haikuCached,
-        cacheWriteTokens: haikuCacheWrite, outputTokens: haikuOutput,
+        // Include bounded-Sonnet section tokens on the unusable-return path
+        // too (see Fix 2 comment above for rationale).
+        inputTokens: haikuInputTokens + sonnetSectionInputTokens,
+        cachedInputTokens: haikuCached + sonnetSectionCached,
+        cacheWriteTokens: haikuCacheWrite + sonnetSectionCacheWrite,
+        outputTokens: haikuOutput + sonnetSectionOutput,
         model: seenModel ?? ATLAS_MODEL_HAIKU,
         metadata: {
           unusable_reasons: usability.reasons.slice(0, 6),
@@ -762,13 +812,19 @@ export async function runHybridExtraction(
     output: u?.output_tokens ?? 0,
   });
   const s1 = totalSonnetTokens(sonnetFieldUsage);
-  // Bounded per-section Sonnet fallback tokens are already summed by the
-  // extractSections runner (they emit their own usage). We fold their
-  // consumption into the totals if any.
-  const totalInput = haikuInputTokens + s1.input;
-  const totalCached = haikuCached + s1.cached;
-  const totalCacheWrite = haikuCacheWrite + s1.write;
-  const totalOutput = haikuOutput + s1.output;
+  // Token accounting has three distinct sources that must all be summed
+  // here, exactly once, so cost/telemetry reflects reality:
+  //   - haiku*         : initial Haiku section calls + in-place Haiku retries
+  //                      (summed inside extractSections from r.usage)
+  //   - sonnetSection* : bounded per-section Sonnet recovery calls made
+  //                      HERE (in this orchestrator), NOT by extractSections
+  //   - s1             : post-merge field-level bounded Sonnet resolution
+  // Full-legacy fallback usage (if the endpoint ultimately invokes it) is
+  // tallied by the legacy metric emission path and does not appear here.
+  const totalInput = haikuInputTokens + sonnetSectionInputTokens + s1.input;
+  const totalCached = haikuCached + sonnetSectionCached + s1.cached;
+  const totalCacheWrite = haikuCacheWrite + sonnetSectionCacheWrite + s1.write;
+  const totalOutput = haikuOutput + sonnetSectionOutput + s1.output;
 
   return {
     status: finalStatus,

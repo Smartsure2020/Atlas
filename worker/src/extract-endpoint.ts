@@ -237,6 +237,14 @@ interface RunParams {
   inputFp: string;
   loaded: LoadedDocsResult;
   ctx?: ExtractExecutionContext;
+  /**
+   * Lower bound for progress updates emitted inside runLegacyCore. When the
+   * hybrid emergency fallback invokes legacy after already advancing the job
+   * to 65%, the legacy stages (10/35/85) would otherwise regress the UI back
+   * to 10 and thrash through the sequence. Setting this floor keeps the
+   * progress bar monotonic while preserving the current_step vocabulary.
+   */
+  progressFloor?: number;
 }
 
 interface LegacyRunOutcome {
@@ -256,8 +264,13 @@ interface LegacyRunOutcome {
 async function runLegacyCore(params: RunParams): Promise<LegacyRunOutcome> {
   const started = Date.now();
   const { admin, env, submissionId, jobId, user, loaded } = params;
+  const progressFloor = params.progressFloor ?? 0;
+  // Wraps updateJobProgress so the numeric percent never regresses below the
+  // floor set by the caller. current_step (stage name) is preserved as-is.
+  const progress = (pct: number, stage: string) =>
+    updateJobProgress(admin, jobId, Math.max(pct, progressFloor), stage);
 
-  await updateJobProgress(admin, jobId, 10, "validating_document");
+  await progress(10, "validating_document");
 
   const content: unknown[] = [];
   if (loaded.submissionBrokerEmail) {
@@ -297,7 +310,7 @@ async function runLegacyCore(params: RunParams): Promise<LegacyRunOutcome> {
     };
   }
 
-  await updateJobProgress(admin, jobId, 35, "extracting_risk_information");
+  await progress(35, "extracting_risk_information");
   if (await isJobCancellationRequested(admin, jobId)) {
     return { ok: false, totalMs: Date.now() - started, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, attachedCount, errorResponse: json({ error: "job_cancelled", job_id: jobId }, 409) };
   }
@@ -361,7 +374,7 @@ async function runLegacyCore(params: RunParams): Promise<LegacyRunOutcome> {
   }
   extraction = validated.value;
 
-  await updateJobProgress(admin, jobId, 85, "validating_extracted_fields");
+  await progress(85, "validating_extracted_fields");
 
   const saved = await persistExtraction(admin, submissionId, extraction, {
     model: EXTRACTION_MODEL,
@@ -630,7 +643,11 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       ...hybrid.metrics, jobId: params.jobId, submissionId: params.submissionId,
       finalStatus: "failed", fallbackReason: hybrid.fallbackReason ?? hybrid.errorCode ?? "hybrid_failed",
     });
-    const legacyOutcome = await runLegacyCore(params);
+    // Hybrid already advanced progress to 65 via the "using_compatibility_extraction"
+    // update above. Set a floor so runLegacyCore's 10/35/85 stages cannot
+    // regress the UI back down; the progress bar remains monotonic while
+    // the stage vocabulary (current_step) is preserved for observability.
+    const legacyOutcome = await runLegacyCore({ ...params, progressFloor: 65 });
     if (!legacyOutcome.ok) return legacyOutcome.errorResponse!;
     await audit(params.env, {
       submissionId: params.submissionId, action: "extraction_run", actorId: params.user.id,

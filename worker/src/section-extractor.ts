@@ -7,7 +7,8 @@
  *   - per-section timeout enforced via AbortController
  *   - overall deadline shared across every call
  *   - one section failure never aborts other in-flight sections
- *   - rate-limit retry (single retry, respects Retry-After header up to a cap)
+ *   - rate-limit retry (single retry; honours provider Retry-After header up
+ *     to RETRY_AFTER_MAX_MS, clamped against the remaining per-section budget)
  *   - invalid-request errors NEVER retried
  *   - cancellation via isCancelled callback (checked between sections)
  *   - progress heartbeat via onProgress(completedCount, totalCount, sectionType)
@@ -56,6 +57,11 @@ export interface ExtractSectionsOptions {
     section: DocumentSection;
     timeoutMs: number;
   }) => Promise<{ text: string; usage: Usage; model: string }>;
+  /**
+   * Injected for tests — resolves after `ms` without actually waiting on the
+   * OS clock. Production callers omit; the extractor uses setTimeout.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface ExtractSectionsOutcome {
@@ -167,13 +173,32 @@ async function runSingleSection(
         category === "network_failure";
       const elapsed = Date.now() - started;
       const remainingSectionBudget = perSection - elapsed;
-      // Keep the retry cheap: only retry when there is a meaningful budget
-      // left inside the per-section timeout for a second attempt.
-      if (attempts < 2 && retryable && remainingSectionBudget > 2000) {
-        const backoff =
-          category === "rate_limited" ? 1500 :
-          category === "network_failure" ? 400 : 500;
-        await new Promise((r) => setTimeout(r, backoff));
+      // Compute the backoff. For rate_limited responses we honour the
+      // provider's Retry-After header when present (parsed + capped upstream
+      // in anthropic-client.ts); otherwise fall back to a short fixed delay.
+      const providerHint =
+        err instanceof AnthropicCallError && typeof err.retryAfterMs === "number"
+          ? err.retryAfterMs
+          : null;
+      const defaultBackoff =
+        category === "rate_limited" ? 1500 :
+        category === "network_failure" ? 400 : 500;
+      const desiredBackoff = providerHint != null ? providerHint : defaultBackoff;
+      // Clamp against the remaining per-section budget so we never wait
+      // beyond a deadline we cannot honour. We need at least 1000ms of
+      // headroom for the retry call itself; if the budget cannot fit both
+      // the sleep AND a meaningful call, skip the retry.
+      const maxSleep = Math.max(0, remainingSectionBudget - 1000);
+      const backoff = Math.min(desiredBackoff, maxSleep);
+      const canRetry =
+        attempts < 2 &&
+        retryable &&
+        remainingSectionBudget > 2000 &&
+        backoff >= 0 &&
+        remainingSectionBudget - backoff > 1000;
+      if (canRetry) {
+        const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+        if (backoff > 0) await sleep(backoff);
         continue;
       }
       const outcome = category === "timeout" ? "timeout" : "failure";

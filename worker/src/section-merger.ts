@@ -351,12 +351,18 @@ export function mergeSectionPartials(input: SectionMergeInput): SectionMergeResu
   // (see extraction.ts for why), but overall_confidence_source records the
   // semantic distinction so downstream consumers never read the 0 as a
   // genuine provider score of zero.
+  // A finite provider-supplied confidence — INCLUDING 0 — counts as a real
+  // rating. The scaffold uses `confidence: null, confidence_source: "unavailable"`
+  // (see emptyField), so 0 can only reach here when a provider actually chose
+  // it; excluding it would collapse "provider rated everything zero" into
+  // "no rating available", which the escalation router treats as unavailable
+  // and refuses to touch — a decision-quality regression.
   const confidences: number[] = [];
   for (const sectionKey of Object.keys(SECTION_FIELDS)) {
     const bag = (extraction[sectionKey] as Record<string, unknown>) ?? {};
     for (const spec of SECTION_FIELDS[sectionKey]) {
       const f = bag[spec.field] as { confidence?: unknown } | undefined;
-      if (f && typeof f.confidence === "number" && Number.isFinite(f.confidence) && f.confidence > 0) {
+      if (f && typeof f.confidence === "number" && Number.isFinite(f.confidence) && f.confidence >= 0 && f.confidence <= 1) {
         confidences.push(f.confidence);
       }
     }

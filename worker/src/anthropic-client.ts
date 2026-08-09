@@ -97,10 +97,51 @@ export class AnthropicCallError extends Error {
     public code: string,
     public status: number,
     public detail: string,
-    public category: AnthropicFailureCategory = "unknown_failure"
+    public category: AnthropicFailureCategory = "unknown_failure",
+    /**
+     * Bounded delay hint parsed from the provider's `Retry-After` header on
+     * rate-limit / server-error responses. `null` when the header was absent
+     * or unparseable. Callers must clamp this against their own remaining
+     * budget — the value is bounded here (0..RETRY_AFTER_MAX_MS) but has no
+     * knowledge of the caller's deadline.
+     */
+    public retryAfterMs: number | null = null
   ) {
     super(`${code} (${status})`);
   }
+}
+
+/**
+ * Upper bound on a parsed Retry-After hint. A provider could send an absurdly
+ * large delta-seconds or a far-future HTTP-date; we cap it so a misconfigured
+ * upstream cannot lock the pipeline into a many-minute sleep.
+ */
+export const RETRY_AFTER_MAX_MS = 30_000;
+
+/**
+ * Parse a Retry-After header value per RFC 9110 §10.2.3: either a positive
+ * delta-seconds integer, or an HTTP-date. Negative and non-finite values are
+ * treated as absent. The result is clamped to `[0, RETRY_AFTER_MAX_MS]`.
+ * Returns `null` when the header is missing or unparseable.
+ */
+export function parseRetryAfterMs(header: string | null | undefined, now: number = Date.now()): number | null {
+  if (header == null) return null;
+  const raw = String(header).trim();
+  if (!raw) return null;
+  // delta-seconds form (integer, may include a fractional part in practice)
+  const asNumber = Number(raw);
+  if (Number.isFinite(asNumber)) {
+    if (asNumber < 0) return 0;
+    return Math.min(Math.round(asNumber * 1000), RETRY_AFTER_MAX_MS);
+  }
+  // HTTP-date form
+  const asDate = Date.parse(raw);
+  if (Number.isFinite(asDate)) {
+    const delta = asDate - now;
+    if (delta <= 0) return 0;
+    return Math.min(delta, RETRY_AFTER_MAX_MS);
+  }
+  return null;
 }
 
 /**
@@ -204,11 +245,15 @@ export async function anthropicCall(opts: CallOptions): Promise<CallResult> {
     } catch {
       detail = `status_${res.status}`;
     }
+    // Parse Retry-After for rate-limit and server-error responses so callers
+    // can honour a provider-supplied backoff instead of a hard-coded delay.
+    const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
     throw new AnthropicCallError(
       `anthropic_${res.status}`,
       res.status,
       detail,
-      categoryFromStatus(res.status)
+      categoryFromStatus(res.status),
+      retryAfterMs
     );
   }
 

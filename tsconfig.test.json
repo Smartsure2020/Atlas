@@ -43,6 +43,8 @@
     "worker/src/section-extractor.ts",
     "worker/src/section-merger.ts",
     "worker/src/hybrid-usability.ts",
+    "worker/src/parser-local-pdf.ts",
+    "worker/src/hybrid-orchestrator.ts",
     "src/lib/review-edit.ts",
     "src/lib/upload.ts",
     "scripts/benchmark-pipeline.ts"
