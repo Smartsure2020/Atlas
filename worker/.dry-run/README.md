@@ -1,0 +1,1 @@
+This folder contains the built output assets for the worker "atlas-worker" generated at 2026-08-07T11:39:03.813Z.
