@@ -538,6 +538,21 @@ async function runLegacyAuthoritativeWithHybridShadow(params: RunParams): Promis
 async function runHybridAuthoritative(params: RunParams): Promise<Response> {
   const fallbackEnabled = params.env.ATLAS_LEGACY_FALLBACK_DISABLED !== "true";
 
+  // High-water progress across the ENTIRE hybrid-authoritative run — both the
+  // orchestrator's onStage updates and the endpoint's own persist/fallback
+  // updates flow through this helper. Guarantees the percentage never
+  // regresses even when a later stage's nominal value is lower than an
+  // earlier stage that already ran (e.g. hybrid reached 88 then fell back to
+  // the "using_compatibility_extraction" nominal 65). current_step is
+  // preserved so observability still shows the stage transitions.
+  let progressHighWater = 0;
+  const bumpProgress = async (pct: number, stage: string): Promise<number> => {
+    const clamped = Math.max(pct, progressHighWater);
+    progressHighWater = clamped;
+    await updateJobProgress(params.admin, params.jobId, clamped, stage);
+    return clamped;
+  };
+
   let hybrid: HybridExtractionResult;
   try {
     hybrid = await runHybridExtraction(
@@ -553,7 +568,7 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
         mode: "hybrid",
         legacyFallbackAllowed: fallbackEnabled,
         isCancelled: async () => isJobCancellationRequested(params.admin, params.jobId),
-        onStage: async (stage, pct) => updateJobProgress(params.admin, params.jobId, pct, stage),
+        onStage: async (stage, pct) => { await bumpProgress(pct, stage); },
       }
     );
   } catch (err) {
@@ -573,7 +588,7 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
 
   // Successful hybrid: persist and return.
   if (hybrid.status === "completed_hybrid" && hybrid.extraction) {
-    await updateJobProgress(params.admin, params.jobId, 90, "preparing_recommendation");
+    await bumpProgress(90, "preparing_recommendation");
     const saved = await persistExtraction(params.admin, params.submissionId, hybrid.extraction, {
       model: hybrid.normalisationModel ?? "claude-haiku-4-5",
       prompt: "hybrid-orchestrator-v1",
@@ -626,8 +641,12 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
 
   if (hybrid.suggestLegacyFallback && fallbackEnabled) {
     // Surface a specific UI stage — never leave the user on generic
-    // "Analysing with AI" once the section pipeline has bailed.
-    await updateJobProgress(params.admin, params.jobId, 65, "using_compatibility_extraction");
+    // "Analysing with AI" once the section pipeline has bailed. If the
+    // hybrid orchestrator already advanced progress above 65 (e.g. reached
+    // the 88% resolving_uncertain_fields stage before bailing), keep that
+    // higher value — current_step changes to "using_compatibility_extraction"
+    // but the bar itself never regresses.
+    const fallbackStagePct = await bumpProgress(65, "using_compatibility_extraction");
     // Record the escalation before we run legacy, so the reason survives even
     // if the legacy call itself fails.
     await params.admin.from("atlas_operational_alerts").insert(buildAlert({
@@ -643,11 +662,10 @@ async function runHybridAuthoritative(params: RunParams): Promise<Response> {
       ...hybrid.metrics, jobId: params.jobId, submissionId: params.submissionId,
       finalStatus: "failed", fallbackReason: hybrid.fallbackReason ?? hybrid.errorCode ?? "hybrid_failed",
     });
-    // Hybrid already advanced progress to 65 via the "using_compatibility_extraction"
-    // update above. Set a floor so runLegacyCore's 10/35/85 stages cannot
-    // regress the UI back down; the progress bar remains monotonic while
-    // the stage vocabulary (current_step) is preserved for observability.
-    const legacyOutcome = await runLegacyCore({ ...params, progressFloor: 65 });
+    // Pass the same high-water value to runLegacyCore so its own 10/35/85
+    // stages cannot regress the UI. When hybrid ran to a later stage before
+    // bailing, the floor is that later value — never merely 65.
+    const legacyOutcome = await runLegacyCore({ ...params, progressFloor: fallbackStagePct });
     if (!legacyOutcome.ok) return legacyOutcome.errorResponse!;
     await audit(params.env, {
       submissionId: params.submissionId, action: "extraction_run", actorId: params.user.id,

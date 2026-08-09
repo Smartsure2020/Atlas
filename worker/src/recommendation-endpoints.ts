@@ -85,7 +85,71 @@ function valueStrings(value: unknown): string[] {
   return [];
 }
 
-function deriveRisk(reviewed: Record<string, unknown>, availableDocs: string[]): MatchInputRisk {
+/**
+ * Resolve overall confidence + availability from the extraction record.
+ *
+ * Precedence (each source is consulted in order; first hit that supplies a
+ * decisive answer wins):
+ *
+ *   1. reviewed_json's explicit availability flag (`false` → unavailable).
+ *   2. reviewed_json's numeric confidence (if a valid number, available:true,
+ *      unless extracted_json says otherwise).
+ *   3. extracted_json's explicit availability flag.
+ *   4. extracted_json's numeric confidence.
+ *   5. atlas_extractions.extraction_confidence column (legacy — historical
+ *      rows never carried the flag; a valid number is legacy-compatible/
+ *      available).
+ *   6. 0.7 compatibility default when nothing else was recorded.
+ *
+ * Availability is NEVER inferred from the numeric value alone. Provider-rated
+ * 0 stays 0/available:true; unavailable rows keep the compatibility 0 with
+ * available:false. Historical rows without any flag retain existing numeric
+ * behaviour (available:true) so the alerting/matching contracts do not
+ * silently change under legacy data.
+ */
+function resolveConfidenceProvenance(
+  reviewed: Record<string, unknown>,
+  extracted: Record<string, unknown>,
+  columnConfidence: unknown
+): { overall_confidence: number; overall_confidence_available: boolean } {
+  const isValidRange = (n: unknown): n is number =>
+    typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
+
+  const reviewedFlag = reviewed.overall_confidence_available;
+  const extractedFlag = extracted.overall_confidence_available;
+
+  if (reviewedFlag === false) return { overall_confidence: 0, overall_confidence_available: false };
+
+  if (isValidRange(reviewed.overall_confidence)) {
+    // Reviewed number present. Only demote to unavailable when the source
+    // extraction explicitly marked it unavailable AND the reviewer did NOT
+    // override with an explicit availability flag.
+    if (reviewedFlag !== true && extractedFlag === false) {
+      return { overall_confidence: 0, overall_confidence_available: false };
+    }
+    return { overall_confidence: reviewed.overall_confidence, overall_confidence_available: true };
+  }
+
+  if (extractedFlag === false) return { overall_confidence: 0, overall_confidence_available: false };
+  if (isValidRange(extracted.overall_confidence)) {
+    return { overall_confidence: extracted.overall_confidence, overall_confidence_available: true };
+  }
+
+  // Legacy scenario: only the numeric table column is available.
+  if (isValidRange(columnConfidence)) {
+    return { overall_confidence: columnConfidence, overall_confidence_available: true };
+  }
+
+  // Ultimate compatibility fallback — preserves historical matcher behaviour.
+  return { overall_confidence: 0.7, overall_confidence_available: true };
+}
+
+function deriveRisk(
+  reviewed: Record<string, unknown>,
+  availableDocs: string[],
+  overallConfidence: number,
+  overallConfidenceAvailable: boolean
+): MatchInputRisk {
   const rc = (reviewed.risk_classification as Record<string, unknown>) ?? {};
   const cc = (reviewed.current_cover as Record<string, unknown>) ?? {};
   const ec = (reviewed.extracted_client as Record<string, unknown>) ?? {};
@@ -135,16 +199,16 @@ function deriveRisk(reviewed: Record<string, unknown>, availableDocs: string[]):
   const reds = (reviewed.red_flags as { issue?: string }[]) ?? [];
   for (const r of reds) if (r?.issue) push(r.issue, "red flag", true);
 
-  const overall_confidence =
-    typeof reviewed.overall_confidence === "number" ? reviewed.overall_confidence : 0.7;
-
   return {
     product_candidates: productCandidates,
     section_candidates: splitCandidates(fieldStr(cc.cover_sections)),
     risk_candidates: riskCandidates,
     features,
     available_documents: availableDocs,
-    overall_confidence,
+    // Provenance is carried explicitly; the truthiness fallback that could
+    // collapse a provider-rated 0 into 0.7 is gone.
+    overall_confidence: overallConfidence,
+    overall_confidence_available: overallConfidenceAvailable,
   };
 }
 
@@ -213,15 +277,24 @@ export async function handleRunRecommendation(
     .map((d) => d.document_type)
     .filter((x: string | null): x is string => typeof x === "string" && x.length > 0);
 
-  // The reviewed JSON also carries an overall_confidence inside it; prefer
-  // the table column we already select but fall back to the JSON value.
+  // Overall confidence provenance is resolved from reviewed_json /
+  // extracted_json / the legacy numeric column WITHOUT mutating the
+  // database-returned reviewed_json object. See resolveConfidenceProvenance
+  // for the precedence rules.
   const reviewedJson = extraction.reviewed_json as Record<string, unknown>;
-  if (typeof reviewedJson.overall_confidence !== "number") {
-    reviewedJson.overall_confidence =
-      typeof extraction.overall_confidence === "number" ? extraction.overall_confidence : 0.7;
-  }
+  const extractedJson = (extraction.extracted_json ?? {}) as Record<string, unknown>;
+  const provenance = resolveConfidenceProvenance(
+    reviewedJson,
+    extractedJson,
+    extraction.overall_confidence
+  );
 
-  const risk = deriveRisk(reviewedJson, availableDocs);
+  const risk = deriveRisk(
+    reviewedJson,
+    availableDocs,
+    provenance.overall_confidence,
+    provenance.overall_confidence_available
+  );
 
   // ---- Load the live matrix ----
   const { data: appetiteRaw } = await admin
@@ -421,6 +494,13 @@ export async function handleRunRecommendation(
       taxonomy_version: TAXONOMY_VERSION,
       reasoning_source: reasoningSource,
       explanation_mode: mode,
+      // Confidence provenance. `confidence_score` remains a numeric column
+      // for schema compatibility, but the numeric 0 is ambiguous on its own;
+      // this flag lets background monitoring / UI distinguish provider-rated
+      // 0 (available) from compatibility 0 (unavailable). Legacy rows that
+      // predate the flag are treated as available by every consumer.
+      overall_confidence: top?.confidence ?? 0,
+      overall_confidence_available: top?.confidence_available ?? false,
     },
     confidence_score: top?.confidence ?? 0,
     referral_required: top?.referral_required ?? false,

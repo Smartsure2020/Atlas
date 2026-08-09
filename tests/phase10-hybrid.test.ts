@@ -270,6 +270,7 @@ function ins(over: Partial<InsurerScore> = {}): InsurerScore {
     band: "preferred",
     rule_status: "preferred",
     confidence: 0.85,
+    confidence_available: true,
     referral_required: false,
     manual_review_required: false,
     senior_review_required: false,
