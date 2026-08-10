@@ -24,8 +24,10 @@ import {
   listPilotIssues,
   createPilotIssue,
   updatePilotIssue,
+  type ExtractionRecord,
   type PilotIssue,
 } from "../lib/atlas";
+import { resolveExtractionConfidence } from "../lib/extraction-confidence";
 import { cancelJob, updateAssignment } from "../lib/phase7";
 import { getRecommendation, type Recommendation } from "../lib/recommendations";
 import { getQuoteReview, type QuoteReview, type QuoteReviewSection } from "../lib/quote-reviews";
@@ -37,7 +39,6 @@ import {
   CardSkeleton,
   Drawer,
   ErrorState,
-  KeyValue,
   Notice,
   ProgressStages,
   SelectField,
@@ -50,6 +51,7 @@ import {
   type TabDefinition,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
+import ExtractionTrustSummary from "../components/ExtractionTrustSummary";
 import { canManage as roleCanManage, canWrite as roleCanWrite, type AtlasUiRole } from "../components/AppShell";
 import RiskInformationPanel, { countByBand, type ExtractionField } from "./RiskInformationPanel";
 import RecommendationPanel from "./RecommendationPanel";
@@ -115,13 +117,7 @@ interface SubmissionRecord {
 interface SubmissionPayload {
   submission: SubmissionRecord;
   documents: Record<string, unknown>[];
-  extraction: {
-    id: string;
-    extracted_json: Record<string, unknown> | null;
-    reviewed_json: Record<string, unknown> | null;
-    overall_confidence?: number;
-    created_at?: string;
-  } | null;
+  extraction: ExtractionRecord | null;
   jobs?: Partial<Record<ExpensiveJob, JobRecord>>;
 }
 
@@ -165,13 +161,19 @@ export default function SubmissionDetail({
       try {
         // One round of parallel reads for the whole workspace. Failures on the
         // optional pieces must not blank the record.
-        const [payload, recommendation, quote, decision, missing] = await Promise.all([
-          getSubmission(submissionId) as unknown as Promise<SubmissionPayload>,
+        const [payloadRaw, recommendation, quote, decision, missing] = await Promise.all([
+          getSubmission(submissionId),
           getRecommendation(submissionId).catch(() => ({ recommendation: null })),
           getQuoteReview(submissionId).catch(() => ({ quote_review: null, sections: [] })),
           getDecision(submissionId).catch(() => ({ decision: null })),
           listMissingInfo(submissionId).catch(() => ({ items: [] })),
         ]);
+        const payload: SubmissionPayload = {
+          submission: payloadRaw.submission as unknown as SubmissionRecord,
+          documents: payloadRaw.documents,
+          extraction: payloadRaw.extraction,
+          jobs: payloadRaw.jobs as Partial<Record<ExpensiveJob, JobRecord>> | undefined,
+        };
         setData({
           payload,
           recommendation: recommendation.recommendation,
@@ -259,6 +261,7 @@ export default function SubmissionDetail({
   );
   const uncertainFieldCount = summary ? countByBand(summary, reviewed, ["uncertain", "conflicting", "missing"]) : 0;
   const activeDocuments = documents.filter((document) => document.status !== "expired");
+  const extractionConfidence = resolveExtractionConfidence(extraction);
 
   const nextAction = deriveNextAction({
     submission,
@@ -401,6 +404,7 @@ export default function SubmissionDetail({
               recommendation={data.recommendation}
               extractionExists={Boolean(extraction)}
               extractionReviewed={reviewed}
+              extractionConfidence={extractionConfidence}
               openMissingInfo={openMissingInfo}
               onRefresh={() => load({ silent: true })}
               onGoToTab={onTabChange}
@@ -412,6 +416,7 @@ export default function SubmissionDetail({
               submissionId={submissionId}
               data={data}
               extractionReviewed={reviewed}
+              extractionConfidence={extractionConfidence}
               onRefresh={() => load({ silent: true })}
               onGoToTab={onTabChange}
             />
@@ -676,6 +681,34 @@ function RailCount({
   );
 }
 
+function MetricRow({
+  label,
+  value,
+  onClick,
+  emphasise,
+}: {
+  label: string;
+  value: number;
+  onClick: () => void;
+  emphasise?: boolean;
+}) {
+  return (
+    <div className={`atlas-uwsummary__count${emphasise ? " atlas-uwsummary__count--emphasise" : ""}`}>
+      <dt>{label}</dt>
+      <dd>
+        <button
+          type="button"
+          className="atlas-btn atlas-btn--link"
+          onClick={onClick}
+          style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}
+        >
+          {value}
+        </button>
+      </dd>
+    </div>
+  );
+}
+
 /* ===========================================================================
    Next action
    =========================================================================== */
@@ -853,76 +886,118 @@ function OverviewTab({
         </Button>
       </div>
 
-      <Card
-        title="Where this submission stands"
-        description="A summary of what Atlas has completed and what is still open. The detail sits in the tabs above."
-      >
-        <KeyValue
-          items={[
-            {
-              key: "Risk information",
-              value: payload.extraction ? (
-                payload.extraction.reviewed_json ? (
-                  <StatusBadge status={{ label: "Reviewed by a person", tone: "success" }} />
-                ) : (
-                  <StatusBadge
-                    status={{
-                      label: "Extracted, not yet reviewed",
-                      tone: "warning",
-                      description:
-                        "Atlas read this from the documents. It is not underwriting fact until a person confirms it.",
-                    }}
-                  />
-                )
-              ) : (
-                <StatusBadge status={{ label: "Not extracted", tone: "neutral" }} />
-              ),
-            },
-            {
-              key: "Recommended insurer",
-              value: top ? (
-                <span>
-                  <strong>{top.insurer_name}</strong>
-                </span>
-              ) : recommendation ? (
-                <span className="atlas-text-muted">No insurer cleared appetite</span>
-              ) : (
-                <span className="atlas-text-muted">Not run yet</span>
-              ),
-            },
-            {
-              key: "Quote review",
-              value: quoteReview ? (
-                <StatusBadge status={quoteReviewStatus(quoteReview.status)} />
-              ) : (
-                <span className="atlas-text-muted">Not run yet</span>
-              ),
-            },
-            {
-              key: "Decision",
-              value: decision ? (
-                <span>
-                  {decision.selected_insurer || "Insurer not named"}
-                  <span className="atlas-text-muted"> · {formatDate(decision.decided_at)}</span>
-                </span>
-              ) : (
-                <span className="atlas-text-muted">Not recorded</span>
-              ),
-            },
-            { key: "Outstanding information", value: `${openMissingInfo} open` },
-            { key: "Uncertain risk fields", value: `${uncertainFields} to verify` },
-            { key: "Risk concerns raised", value: `${redFlags.length}` },
-            { key: "Active documents", value: `${activeDocuments}` },
-          ]}
-        />
-      </Card>
+      <div className="atlas-uwsummary">
+        <section className="atlas-uwsummary__primary" aria-labelledby="atlas-uwsummary-heading">
+          <div className="atlas-uwsummary__head">
+            <p className="atlas-uwsummary__eyebrow">Underwriting summary</p>
+            <h2 id="atlas-uwsummary-heading" className="atlas-uwsummary__title">
+              {top
+                ? top.insurer_name
+                : recommendation
+                ? "No insurer cleared appetite"
+                : "Recommendation not run yet"}
+            </h2>
+          </div>
 
-      {recommendation?.referral_required && (
-        <Notice tone="referral" title="This submission requires a referral">
-          At least one insurer rule for this risk sits outside standard authority. Open the recommendation
-          to see which trigger applies, then prepare a referral pack.
-        </Notice>
-      )}
+          <p className="atlas-uwsummary__body">
+            {top
+              ? `Atlas ranked ${top.insurer_name} first against the reviewed risk information. Open the recommendation to read the reasoning before you commit.`
+              : recommendation
+              ? "Every insurer with active appetite rules was ruled out. Review the failures on the recommendation tab — a referral, or a correction to the risk information, may change the outcome."
+              : payload.extraction
+              ? payload.extraction.reviewed_json
+                ? "The risk information is reviewed. Atlas can now check it against insurer appetite."
+                : "Atlas has read the documents. Confirm the risk information, then run the recommendation."
+              : "Atlas has not read the documents yet. Extraction turns them into a structured risk summary."}
+          </p>
+
+          {recommendation?.referral_required && (
+            <div className="atlas-uwsummary__notice">
+              <Notice tone="referral" title="This submission requires a referral">
+                At least one insurer rule for this risk sits outside standard authority. Open the
+                recommendation to see which trigger applies, then prepare a referral pack.
+              </Notice>
+            </div>
+          )}
+
+          <dl className="atlas-uwsummary__facts">
+            <div className="atlas-uwsummary__fact">
+              <dt>Quote review</dt>
+              <dd>
+                {quoteReview ? (
+                  <StatusBadge status={quoteReviewStatus(quoteReview.status)} />
+                ) : (
+                  <span className="atlas-text-muted">Not run yet</span>
+                )}
+              </dd>
+            </div>
+            <div className="atlas-uwsummary__fact">
+              <dt>Decision</dt>
+              <dd>
+                {decision ? (
+                  <span>
+                    {decision.selected_insurer || "Insurer not named"}
+                    <span className="atlas-text-muted"> · {formatDate(decision.decided_at)}</span>
+                  </span>
+                ) : (
+                  <span className="atlas-text-muted">Not recorded</span>
+                )}
+              </dd>
+            </div>
+          </dl>
+
+          <div className="atlas-uwsummary__actions">
+            {top ? (
+              <Button
+                variant="primary"
+                iconAfter="arrow-right"
+                onClick={() => onGoToTab("recommendation")}
+              >
+                Open the recommendation
+              </Button>
+            ) : recommendation ? (
+              <Button iconAfter="arrow-right" onClick={() => onGoToTab("recommendation")}>
+                Open the recommendation
+              </Button>
+            ) : (
+              <Button iconAfter="arrow-right" onClick={() => onGoToTab("risk")}>
+                Open risk information
+              </Button>
+            )}
+          </div>
+        </section>
+
+        <aside className="atlas-uwsummary__metrics" aria-label="Operational metrics">
+          <ExtractionTrustSummary extraction={payload.extraction} heading="Extraction trust" />
+
+          <dl className="atlas-uwsummary__counts">
+            <MetricRow
+              label="Active documents"
+              value={activeDocuments}
+              onClick={() => onGoToTab("documents")}
+            />
+            <MetricRow
+              label="Uncertain risk fields"
+              value={uncertainFields}
+              onClick={() => onGoToTab("risk")}
+              emphasise={uncertainFields > 0}
+            />
+            <MetricRow
+              label="Outstanding information"
+              value={openMissingInfo}
+              onClick={() => onGoToTab("missing-information")}
+              emphasise={openMissingInfo > 0}
+            />
+            <MetricRow
+              label="Risk concerns"
+              value={redFlags.length}
+              onClick={() => onGoToTab("risk")}
+              emphasise={redFlags.length > 0}
+            />
+          </dl>
+        </aside>
+      </div>
+
 
       {redFlags.length > 0 && (
         <Card

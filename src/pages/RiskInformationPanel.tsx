@@ -18,6 +18,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import type { ExtractionRecord } from "../lib/atlas";
 import { parseReviewFieldValue, reviewValueToEditorText } from "../lib/review-edit";
 import {
   Block,
@@ -29,8 +30,9 @@ import {
   StatusBadge,
   Disclosure,
 } from "../components/ui";
+import ExtractionTrustSummary from "../components/ExtractionTrustSummary";
 import { Icon } from "../components/Icon";
-import { CONFIDENCE_BAND, confidenceBand, severity, type ConfidenceBand } from "../lib/status";
+import { confidenceBand, severity, type ConfidenceBand } from "../lib/status";
 import { formatDateTime } from "../lib/format";
 
 export interface ExtractionFieldSource {
@@ -47,14 +49,6 @@ export interface ExtractionField {
   confidence: number;
   source?: ExtractionFieldSource;
   notes?: string | null;
-}
-
-interface ExtractionRecord {
-  id: string;
-  extracted_json: Record<string, unknown> | null;
-  reviewed_json: Record<string, unknown> | null;
-  overall_confidence?: number;
-  created_at?: string;
 }
 
 /** The risk sections Atlas can produce, in underwriting reading order. */
@@ -240,14 +234,6 @@ export default function RiskInformationPanel({
     [summary]
   );
 
-  const bandCounts = useMemo(() => {
-    if (!summary) return {} as Record<ConfidenceBand, number>;
-    const bands: ConfidenceBand[] = ["confirmed", "likely", "uncertain", "conflicting", "missing"];
-    return Object.fromEntries(
-      bands.map((band) => [band, countByBand(summary, reviewed, [band])])
-    ) as Record<ConfidenceBand, number>;
-  }, [summary, reviewed]);
-
   const missingInformation = Array.isArray(summary?.missing_information)
     ? (summary!.missing_information as Record<string, unknown>[])
     : [];
@@ -322,6 +308,8 @@ export default function RiskInformationPanel({
 
   return (
     <div className="atlas-stack">
+      <ExtractionTrustSummary extraction={extraction} />
+
       {!reviewed && (
         <Notice tone="warning" title="This is an unreviewed extraction">
           Atlas read these values from the documents. They are not underwriting fact until a person has
@@ -376,20 +364,6 @@ export default function RiskInformationPanel({
           )
         }
       >
-        <div className="atlas-actions" style={{ marginBottom: "var(--atlas-space-5)" }}>
-          {(["confirmed", "likely", "uncertain", "conflicting", "missing"] as ConfidenceBand[])
-            .filter((band) => (bandCounts[band] ?? 0) > 0)
-            .map((band) => (
-              <StatusBadge
-                key={band}
-                status={{
-                  ...CONFIDENCE_BAND[band],
-                  label: `${bandCounts[band]} ${CONFIDENCE_BAND[band].label.toLowerCase()}`,
-                }}
-              />
-            ))}
-        </div>
-
         {visibleSections.length === 0 ? (
           <EmptyState
             inline
