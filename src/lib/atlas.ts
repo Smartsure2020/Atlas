@@ -136,21 +136,29 @@ export function createSubmission(input: {
   });
 }
 
+/**
+ * Extraction record as the submission endpoint returns it. `extraction_confidence`
+ * is the numeric compatibility column; `overall_confidence` and its availability
+ * flag live inside extracted_json / reviewed_json. Resolve semantics via
+ * `resolveExtractionConfidence` in src/lib/extraction-confidence.ts.
+ */
+export interface ExtractionRecord {
+  id: string;
+  extracted_json: Record<string, unknown> | null;
+  reviewed_json: Record<string, unknown> | null;
+  extraction_confidence?: number | null;
+  missing_fields_json?: unknown;
+  red_flags_json?: unknown;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  created_at?: string;
+}
+
 export interface SubmissionDetailResponse {
   ok: true;
   submission: Record<string, unknown>;
   documents: Record<string, unknown>[];
-  extraction: {
-    id: string;
-    extracted_json: Record<string, unknown> | null;
-    reviewed_json: Record<string, unknown> | null;
-    extraction_confidence?: number;
-    missing_fields_json?: unknown;
-    red_flags_json?: unknown;
-    reviewed_by?: string | null;
-    reviewed_at?: string | null;
-    created_at?: string;
-  } | null;
+  extraction: ExtractionRecord | null;
   jobs?: Record<string, unknown>;
 }
 
