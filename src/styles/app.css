@@ -235,7 +235,7 @@
 }
 
 .atlas-navitem:focus-visible {
-  outline-color: #7fb6e6;
+  outline-color: var(--atlas-focus-ring-nav);
   outline-offset: -2px;
 }
 
@@ -970,7 +970,7 @@
 
 .atlas-doc__icon {
   flex: none;
-  color: var(--atlas-ink-subtle);
+  color: var(--atlas-ink-decorative);
 }
 
 .atlas-doc__main {
@@ -1150,7 +1150,7 @@
   width: 3px;
   height: 3px;
   border-radius: 50%;
-  background: var(--atlas-ink-subtle);
+  background: var(--atlas-ink-decorative);
 }
 
 .atlas-rule__notes {
