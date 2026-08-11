@@ -459,6 +459,81 @@ describe("QuoteReviewPanel — decision surface", () => {
   });
 });
 
+describe("QuoteReviewPanel — confirmation dialog focus restoration", () => {
+  const dialogName = /Record this placement decision\?/i;
+
+  it("1. the trigger is focusable and can hold focus", () => {
+    renderPanel();
+    const trigger = screen.getByRole("button", { name: /Record placement decision/i });
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("2. activating the trigger opens the confirmation dialog", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const trigger = screen.getByRole("button", { name: /Record placement decision/i });
+    await user.click(trigger);
+    expect(await screen.findByRole("dialog", { name: dialogName })).toBeInTheDocument();
+  });
+
+  it("3. Escape closes the dialog and restores focus to the trigger", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const trigger = screen.getByRole("button", { name: /Record placement decision/i });
+    await user.click(trigger);
+    await screen.findByRole("dialog", { name: dialogName });
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: dialogName })).toBeNull();
+    });
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("4. the dialog can be reopened after being dismissed", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const trigger = screen.getByRole("button", { name: /Record placement decision/i });
+    await user.click(trigger);
+    await screen.findByRole("dialog", { name: dialogName });
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: dialogName })).toBeNull();
+    });
+    // Focus is back on the trigger, so it can be activated again immediately.
+    await user.click(trigger);
+    expect(await screen.findByRole("dialog", { name: dialogName })).toBeInTheDocument();
+  });
+
+  it("5. Cancel closes the dialog and restores focus to the trigger", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const trigger = screen.getByRole("button", { name: /Record placement decision/i });
+    await user.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: dialogName });
+    await user.click(within(dialog).getByRole("button", { name: /^Cancel$/i }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: dialogName })).toBeNull();
+    });
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("6. focus stays trapped inside the open dialog when tabbing", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(screen.getByRole("button", { name: /Record placement decision/i }));
+    const dialog = await screen.findByRole("dialog", { name: dialogName });
+    // Initial focus lands inside the dialog.
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    // Tabbing forward and backward keeps focus within the dialog rather than
+    // escaping to the page behind it.
+    await user.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    await user.tab({ shift: true });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+});
+
 describe("QuoteReviewPanel — previous reviews and comparison", () => {
   it("labels the current review and earlier reviews distinctly", async () => {
     getQuoteReviewHistoryMock.mockResolvedValue({

@@ -97,6 +97,11 @@
   --atlas-nav-ink: #c3cddd;
   --atlas-nav-ink-active: #ffffff;
   --atlas-nav-ink-muted: #7f8da4;
+  /* Muted-but-readable nav text (the account role label). --atlas-nav-ink-muted
+     only reaches ~4.9:1 on the navy nav surface and dropped below WCAG AA
+     against the rendered mobile sidebar; this clears AA with margin (6.8:1 on
+     --atlas-nav-surface) while staying visibly quieter than the white email. */
+  --atlas-nav-ink-role: #9aa7bd;
 
   /* ---- Borders ----------------------------------------------------------- */
   --atlas-border: var(--a-slate-150);

@@ -746,7 +746,12 @@ function ComparisonMatrix({
         />
       ) : (
         <div className="atlas-table-wrap atlas-matrix-wrap">
-          <div className="atlas-table-scroll">
+          <div
+            className="atlas-table-scroll atlas-matrix-scroll"
+            role="region"
+            aria-label="Insurer comparison — scroll to see every criterion and insurer"
+            tabIndex={0}
+          >
             <table className="atlas-matrix">
               <caption className="atlas-sr-only">
                 Insurer comparison across appetite, blockers, referrals and documentation.

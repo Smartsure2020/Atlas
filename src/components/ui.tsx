@@ -1053,6 +1053,16 @@ function useFocusTrap(
 ) {
   const { dismissOnEscape = true } = options;
   const previouslyFocused = useRef<HTMLElement | null>(null);
+  // Hold the latest handler and option in refs so the trap installs exactly
+  // once for the surface's open lifetime. Keying the effect on the handler
+  // identity used to tear the trap down on every parent re-render — running the
+  // cleanup, which restored focus to the trigger, and pulling focus back out of
+  // an open dialog. Reading them through refs keeps the Escape and Tab
+  // behaviour current without re-running the effect.
+  const onDismissRef = useRef(onDismiss);
+  onDismissRef.current = onDismiss;
+  const dismissOnEscapeRef = useRef(dismissOnEscape);
+  dismissOnEscapeRef.current = dismissOnEscape;
 
   useEffect(() => {
     previouslyFocused.current = document.activeElement as HTMLElement | null;
@@ -1063,9 +1073,9 @@ function useFocusTrap(
     }
 
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && dismissOnEscape) {
+      if (event.key === "Escape" && dismissOnEscapeRef.current) {
         event.stopPropagation();
-        onDismiss();
+        onDismissRef.current();
         return;
       }
       if (event.key !== "Tab" || !containerRef.current) return;
@@ -1094,10 +1104,15 @@ function useFocusTrap(
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       document.body.style.overflow = previousOverflow;
-      // Focus returns to whatever opened the surface.
-      previouslyFocused.current?.focus?.();
+      // Focus returns to whatever opened the surface — but only if it is still
+      // in the document and focusable, so a trigger that unmounted while the
+      // surface was open never receives a stray focus call.
+      const trigger = previouslyFocused.current;
+      if (trigger && trigger.isConnected && typeof trigger.focus === "function") {
+        trigger.focus();
+      }
     };
-  }, [containerRef, onDismiss, dismissOnEscape]);
+  }, [containerRef]);
 }
 
 /* ===========================================================================

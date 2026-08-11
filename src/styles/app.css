@@ -285,7 +285,7 @@
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--atlas-nav-ink-muted);
+  color: var(--atlas-nav-ink-role);
 }
 
 /* Collapsed rail: icons only, labels become accessible names. */
@@ -1330,9 +1330,15 @@
 
 /* Cells that carry the majority signature stay quiet; cells that differ are
    marked so the eye lands on them. Never colour alone — the sr-only marker
-   in the DOM tells screen readers the same story. */
-.atlas-matrix tr[data-uniform="true"] .atlas-matrix__cell {
-  opacity: 0.72;
+   in the DOM tells screen readers the same story.
+
+   Quieting uses a recessed cell surface rather than opacity: dimming the whole
+   cell composited the success badge ("None") and note text down to ~4.0:1,
+   below WCAG AA. A sunken surface leaves every foreground token at full
+   strength (success badge 8.2:1, note 4.96:1) while still setting uniform rows
+   back from the ones that differ. The sticky row header keeps its own surface. */
+.atlas-matrix tr[data-uniform="true"] td {
+  background: var(--atlas-surface-sunken);
 }
 
 .atlas-matrix td[data-differs="true"] {
@@ -1344,6 +1350,15 @@
   border: 0;
   padding: 0;
   margin: 0 0 var(--atlas-space-4);
+}
+
+/* The comparison scroll region is a keyboard tab stop (role="region",
+   tabindex=0) so it can be reached and scrolled with the arrow keys. Its
+   wrapper clips overflow, so the focus ring is inset to stay visible. */
+.atlas-matrix-scroll:focus-visible {
+  outline: 2px solid var(--atlas-focus-ring);
+  outline-offset: -2px;
+  border-radius: var(--atlas-radius-card);
 }
 
 /* Mobile: transpose the table into per-criterion stacked blocks so nothing

@@ -317,6 +317,22 @@ describe("RecommendationPanel — comparison matrix", () => {
     expect(within(table).queryByText("Hollard")).toBeNull();
   });
 
+  it("exposes the scroll region as a named, keyboard-focusable landmark", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+
+    // The horizontally scrollable region is a named region and a tab stop, so
+    // keyboard users can reach it and scroll it with the arrow keys.
+    const region = screen.getByRole("region", { name: /Insurer comparison/i });
+    expect(region).toHaveAttribute("tabindex", "0");
+    // It wraps the comparison table, whose caption/header/cell semantics stay.
+    expect(within(region).getByRole("table", { name: /Insurer comparison/i })).toBeInTheDocument();
+    // It can actually take focus.
+    region.focus();
+    expect(document.activeElement).toBe(region);
+  });
+
   it("renders the zero-selection empty state when all checkboxes are unchecked", async () => {
     const user = userEvent.setup();
     renderPanel();
