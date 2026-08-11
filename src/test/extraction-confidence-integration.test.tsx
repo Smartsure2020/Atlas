@@ -16,28 +16,23 @@ import { axe } from "vitest-axe";
 import type { ExtractionConfidenceState } from "../lib/extraction-confidence";
 import type { ExtractionRecord } from "../lib/atlas";
 
-// The panels reach for these libs through absolute imports; the resolver-level
-// paths are pure and safe to load. Only mock the mutation endpoints so tests
-// stay isolated from the network.
-vi.mock("../lib/recommendations", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../lib/recommendations")>();
-  return { ...original, runRecommendation: vi.fn().mockResolvedValue({ ok: true }) };
-});
-vi.mock("../lib/quote-reviews", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../lib/quote-reviews")>();
-  return { ...original, runQuoteReview: vi.fn().mockResolvedValue({ ok: true }) };
-});
-vi.mock("../lib/decisions", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../lib/decisions")>();
-  return { ...original, recordDecision: vi.fn().mockResolvedValue({ ok: true }) };
-});
-vi.mock("../lib/phase4", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../lib/phase4")>();
-  return {
-    ...original,
-    getQuoteReviewHistory: vi.fn().mockResolvedValue({ reviews: [], comparison: [] }),
-  };
-});
+// The panels reach for these libs through absolute imports. Loading the real
+// modules would transitively import ../lib/atlas, which builds the Supabase
+// client at module load and requires VITE_SUPABASE_URL/VITE_SUPABASE_ANON_KEY.
+// CI has no such env, so we own each API boundary with complete, self-contained
+// mocks and never call importOriginal().
+vi.mock("../lib/recommendations", () => ({
+  runRecommendation: vi.fn().mockResolvedValue({ ok: true }),
+}));
+vi.mock("../lib/quote-reviews", () => ({
+  runQuoteReview: vi.fn().mockResolvedValue({ ok: true }),
+}));
+vi.mock("../lib/decisions", () => ({
+  recordDecision: vi.fn().mockResolvedValue({ ok: true }),
+}));
+vi.mock("../lib/phase4", () => ({
+  getQuoteReviewHistory: vi.fn().mockResolvedValue({ reviews: [], comparison: [] }),
+}));
 
 import RecommendationPanel from "../pages/RecommendationPanel";
 import QuoteReviewPanel from "../pages/QuoteReviewPanel";
