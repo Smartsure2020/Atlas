@@ -36,7 +36,11 @@ import type { MissingInfoItem } from "../lib/phase4";
 import { appetiteBand } from "../lib/status";
 import { formatDateTime } from "../lib/format";
 import type { SubmissionTab } from "../lib/router";
-import { groupFindings, ruleListMeta } from "../lib/decision-workbench";
+import {
+  groupFindings,
+  ruleListMeta,
+  summariseRecommendation,
+} from "../lib/decision-workbench";
 
 export default function RecommendationPanel({
   submissionId,
@@ -209,7 +213,10 @@ export default function RecommendationPanel({
           />
         ) : (
           <>
-            <p className="atlas-reco__headline">{recommendation.reasoning_json.headline}</p>
+            <RecommendationSummary
+              recommendation={recommendation}
+              openMissingInfoCount={openMissingInfo.length}
+            />
 
             {openMissingInfo.length > 0 && (
               <div style={{ marginTop: "var(--atlas-space-4)" }}>
@@ -276,6 +283,145 @@ export default function RecommendationPanel({
           </>
         )}
       </Card>
+    </div>
+  );
+}
+
+/* ===========================================================================
+   Decision-oriented recommendation summary
+   ---------------------------------------------------------------------------
+   A compact snapshot above the ranked view. Communicates the top-level
+   answer, the review/referral flags and the counts an underwriter needs to
+   decide whether to keep reading. Nothing here is invented — every value is
+   derived from the recommendation payload the Worker already returns.
+   =========================================================================== */
+
+function RecommendationSummary({
+  recommendation,
+  openMissingInfoCount,
+}: {
+  recommendation: Recommendation;
+  openMissingInfoCount: number;
+}) {
+  const summary = summariseRecommendation(recommendation);
+  const top = recommendation.reasoning_json.top ?? null;
+
+  return (
+    <section className="atlas-reco__summary" aria-label="Recommendation summary">
+      <div className="atlas-reco__summary-head">
+        <div>
+          <p className="atlas-reco__summary-eyebrow">Atlas recommendation</p>
+          <p className="atlas-reco__summary-title">
+            {summary.hasViableTop
+              ? summary.topInsurerName
+              : "No insurer cleared appetite"}
+          </p>
+        </div>
+        <div className="atlas-reco__summary-flags">
+          {top ? (
+            <StatusBadge status={appetiteBand(top.band)} strong />
+          ) : (
+            <StatusBadge status={{ label: "Ruled out across the panel", tone: "danger" }} strong />
+          )}
+          {summary.requiresReferral && (
+            <StatusBadge
+              status={{
+                label: "Referral required",
+                tone: "referral",
+                description: "At least one recommended insurer requires a referral.",
+              }}
+            />
+          )}
+          {summary.requiresSeniorReview && (
+            <StatusBadge
+              status={{
+                label: "Senior review",
+                tone: "referral",
+                description: "A senior underwriter must sign this off.",
+              }}
+            />
+          )}
+          {summary.requiresManualReview && (
+            <StatusBadge
+              status={{
+                label: "Manual review",
+                tone: "warning",
+                description:
+                  "Atlas could not match a reliable product-level rule for the top pick. Treat the ranking as provisional.",
+              }}
+            />
+          )}
+        </div>
+      </div>
+
+      <p className="atlas-reco__headline">{recommendation.reasoning_json.headline}</p>
+
+      <dl className="atlas-reco__summary-counts" aria-label="Recommendation counts">
+        <SummaryCount
+          label="Viable insurers"
+          value={summary.viableCount}
+          hint="Insurers Atlas can recommend, including the top pick."
+        />
+        <SummaryCount
+          label="Ruled out"
+          value={summary.ruledOutCount}
+          hint="Insurers ruled out by a hard appetite failure."
+          emphasise={summary.ruledOutCount > 0}
+        />
+        <SummaryCount
+          label="Matched rules"
+          value={summary.matchedRuleCount}
+          hint="Appetite rules Atlas matched across the viable insurers."
+        />
+        <SummaryCount
+          label="Required documents"
+          value={summary.missingDocumentsCount}
+          hint="Distinct required documents outstanding across the viable insurers."
+          emphasise={summary.missingDocumentsCount > 0}
+        />
+        <SummaryCount
+          label="Unmatched coverage"
+          value={summary.unmatchedCoverageCount}
+          hint="Sections or products with no guideline rule on file."
+          emphasise={summary.unmatchedCoverageCount > 0}
+        />
+        {openMissingInfoCount > 0 && (
+          <SummaryCount
+            label="Outstanding information"
+            value={openMissingInfoCount}
+            hint="Tracked information items still outstanding on this submission."
+            emphasise
+          />
+        )}
+      </dl>
+
+      {summary.computedAt && (
+        <p className="atlas-reco__summary-meta">
+          Computed {formatDateTime(summary.computedAt)} against the reviewed risk information.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function SummaryCount({
+  label,
+  value,
+  hint,
+  emphasise,
+}: {
+  label: string;
+  value: number;
+  hint: string;
+  emphasise?: boolean;
+}) {
+  return (
+    <div
+      className={`atlas-reco__summary-count${emphasise ? " atlas-reco__summary-count--emphasise" : ""}`}
+      title={hint}
+    >
+      <dt>{label}</dt>
+      <dd>{value}</dd>
     </div>
   );
 }
@@ -436,15 +582,24 @@ function InsurerBlock({
    Comparison matrix
    =========================================================================== */
 
-const MATRIX_ROWS: {
+/**
+ * A comparison row. `signature` is used to detect whether every cell in the
+ * row carries the same value — a purely-neutral row can then be kept quiet
+ * so it does not compete with the rows that actually differ.
+ */
+interface MatrixRow {
   key: string;
   label: string;
   render: (insurer: ScoredInsurer) => ReactNode;
-}[] = [
+  signature: (insurer: ScoredInsurer) => string;
+}
+
+const MATRIX_ROWS: MatrixRow[] = [
   {
     key: "band",
     label: "Appetite",
     render: (insurer) => <StatusBadge status={appetiteBand(insurer.band)} />,
+    signature: (insurer) => insurer.band ?? "unknown",
   },
   {
     key: "blocker",
@@ -455,6 +610,7 @@ const MATRIX_ROWS: {
       ) : (
         <StatusBadge status={{ label: "None", tone: "success" }} />
       ),
+    signature: (insurer) => (insurer.ruled_out ? "ruled_out" : "none"),
   },
   {
     key: "referral",
@@ -465,6 +621,7 @@ const MATRIX_ROWS: {
       ) : (
         <StatusBadge status={{ label: "Not required", tone: "success" }} />
       ),
+    signature: (insurer) => (insurer.referral_required ? "required" : "none"),
   },
   {
     key: "documents",
@@ -480,6 +637,7 @@ const MATRIX_ROWS: {
         </>
       );
     },
+    signature: (insurer) => `${(insurer.missing_required_documents ?? []).length}`,
   },
   {
     key: "coverage",
@@ -498,11 +656,18 @@ const MATRIX_ROWS: {
         </>
       );
     },
+    signature: (insurer) => {
+      const count =
+        (insurer.unmatched_sections ?? []).length +
+        (insurer.unmatched_product_candidates ?? []).length;
+      return `${count}`;
+    },
   },
   {
     key: "reasoning",
     label: "Atlas reasoning",
     render: (insurer) => <span className="atlas-matrix__note">{insurer.reasoning || "—"}</span>,
+    signature: (insurer) => (insurer.reasoning || "").trim().toLowerCase(),
   },
 ];
 
@@ -524,9 +689,29 @@ function ComparisonMatrix({
     [insurers, selected]
   );
 
+  // For every row, decide which cells differ from the majority so scanning
+  // the matrix highlights the meaningful contrasts and quietens the rest.
+  const rowMeta = useMemo(() => {
+    return MATRIX_ROWS.map((row) => {
+      const signatures = shown.map((insurer) => row.signature(insurer));
+      const counts = new Map<string, number>();
+      for (const value of signatures) counts.set(value, (counts.get(value) ?? 0) + 1);
+      const allSame = counts.size <= 1;
+      let majority: string | null = null;
+      let majorityCount = 0;
+      for (const [value, count] of counts) {
+        if (count > majorityCount) {
+          majority = value;
+          majorityCount = count;
+        }
+      }
+      return { row, signatures, allSame, majority };
+    });
+  }, [shown]);
+
   return (
     <div style={{ marginTop: "var(--atlas-space-4)" }}>
-      <fieldset style={{ border: 0, padding: 0, margin: "0 0 var(--atlas-space-4)" }}>
+      <fieldset className="atlas-matrix__picker">
         <legend className="atlas-block__title" style={{ marginBottom: 8 }}>
           Insurers in the comparison
         </legend>
@@ -560,38 +745,56 @@ function ComparisonMatrix({
           body="Tick at least one insurer above to build the comparison."
         />
       ) : (
-        <div className="atlas-table-wrap">
+        <div className="atlas-table-wrap atlas-matrix-wrap">
           <div className="atlas-table-scroll">
             <table className="atlas-matrix">
               <caption className="atlas-sr-only">
-                Insurer comparison across appetite, blockers, referrals and documentation
+                Insurer comparison across appetite, blockers, referrals and documentation.
+                Differences from the majority in each row are marked "differs".
               </caption>
               <thead>
                 <tr>
                   <th scope="col" style={{ minWidth: 170 }}>
                     Criterion
                   </th>
-                  {shown.map((insurer) => (
-                    <th
-                      scope="col"
-                      key={insurer.insurer_id}
-                      data-pinned={insurer.insurer_id === topId ? "true" : undefined}
-                    >
-                      <span className="atlas-matrix__insurer">{insurer.insurer_name}</span>
-                      {insurer.insurer_id === topId ? "Recommended" : "Alternative"}
-                    </th>
-                  ))}
+                  {shown.map((insurer) => {
+                    const isTop = insurer.insurer_id === topId;
+                    return (
+                      <th
+                        scope="col"
+                        key={insurer.insurer_id}
+                        data-pinned={isTop ? "true" : undefined}
+                      >
+                        <span className="atlas-matrix__insurer">{insurer.insurer_name}</span>
+                        <span className="atlas-matrix__role">
+                          {isTop ? "Atlas recommended" : "Alternative"}
+                        </span>
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
-                {MATRIX_ROWS.map((row) => (
-                  <tr key={row.key}>
+                {rowMeta.map(({ row, signatures, allSame, majority }) => (
+                  <tr key={row.key} data-uniform={allSame ? "true" : undefined}>
                     <th scope="row">{row.label}</th>
-                    {shown.map((insurer) => (
-                      <td key={insurer.insurer_id}>
-                        <div className="atlas-matrix__cell">{row.render(insurer)}</div>
-                      </td>
-                    ))}
+                    {shown.map((insurer, index) => {
+                      const differs = !allSame && signatures[index] !== majority;
+                      return (
+                        <td
+                          key={insurer.insurer_id}
+                          data-insurer={insurer.insurer_name}
+                          data-differs={differs ? "true" : undefined}
+                        >
+                          <div className="atlas-matrix__cell">
+                            {row.render(insurer)}
+                            {differs && (
+                              <span className="atlas-sr-only"> (differs from the majority)</span>
+                            )}
+                          </div>
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>

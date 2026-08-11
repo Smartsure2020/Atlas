@@ -974,11 +974,102 @@
 
 /* ---- Recommendation ------------------------------------------------------ */
 
+/* Decision-oriented snapshot above the ranked view. Compact, calm, and never
+   competing with the ranked/comparison detail below. */
 .atlas-reco__summary {
-  padding: var(--atlas-space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+  padding: var(--atlas-space-4) var(--atlas-space-5);
   border: 1px solid var(--atlas-border);
+  border-left: 3px solid var(--atlas-primary);
   border-radius: var(--atlas-radius-card);
   background: var(--atlas-surface);
+  box-shadow: var(--atlas-shadow-sm);
+}
+
+.atlas-reco__summary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--atlas-space-4);
+  flex-wrap: wrap;
+}
+
+.atlas-reco__summary-eyebrow {
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+.atlas-reco__summary-title {
+  font-size: var(--atlas-fs-section);
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  margin: 2px 0 0;
+  line-height: var(--atlas-lh-snug);
+}
+
+.atlas-reco__summary-flags {
+  display: flex;
+  align-items: center;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.atlas-reco__summary-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--atlas-space-3) var(--atlas-space-4);
+  padding: var(--atlas-space-3) 0 0;
+  margin: 0;
+  border-top: 1px solid var(--atlas-border);
+}
+
+.atlas-reco__summary-count {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.atlas-reco__summary-count dt {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  letter-spacing: 0.03em;
+}
+
+.atlas-reco__summary-count dd {
+  margin: 0;
+  font-size: var(--atlas-fs-metric);
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.atlas-reco__summary-count--emphasise dt {
+  color: var(--atlas-warning-ink);
+  font-weight: var(--atlas-fw-semibold);
+}
+
+.atlas-reco__summary-meta {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+@media (max-width: 600px) {
+  .atlas-reco__summary {
+    padding: var(--atlas-space-4);
+  }
+  .atlas-reco__summary-count dd {
+    font-size: var(--atlas-fs-sub);
+  }
 }
 
 .atlas-reco__headline {
@@ -986,6 +1077,7 @@
   line-height: var(--atlas-lh-snug);
   color: var(--atlas-ink);
   max-width: var(--atlas-prose-max);
+  margin: 0;
 }
 
 .atlas-reco__divider {
@@ -1221,6 +1313,120 @@
   font-size: var(--atlas-fs-label);
   color: var(--atlas-ink-muted);
   line-height: var(--atlas-lh-snug);
+}
+
+.atlas-matrix__role {
+  display: block;
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-medium);
+  letter-spacing: 0.03em;
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-matrix thead th[data-pinned="true"] .atlas-matrix__role {
+  color: var(--atlas-primary-ink);
+  font-weight: var(--atlas-fw-semibold);
+}
+
+/* Cells that carry the majority signature stay quiet; cells that differ are
+   marked so the eye lands on them. Never colour alone — the sr-only marker
+   in the DOM tells screen readers the same story. */
+.atlas-matrix tr[data-uniform="true"] .atlas-matrix__cell {
+  opacity: 0.72;
+}
+
+.atlas-matrix td[data-differs="true"] {
+  background: var(--atlas-accent-surface);
+  box-shadow: inset 3px 0 0 var(--atlas-accent);
+}
+
+.atlas-matrix__picker {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--atlas-space-4);
+}
+
+/* Mobile: transpose the table into per-criterion stacked blocks so nothing
+   is clipped at 375px. The thead is dropped visually; each cell announces
+   its insurer via a data attribute so the row header + insurer name still
+   sit next to the value. */
+@media (max-width: 600px) {
+  .atlas-matrix-wrap .atlas-table-scroll {
+    overflow-x: visible;
+  }
+
+  .atlas-matrix {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .atlas-matrix caption {
+    position: static;
+    clip: auto;
+    height: auto;
+    width: auto;
+    overflow: visible;
+    margin: 0 0 var(--atlas-space-3);
+    font-size: var(--atlas-fs-label);
+    color: var(--atlas-ink-muted);
+  }
+
+  .atlas-matrix thead {
+    display: none;
+  }
+
+  .atlas-matrix tbody,
+  .atlas-matrix tr {
+    display: block;
+  }
+
+  .atlas-matrix tr {
+    margin-bottom: var(--atlas-space-3);
+    padding: var(--atlas-space-3);
+    border: 1px solid var(--atlas-border);
+    border-radius: var(--atlas-radius-card);
+    background: var(--atlas-surface);
+  }
+
+  .atlas-matrix tbody th {
+    display: block;
+    position: static;
+    min-width: 0;
+    padding: 0 0 var(--atlas-space-2);
+    border-right: 0;
+    border-bottom: 1px solid var(--atlas-border);
+    margin-bottom: var(--atlas-space-2);
+    color: var(--atlas-ink);
+    font-size: var(--atlas-fs-dense);
+    font-weight: var(--atlas-fw-semibold);
+    background: transparent;
+  }
+
+  .atlas-matrix td {
+    display: block;
+    padding: var(--atlas-space-2) 0;
+    border-bottom: 1px dashed var(--atlas-border);
+  }
+
+  .atlas-matrix td:last-child {
+    border-bottom: 0;
+  }
+
+  .atlas-matrix td::before {
+    content: attr(data-insurer);
+    display: block;
+    font-size: var(--atlas-fs-label);
+    color: var(--atlas-ink-muted);
+    margin-bottom: 4px;
+  }
+
+  .atlas-matrix td[data-differs="true"] {
+    padding-left: var(--atlas-space-2);
+    border-left: 3px solid var(--atlas-accent);
+    background: var(--atlas-accent-surface);
+    border-radius: var(--atlas-radius-control);
+  }
 }
 
 /* ===========================================================================
