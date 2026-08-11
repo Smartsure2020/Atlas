@@ -639,6 +639,277 @@
   max-width: var(--atlas-prose-max);
 }
 
+/* ---- Underwriting summary composition (Overview) ----------------------- */
+
+.atlas-uwsummary {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: var(--atlas-space-4);
+  align-items: start;
+}
+
+.atlas-uwsummary__primary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-4);
+  padding: var(--atlas-space-5);
+  background: var(--atlas-surface);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  box-shadow: var(--atlas-shadow-sm);
+}
+
+.atlas-uwsummary__head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.atlas-uwsummary__eyebrow {
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+.atlas-uwsummary__title {
+  font-size: var(--atlas-fs-section);
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  margin: 0;
+  line-height: var(--atlas-lh-snug);
+}
+
+.atlas-uwsummary__body {
+  font-size: var(--atlas-fs-body);
+  color: var(--atlas-ink-secondary);
+  margin: 0;
+  max-width: var(--atlas-prose-max);
+  line-height: var(--atlas-lh-normal);
+}
+
+.atlas-uwsummary__notice {
+  margin-top: 0;
+}
+
+.atlas-uwsummary__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--atlas-space-3) var(--atlas-space-5);
+  padding-top: var(--atlas-space-3);
+  border-top: 1px solid var(--atlas-border);
+  margin: 0;
+}
+
+.atlas-uwsummary__fact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.atlas-uwsummary__fact dt {
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-uwsummary__fact dd {
+  font-size: var(--atlas-fs-body);
+  color: var(--atlas-ink);
+  margin: 0;
+}
+
+.atlas-uwsummary__actions {
+  display: flex;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+}
+
+.atlas-uwsummary__metrics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+  min-width: 0;
+}
+
+.atlas-uwsummary__counts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--atlas-space-2) var(--atlas-space-4);
+  padding: var(--atlas-space-3) var(--atlas-space-4);
+  background: var(--atlas-surface);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  box-shadow: var(--atlas-shadow-sm);
+  margin: 0;
+}
+
+.atlas-uwsummary__count {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--atlas-space-2);
+  padding: var(--atlas-space-1) 0;
+  min-width: 0;
+}
+
+.atlas-uwsummary__count dt {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-uwsummary__count dd {
+  margin: 0;
+}
+
+.atlas-uwsummary__count--emphasise dt {
+  color: var(--atlas-warning-ink);
+  font-weight: var(--atlas-fw-semibold);
+}
+
+@media (max-width: 1000px) {
+  .atlas-uwsummary {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .atlas-uwsummary__primary {
+    padding: var(--atlas-space-4);
+  }
+  .atlas-uwsummary__counts {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- Extraction trust summary ------------------------------------------ */
+
+.atlas-trust {
+  padding: var(--atlas-space-4) var(--atlas-space-5);
+  background: var(--atlas-surface);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  box-shadow: var(--atlas-shadow-sm);
+}
+
+.atlas-trust__head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: var(--atlas-space-3);
+}
+
+.atlas-trust__heading {
+  font-size: var(--atlas-fs-sub);
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  margin: 0;
+}
+
+.atlas-trust__hint {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-muted);
+  margin: 0;
+  max-width: var(--atlas-prose-max);
+}
+
+.atlas-trust__grid {
+  display: grid;
+  gap: var(--atlas-space-3) var(--atlas-space-5);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  margin: 0;
+}
+
+.atlas-trust__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding-left: var(--atlas-space-3);
+  border-left: 2px solid var(--atlas-border);
+}
+
+.atlas-trust__cell--wide {
+  grid-column: 1 / -1;
+}
+
+.atlas-trust__label {
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+.atlas-trust__value {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+  min-height: var(--atlas-control-h-sm);
+}
+
+.atlas-trust__metric {
+  font-size: var(--atlas-fs-metric);
+  font-weight: var(--atlas-fw-semibold);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--atlas-ink);
+}
+
+.atlas-trust__metric--available {
+  color: var(--atlas-primary-ink);
+}
+.atlas-trust__metric--legacy {
+  color: var(--atlas-ink-secondary);
+}
+.atlas-trust__metric--unavailable,
+.atlas-trust__metric--not-recorded {
+  font-size: var(--atlas-fs-sub);
+  color: var(--atlas-ink-secondary);
+}
+
+.atlas-trust__provenance {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-secondary);
+}
+
+.atlas-trust__explain {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-muted);
+  margin: 0;
+  max-width: var(--atlas-prose-max);
+}
+
+.atlas-trust__bands {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--atlas-space-2);
+}
+
+@media (max-width: 760px) {
+  .atlas-trust {
+    padding: var(--atlas-space-3) var(--atlas-space-4);
+  }
+  .atlas-trust__grid {
+    grid-template-columns: 1fr;
+    gap: var(--atlas-space-3);
+  }
+  .atlas-trust__cell--wide {
+    grid-column: auto;
+  }
+}
+
 /* ---- Extracted risk fields ---------------------------------------------- */
 
 .atlas-fieldgrid {

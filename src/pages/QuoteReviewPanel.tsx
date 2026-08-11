@@ -46,6 +46,7 @@ import {
 } from "../lib/status";
 import { EMPTY, formatDateTime, formatZAR } from "../lib/format";
 import type { WorkspaceData } from "./SubmissionDetail";
+import type { ExtractionConfidenceState } from "../lib/extraction-confidence";
 import type { SubmissionTab } from "../lib/router";
 
 type DecisionChoice = "proceed" | "refer" | "request_info" | "decline" | "override";
@@ -54,12 +55,14 @@ export default function QuoteReviewPanel({
   submissionId,
   data,
   extractionReviewed,
+  extractionConfidence,
   onRefresh,
   onGoToTab,
 }: {
   submissionId: string;
   data: WorkspaceData;
   extractionReviewed: boolean;
+  extractionConfidence: ExtractionConfidenceState;
   onRefresh: () => Promise<void> | void;
   onGoToTab: (tab: SubmissionTab) => void;
 }) {
@@ -224,6 +227,14 @@ export default function QuoteReviewPanel({
               Open risk information
             </Button>
           </div>
+        </Notice>
+      )}
+
+      {extractionConfidence.state === "unavailable" && (
+        <Notice tone="info" title="Extraction confidence is unavailable">
+          The quote review uses the reviewed risk values and the insurer's own rule evidence. The
+          extraction provider did not return an overall rating for this run, so the section outcomes
+          below rely on the field-level evidence, not on an overall extraction percentage.
         </Notice>
       )}
 

@@ -31,6 +31,7 @@ import {
   type Recommendation,
   type ScoredInsurer,
 } from "../lib/recommendations";
+import type { ExtractionConfidenceState } from "../lib/extraction-confidence";
 import type { MissingInfoItem } from "../lib/phase4";
 import { appetiteBand } from "../lib/status";
 import { formatDateTime } from "../lib/format";
@@ -41,6 +42,7 @@ export default function RecommendationPanel({
   recommendation,
   extractionExists,
   extractionReviewed,
+  extractionConfidence,
   openMissingInfo,
   onRefresh,
   onGoToTab,
@@ -49,6 +51,7 @@ export default function RecommendationPanel({
   recommendation: Recommendation | null;
   extractionExists: boolean;
   extractionReviewed: boolean;
+  extractionConfidence: ExtractionConfidenceState;
   openMissingInfo: MissingInfoItem[];
   onRefresh: () => Promise<void> | void;
   onGoToTab: (tab: SubmissionTab) => void;
@@ -122,6 +125,14 @@ export default function RecommendationPanel({
               Open risk information
             </Button>
           </div>
+        </Notice>
+      )}
+
+      {extractionConfidence.state === "unavailable" && (
+        <Notice tone="info" title="Extraction confidence is unavailable">
+          The ranking below reflects appetite matching against the human-reviewed risk information.
+          The extraction provider did not return an overall rating for this run, so no percentage is
+          shown alongside the ranking.
         </Notice>
       )}
 

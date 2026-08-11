@@ -16,6 +16,12 @@ export interface ScoredInsurer {
   band: "preferred" | "standard" | "caution" | "declined" | "ruled_out" | "insufficient_rule_match";
   rule_status: "preferred" | "standard" | "caution" | "declined" | "referral" | "ruled_out" | "insufficient_rule_match";
   confidence: number;
+  /**
+   * Whether the confidence number carries provider provenance. The Worker
+   * sets this alongside `confidence` so that a provider-rated zero can be
+   * distinguished from an unavailable rating.
+   */
+  confidence_available: boolean;
   referral_required: boolean;
   manual_review_required: boolean;
   senior_review_required: boolean;
@@ -61,6 +67,13 @@ export interface Recommendation {
     manual_review_required?: boolean;
     unmatched_sections?: string[];
     unmatched_product_candidates?: string[];
+    /**
+     * Snapshot of the extraction confidence that produced this ranking.
+     * `overall_confidence_available === false` means the ranking was
+     * computed against a run where the provider did not return a rating.
+     */
+    overall_confidence?: number;
+    overall_confidence_available?: boolean;
   };
   confidence_score: number;
   referral_required: boolean;

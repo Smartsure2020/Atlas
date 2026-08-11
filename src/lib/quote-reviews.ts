@@ -24,6 +24,12 @@ export interface QuoteReview {
   insurer_id: string | null;
   status: QuoteReviewStatus;
   overall_outcome: string;
+  /**
+   * The deterministic quote-review engine's own confidence in the section
+   * findings. NOT the extraction confidence — those are two different things.
+   * Extraction confidence lives on the extraction record and is resolved via
+   * `resolveExtractionConfidence` in src/lib/extraction-confidence.ts.
+   */
   overall_confidence: number;
   manual_review_required: boolean;
   review_snapshot: {
