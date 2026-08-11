@@ -1328,6 +1328,14 @@
   font-weight: var(--atlas-fw-semibold);
 }
 
+/* Per-cell insurer label. On desktop the column header already names the
+   insurer, so this is display:none (out of the a11y tree — no duplicate
+   announcement). It becomes a real, visible, announced label at the stacked
+   breakpoint where the header is dropped. */
+.atlas-matrix__mobile-insurer {
+  display: none;
+}
+
 /* Cells that carry the majority signature stay quiet; cells that differ are
    marked so the eye lands on them. Never colour alone — the sr-only marker
    in the DOM tells screen readers the same story.
@@ -1352,9 +1360,10 @@
   margin: 0 0 var(--atlas-space-4);
 }
 
-/* The comparison scroll region is a keyboard tab stop (role="region",
-   tabindex=0) so it can be reached and scrolled with the arrow keys. Its
-   wrapper clips overflow, so the focus ring is inset to stay visible. */
+/* When the comparison actually overflows it becomes a keyboard tab stop
+   (role="region", tabindex=0 applied in the component) so it can be reached
+   and scrolled with the arrow keys. Its wrapper clips overflow, so the focus
+   ring is inset to stay visible. */
 .atlas-matrix-scroll:focus-visible {
   outline: 2px solid var(--atlas-focus-ring);
   outline-offset: -2px;
@@ -1362,9 +1371,9 @@
 }
 
 /* Mobile: transpose the table into per-criterion stacked blocks so nothing
-   is clipped at 375px. The thead is dropped visually; each cell announces
-   its insurer via a data attribute so the row header + insurer name still
-   sit next to the value. */
+   is clipped at 375px. The thead is dropped visually; each cell carries a real
+   DOM insurer label (.atlas-matrix__mobile-insurer) so the row header + insurer
+   name still sit next to the value without relying on generated content. */
 @media (max-width: 600px) {
   .atlas-matrix-wrap .atlas-table-scroll {
     overflow-x: visible;
@@ -1428,10 +1437,10 @@
     border-bottom: 0;
   }
 
-  .atlas-matrix td::before {
-    content: attr(data-insurer);
+  .atlas-matrix__mobile-insurer {
     display: block;
     font-size: var(--atlas-fs-label);
+    font-weight: var(--atlas-fw-medium);
     color: var(--atlas-ink-muted);
     margin-bottom: 4px;
   }

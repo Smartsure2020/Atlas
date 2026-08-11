@@ -12,8 +12,8 @@
  * module load and requires env vars CI does not have).
  */
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, within, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { axe } from "vitest-axe";
 
@@ -310,27 +310,14 @@ describe("RecommendationPanel — comparison matrix", () => {
 
     // Comparison table renders and the recommended column has its role label.
     const table = screen.getByRole("table", { name: /Insurer comparison/i });
-    expect(within(table).getByText("Zurich")).toBeInTheDocument();
+    const columnHeaders = within(table)
+      .getAllByRole("columnheader")
+      .map((node) => node.textContent ?? "");
+    expect(columnHeaders.some((text) => text.includes("Zurich"))).toBe(true);
     expect(within(table).getByText(/Atlas recommended/i)).toBeInTheDocument();
     // Secondary insurer starts included, ruled-out excluded.
-    expect(within(table).getByText("Allianz")).toBeInTheDocument();
-    expect(within(table).queryByText("Hollard")).toBeNull();
-  });
-
-  it("exposes the scroll region as a named, keyboard-focusable landmark", async () => {
-    const user = userEvent.setup();
-    renderPanel();
-    await user.click(screen.getByRole("button", { name: /Compare/i }));
-
-    // The horizontally scrollable region is a named region and a tab stop, so
-    // keyboard users can reach it and scroll it with the arrow keys.
-    const region = screen.getByRole("region", { name: /Insurer comparison/i });
-    expect(region).toHaveAttribute("tabindex", "0");
-    // It wraps the comparison table, whose caption/header/cell semantics stay.
-    expect(within(region).getByRole("table", { name: /Insurer comparison/i })).toBeInTheDocument();
-    // It can actually take focus.
-    region.focus();
-    expect(document.activeElement).toBe(region);
+    expect(columnHeaders.some((text) => text.includes("Allianz"))).toBe(true);
+    expect(columnHeaders.some((text) => text.includes("Hollard"))).toBe(false);
   });
 
   it("renders the zero-selection empty state when all checkboxes are unchecked", async () => {
@@ -348,17 +335,32 @@ describe("RecommendationPanel — comparison matrix", () => {
     expect(screen.queryByRole("table", { name: /Insurer comparison/i })).toBeNull();
   });
 
-  it("carries data-insurer on cells for the mobile stacked representation", async () => {
+  it("renders a real per-cell insurer label for the stacked representation", async () => {
     const user = userEvent.setup();
     const { container } = renderPanel();
     await user.click(screen.getByRole("button", { name: /Compare/i }));
-    const cells = container.querySelectorAll("td[data-insurer]");
-    expect(cells.length).toBeGreaterThan(0);
-    const insurerNames = new Set(
-      Array.from(cells).map((cell) => cell.getAttribute("data-insurer"))
-    );
-    expect(insurerNames.has("Zurich")).toBe(true);
-    expect(insurerNames.has("Allianz")).toBe(true);
+
+    // The insurer name is a real DOM element inside every cell — not a
+    // data-* attribute and not CSS-generated content — so the value↔insurer
+    // association survives when the column header is dropped on mobile.
+    const labels = Array.from(
+      container.querySelectorAll("td .atlas-matrix__mobile-insurer")
+    ).map((node) => node.textContent);
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels).toContain("Zurich");
+    expect(labels).toContain("Allianz");
+
+    // The obsolete generated-content hook is gone.
+    expect(container.querySelector("td[data-insurer]")).toBeNull();
+
+    // Desktop keeps its real column-header semantics: the insurer name appears
+    // as a scope="col" header cell, so the mobile label is not a duplicate
+    // accessible name at desktop (it is display:none there).
+    const table = screen.getByRole("table", { name: /Insurer comparison/i });
+    const colHeaders = within(table)
+      .getAllByRole("columnheader")
+      .map((node) => node.textContent ?? "");
+    expect(colHeaders.some((text) => text.includes("Zurich"))).toBe(true);
   });
 });
 
@@ -406,6 +408,152 @@ describe("RecommendationPanel — evidence and honesty", () => {
     expect(container.textContent ?? "").toMatch(/Internal score 92\./);
     expect(container.textContent ?? "").not.toMatch(/Internal score 92%/);
     expect(container.textContent ?? "").not.toMatch(/92% probability/i);
+  });
+});
+
+describe("RecommendationPanel — comparison majority rendering", () => {
+  // Two insurers whose appetite bands differ. Under the corrected semantics
+  // this is a no-majority row: neither cell is an outlier and the row is not
+  // receded as uniform.
+  const twoWay = baseRecommendation({
+    secondary_options_json: [SECONDARY],
+    not_recommended_json: [],
+  });
+
+  it("marks no outlier and no uniform styling on a two-way differing row", async () => {
+    const user = userEvent.setup();
+    const { container } = renderPanel({ recommendation: twoWay });
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+
+    // No cell is flagged as differing, and no false "differs" announcement.
+    expect(container.querySelector("td[data-differs='true']")).toBeNull();
+    expect(screen.queryByText(/differs from the majority/i)).toBeNull();
+    // The differing Appetite row is not receded as if the values were identical.
+    const appetiteRow = within(screen.getByRole("table", { name: /Insurer comparison/i }))
+      .getByText("Appetite")
+      .closest("tr");
+    expect(appetiteRow).not.toHaveAttribute("data-uniform");
+  });
+
+  it("marks exactly the one outlier when a strict majority exists", async () => {
+    const user = userEvent.setup();
+    // Three insurers: two referral-free, one requires a referral → 2–1 split.
+    const a = scored({ insurer_id: "a", insurer_name: "Aviva", referral_required: false });
+    const b = scored({ insurer_id: "b", insurer_name: "Bryte", referral_required: false });
+    const c = scored({ insurer_id: "c", insurer_name: "Coface", referral_required: true });
+    const rec = baseRecommendation({
+      reasoning_json: { headline: "h", top: a, no_data_for: [] },
+      secondary_options_json: [b, c],
+      not_recommended_json: [],
+    });
+    const { container } = renderPanel({ recommendation: rec });
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+
+    // Exactly one cell (Coface's referral cell) is the outlier.
+    const differing = container.querySelectorAll("td[data-differs='true']");
+    expect(differing.length).toBe(1);
+    expect(screen.getByText(/differs from the majority/i)).toBeInTheDocument();
+  });
+
+  it("uniform row is receded and marks no outlier", async () => {
+    const user = userEvent.setup();
+    // Two insurers identical on every comparison signature.
+    const a = scored({ insurer_id: "a", insurer_name: "Aviva", band: "standard" });
+    const b = scored({ insurer_id: "b", insurer_name: "Bryte", band: "standard" });
+    const rec = baseRecommendation({
+      reasoning_json: { headline: "h", top: a, no_data_for: [] },
+      secondary_options_json: [b],
+      not_recommended_json: [],
+    });
+    const { container } = renderPanel({ recommendation: rec });
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+
+    expect(container.querySelector("td[data-differs='true']")).toBeNull();
+    expect(container.querySelector("tr[data-uniform='true']")).not.toBeNull();
+  });
+});
+
+describe("RecommendationPanel — comparison scroll region", () => {
+  const roCallbacks: ResizeObserverCallback[] = [];
+
+  class FakeResizeObserver {
+    private cb: ResizeObserverCallback;
+    constructor(cb: ResizeObserverCallback) {
+      this.cb = cb;
+      roCallbacks.push(cb);
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {
+      const index = roCallbacks.indexOf(this.cb);
+      if (index >= 0) roCallbacks.splice(index, 1);
+    }
+  }
+
+  beforeEach(() => {
+    roCallbacks.length = 0;
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function setWidths(node: HTMLElement, scrollWidth: number, clientWidth: number) {
+    Object.defineProperty(node, "scrollWidth", { configurable: true, value: scrollWidth });
+    Object.defineProperty(node, "clientWidth", { configurable: true, value: clientWidth });
+  }
+
+  it("is not a region or tab stop when it does not overflow", async () => {
+    const user = userEvent.setup();
+    const { container } = renderPanel();
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+
+    const scroll = container.querySelector(".atlas-matrix-scroll") as HTMLElement;
+    expect(scroll).not.toHaveAttribute("role");
+    expect(scroll).not.toHaveAttribute("tabindex");
+    expect(screen.queryByRole("region", { name: /Insurer comparison/i })).toBeNull();
+  });
+
+  it("becomes a named, focusable region once it overflows", async () => {
+    const user = userEvent.setup();
+    const { container } = renderPanel();
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+
+    const scroll = container.querySelector(".atlas-matrix-scroll") as HTMLElement;
+    setWidths(scroll, 1200, 400);
+    act(() => {
+      roCallbacks.forEach((cb) => cb([], {} as ResizeObserver));
+    });
+
+    const region = screen.getByRole("region", { name: /Insurer comparison/i });
+    expect(region).toBe(scroll);
+    expect(region).toHaveAttribute("tabindex", "0");
+    expect(within(region).getByRole("table", { name: /Insurer comparison/i })).toBeInTheDocument();
+    region.focus();
+    expect(document.activeElement).toBe(region);
+  });
+
+  it("recalculates scrollability when the selection changes", async () => {
+    const user = userEvent.setup();
+    const { container } = renderPanel();
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+
+    const scroll = container.querySelector(".atlas-matrix-scroll") as HTMLElement;
+    // Now say the region overflows, then change the selection: the effect
+    // re-runs on the new `shown` and re-measures without a manual RO tick.
+    setWidths(scroll, 1200, 400);
+    await user.click(screen.getByRole("checkbox", { name: /Hollard/i }));
+
+    expect(screen.getByRole("region", { name: /Insurer comparison/i })).toBe(scroll);
+  });
+
+  it("disconnects its observer on unmount", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderPanel();
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+    expect(roCallbacks.length).toBeGreaterThan(0);
+    unmount();
+    expect(roCallbacks.length).toBe(0);
   });
 });
 

@@ -157,6 +157,58 @@ export function toneToReasonKind(tone: string): ReasonKind {
 }
 
 /* ---------------------------------------------------------------------------
+   Comparison-row classification.
+   ------------------------------------------------------------------------- */
+
+/**
+ * The three honest states a comparison row can be in. Only a genuine strict
+ * majority lets us call the remaining cells "different" — ties and all-distinct
+ * rows have no outlier, and a uniform row has nothing to contrast at all.
+ */
+export type ComparisonRowState =
+  | { kind: "uniform"; signature: string }
+  | { kind: "majority"; signature: string }
+  | { kind: "no-majority" };
+
+/**
+ * Classify a comparison row from its per-insurer cell signatures.
+ *
+ * Order-independent: a majority exists only when one signature is held by a
+ * *uniquely* highest number of insurers AND that number is more than half of
+ * those shown. Everything else — two-way splits, 2–2 ties, all-distinct rows —
+ * is "no-majority" and marks no outlier. A row where every signature is equal
+ * is "uniform".
+ */
+export function classifyComparisonRow(signatures: string[]): ComparisonRowState {
+  if (signatures.length === 0) return { kind: "no-majority" };
+
+  const counts = new Map<string, number>();
+  for (const value of signatures) counts.set(value, (counts.get(value) ?? 0) + 1);
+
+  if (counts.size === 1) {
+    return { kind: "uniform", signature: signatures[0] };
+  }
+
+  let topSignature: string | null = null;
+  let topCount = 0;
+  let topIsUnique = true;
+  for (const [value, count] of counts) {
+    if (count > topCount) {
+      topSignature = value;
+      topCount = count;
+      topIsUnique = true;
+    } else if (count === topCount) {
+      topIsUnique = false;
+    }
+  }
+
+  if (topSignature !== null && topIsUnique && topCount * 2 > signatures.length) {
+    return { kind: "majority", signature: topSignature };
+  }
+  return { kind: "no-majority" };
+}
+
+/* ---------------------------------------------------------------------------
    Ranked view derivation.
    ------------------------------------------------------------------------- */
 

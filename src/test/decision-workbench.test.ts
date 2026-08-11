@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import type { Recommendation, ScoredInsurer } from "../lib/recommendations";
 import {
+  classifyComparisonRow,
   groupFindings,
   insurerChoiceList,
   rankInsurers,
@@ -228,5 +229,50 @@ describe("insurerChoiceList", () => {
     expect(choices[1].groupKey).toBe("secondary");
     expect(choices[2].groupKey).toBe("ruled_out");
     expect(choices[2].ruledOut).toBe(true);
+  });
+});
+
+describe("classifyComparisonRow", () => {
+  it("treats a single insurer as uniform", () => {
+    expect(classifyComparisonRow(["A"])).toEqual({ kind: "uniform", signature: "A" });
+  });
+
+  it("all identical → uniform, no outlier", () => {
+    expect(classifyComparisonRow(["A", "A", "A"])).toEqual({ kind: "uniform", signature: "A" });
+  });
+
+  it("two insurers with different values → no majority (neither is an outlier)", () => {
+    expect(classifyComparisonRow(["A", "B"])).toEqual({ kind: "no-majority" });
+  });
+
+  it("three all-distinct values → no majority", () => {
+    expect(classifyComparisonRow(["A", "B", "C"])).toEqual({ kind: "no-majority" });
+  });
+
+  it("four insurers split 2–2 → no majority", () => {
+    expect(classifyComparisonRow(["A", "A", "B", "B"])).toEqual({ kind: "no-majority" });
+  });
+
+  it("four insurers split 2–1–1 → no strict majority (plurality is not >half)", () => {
+    expect(classifyComparisonRow(["A", "A", "B", "C"])).toEqual({ kind: "no-majority" });
+  });
+
+  it("three insurers split 2–1 → strict majority on the pair", () => {
+    expect(classifyComparisonRow(["A", "A", "B"])).toEqual({ kind: "majority", signature: "A" });
+  });
+
+  it("four insurers split 3–1 → strict majority on the triple", () => {
+    expect(classifyComparisonRow(["A", "A", "A", "B"])).toEqual({ kind: "majority", signature: "A" });
+  });
+
+  it("is independent of column order", () => {
+    const a = classifyComparisonRow(["A", "A", "B"]);
+    const b = classifyComparisonRow(["B", "A", "A"]);
+    const c = classifyComparisonRow(["A", "B", "A"]);
+    expect(a).toEqual(b);
+    expect(b).toEqual(c);
+    expect(a).toEqual({ kind: "majority", signature: "A" });
+    // A tie stays a tie no matter how the columns are arranged.
+    expect(classifyComparisonRow(["A", "B"])).toEqual(classifyComparisonRow(["B", "A"]));
   });
 });

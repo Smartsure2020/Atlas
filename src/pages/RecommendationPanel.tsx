@@ -13,7 +13,7 @@
  * The governance disclaimer renders unconditionally, above everything.
  */
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { GovernanceDisclaimer } from "../components/GovernanceDisclaimer";
 import {
   Button,
@@ -37,6 +37,7 @@ import { appetiteBand } from "../lib/status";
 import { formatDateTime } from "../lib/format";
 import type { SubmissionTab } from "../lib/router";
 import {
+  classifyComparisonRow,
   groupFindings,
   ruleListMeta,
   summariseRecommendation,
@@ -583,15 +584,54 @@ function InsurerBlock({
    =========================================================================== */
 
 /**
- * A comparison row. `signature` is used to detect whether every cell in the
- * row carries the same value — a purely-neutral row can then be kept quiet
- * so it does not compete with the rows that actually differ.
+ * A comparison row. `signature` reduces each insurer's cell to a comparable
+ * value so the row can be classified as uniform, having a strict majority, or
+ * having no majority at all.
  */
 interface MatrixRow {
   key: string;
   label: string;
   render: (insurer: ScoredInsurer) => ReactNode;
   signature: (insurer: ScoredInsurer) => string;
+}
+
+/**
+ * Track whether a horizontally-overflowing element actually overflows right
+ * now, so the comparison scroll region is only a keyboard tab stop when there
+ * is something to scroll. Re-measures on the supplied dependencies (insurer
+ * selection) and on element resize; degrades to a window-resize listener where
+ * `ResizeObserver` is unavailable (e.g. jsdom).
+ */
+function useHorizontalOverflow(
+  ref: React.RefObject<HTMLElement>,
+  deps: unknown[]
+): boolean {
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) {
+      setOverflowing(false);
+      return;
+    }
+    const measure = () => setOverflowing(node.scrollWidth > node.clientWidth + 1);
+    measure();
+
+    if (typeof ResizeObserver === "undefined") {
+      if (typeof window === "undefined") return;
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+    // `measure` closes over the current node; deps drive re-measurement on
+    // selection change. ref identity is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  return overflowing;
 }
 
 const MATRIX_ROWS: MatrixRow[] = [
@@ -689,25 +729,19 @@ function ComparisonMatrix({
     [insurers, selected]
   );
 
-  // For every row, decide which cells differ from the majority so scanning
-  // the matrix highlights the meaningful contrasts and quietens the rest.
+  // For every row, classify it as uniform, strict-majority or no-majority so
+  // the matrix highlights only genuine outliers and never invents a "majority"
+  // from a tie or an all-distinct row.
   const rowMeta = useMemo(() => {
     return MATRIX_ROWS.map((row) => {
       const signatures = shown.map((insurer) => row.signature(insurer));
-      const counts = new Map<string, number>();
-      for (const value of signatures) counts.set(value, (counts.get(value) ?? 0) + 1);
-      const allSame = counts.size <= 1;
-      let majority: string | null = null;
-      let majorityCount = 0;
-      for (const [value, count] of counts) {
-        if (count > majorityCount) {
-          majority = value;
-          majorityCount = count;
-        }
-      }
-      return { row, signatures, allSame, majority };
+      return { row, signatures, state: classifyComparisonRow(signatures) };
     });
   }, [shown]);
+
+  // The scroll region is only a tab stop when it can actually scroll.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollable = useHorizontalOverflow(scrollRef, [shown]);
 
   return (
     <div style={{ marginTop: "var(--atlas-space-4)" }}>
@@ -747,15 +781,23 @@ function ComparisonMatrix({
       ) : (
         <div className="atlas-table-wrap atlas-matrix-wrap">
           <div
+            ref={scrollRef}
             className="atlas-table-scroll atlas-matrix-scroll"
-            role="region"
-            aria-label="Insurer comparison — scroll to see every criterion and insurer"
-            tabIndex={0}
+            {...(scrollable
+              ? {
+                  role: "region",
+                  "aria-label":
+                    "Insurer comparison — scroll to see every criterion and insurer",
+                  tabIndex: 0,
+                }
+              : {})}
           >
             <table className="atlas-matrix">
               <caption className="atlas-sr-only">
                 Insurer comparison across appetite, blockers, referrals and documentation.
-                Differences from the majority in each row are marked "differs".
+                Where a strict majority of the shown insurers share a value, the cells that
+                differ from it are marked "differs"; rows that are tied or all-distinct are
+                left unmarked so you can compare the values directly.
               </caption>
               <thead>
                 <tr>
@@ -780,18 +822,25 @@ function ComparisonMatrix({
                 </tr>
               </thead>
               <tbody>
-                {rowMeta.map(({ row, signatures, allSame, majority }) => (
-                  <tr key={row.key} data-uniform={allSame ? "true" : undefined}>
+                {rowMeta.map(({ row, signatures, state }) => (
+                  <tr key={row.key} data-uniform={state.kind === "uniform" ? "true" : undefined}>
                     <th scope="row">{row.label}</th>
                     {shown.map((insurer, index) => {
-                      const differs = !allSame && signatures[index] !== majority;
+                      const differs =
+                        state.kind === "majority" && signatures[index] !== state.signature;
                       return (
                         <td
                           key={insurer.insurer_id}
-                          data-insurer={insurer.insurer_name}
                           data-differs={differs ? "true" : undefined}
                         >
                           <div className="atlas-matrix__cell">
+                            {/* Real per-cell insurer label: hidden on desktop (the column
+                                header carries it) and shown at the stacked breakpoint where
+                                the header is dropped, so mobile screen readers still get the
+                                value↔insurer association without relying on CSS content. */}
+                            <span className="atlas-matrix__mobile-insurer">
+                              {insurer.insurer_name}
+                            </span>
                             {row.render(insurer)}
                             {differs && (
                               <span className="atlas-sr-only"> (differs from the majority)</span>
