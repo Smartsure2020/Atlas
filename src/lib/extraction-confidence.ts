@@ -81,6 +81,11 @@ function readSource(json: Record<string, unknown> | null): string | null {
   return typeof raw === "string" ? raw : null;
 }
 
+/** True when a JSON object actually carries at least one key. */
+function hasContent(json: Record<string, unknown> | null | undefined): boolean {
+  return !!json && typeof json === "object" && Object.keys(json).length > 0;
+}
+
 /**
  * Resolve extraction confidence for a UI surface.
  *
@@ -127,8 +132,14 @@ export function resolveExtractionConfidence(
     const rawSource = readSource(extracted);
     // A malformed source string does NOT override the availability we just
     // resolved. It only refines the provenance label from provider → provider.
+    //
+    // A source string of "reviewed" is only trusted when a real, non-empty
+    // reviewed_json object exists. Without that, labelling the source as
+    // reviewed would contradict the Human review badge, which reads
+    // reviewed_json independently.
+    const reviewerRecorded = hasContent(reviewed);
     const source: "provider" | "reviewed" | "legacy" =
-      rawSource === "reviewed" ? "reviewed" : "provider";
+      rawSource === "reviewed" && reviewerRecorded ? "reviewed" : "provider";
     return { state: "available", value: extractedNumber, source, available: true };
   }
 

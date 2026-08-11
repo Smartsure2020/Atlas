@@ -27,7 +27,10 @@ import {
   type ExtractionRecord,
   type PilotIssue,
 } from "../lib/atlas";
-import { resolveExtractionConfidence } from "../lib/extraction-confidence";
+import {
+  resolveExtractionConfidence,
+  type ExtractionConfidenceState,
+} from "../lib/extraction-confidence";
 import { cancelJob, updateAssignment } from "../lib/phase7";
 import { getRecommendation, type Recommendation } from "../lib/recommendations";
 import { getQuoteReview, type QuoteReview, type QuoteReviewSection } from "../lib/quote-reviews";
@@ -53,7 +56,8 @@ import {
 import { Icon } from "../components/Icon";
 import ExtractionTrustSummary from "../components/ExtractionTrustSummary";
 import { canManage as roleCanManage, canWrite as roleCanWrite, type AtlasUiRole } from "../components/AppShell";
-import RiskInformationPanel, { countByBand, type ExtractionField } from "./RiskInformationPanel";
+import RiskInformationPanel from "./RiskInformationPanel";
+import { countByBand } from "../lib/extraction-fields";
 import RecommendationPanel from "./RecommendationPanel";
 import QuoteReviewPanel from "./QuoteReviewPanel";
 import MissingInfoPanel from "./MissingInfoPanel";
@@ -371,6 +375,7 @@ export default function SubmissionDetail({
               redFlags={redFlags}
               missingFromExtraction={missingFromExtraction}
               activeDocuments={activeDocuments.length}
+              extractionConfidence={extractionConfidence}
               onGoToTab={onTabChange}
             />
           </TabPanel>
@@ -379,6 +384,7 @@ export default function SubmissionDetail({
             <RiskInformationPanel
               submissionId={submissionId}
               extraction={extraction}
+              extractionConfidence={extractionConfidence}
               canWrite={canWrite}
               canManage={canManage}
               extracting={extracting}
@@ -859,6 +865,7 @@ function OverviewTab({
   redFlags,
   missingFromExtraction,
   activeDocuments,
+  extractionConfidence,
   onGoToTab,
 }: {
   data: WorkspaceData;
@@ -868,6 +875,7 @@ function OverviewTab({
   redFlags: unknown[];
   missingFromExtraction: unknown[];
   activeDocuments: number;
+  extractionConfidence: ExtractionConfidenceState;
   onGoToTab: (tab: SubmissionTab) => void;
 }) {
   const { recommendation, quoteReview, decision, payload } = data;
@@ -968,7 +976,11 @@ function OverviewTab({
         </section>
 
         <aside className="atlas-uwsummary__metrics" aria-label="Operational metrics">
-          <ExtractionTrustSummary extraction={payload.extraction} heading="Extraction trust" />
+          <ExtractionTrustSummary
+            extraction={payload.extraction}
+            state={extractionConfidence}
+            heading="Extraction trust"
+          />
 
           <dl className="atlas-uwsummary__counts">
             <MetricRow
@@ -1749,4 +1761,4 @@ function AssignmentDrawer({
   );
 }
 
-export type { ExtractionField, SubmissionRecord, JobRecord };
+export type { SubmissionRecord, JobRecord };

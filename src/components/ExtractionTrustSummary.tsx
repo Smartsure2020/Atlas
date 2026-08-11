@@ -23,10 +23,9 @@ import {
   formatExtractionConfidence,
   resolveExtractionConfidence,
   type ExtractionConfidenceState,
-  type ExtractionRecordLike,
 } from "../lib/extraction-confidence";
 import type { ExtractionRecord } from "../lib/atlas";
-import { countByBand } from "../pages/RiskInformationPanel";
+import { countByBand } from "../lib/extraction-fields";
 import { CONFIDENCE_BAND, type ConfidenceBand } from "../lib/status";
 
 interface ExtractionTrustSummaryProps {
@@ -58,7 +57,7 @@ export default function ExtractionTrustSummary({
   state,
   heading = "Extraction trust",
 }: ExtractionTrustSummaryProps) {
-  const resolved = state ?? resolveExtractionConfidence(extraction as ExtractionRecordLike | null);
+  const resolved = state ?? resolveExtractionConfidence(extraction);
   const formatted = formatExtractionConfidence(resolved);
 
   const reviewed = Boolean(extraction?.reviewed_json);

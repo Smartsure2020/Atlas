@@ -19,6 +19,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ExtractionRecord } from "../lib/atlas";
+import type { ExtractionConfidenceState } from "../lib/extraction-confidence";
 import { parseReviewFieldValue, reviewValueToEditorText } from "../lib/review-edit";
 import {
   Block,
@@ -32,24 +33,9 @@ import {
 } from "../components/ui";
 import ExtractionTrustSummary from "../components/ExtractionTrustSummary";
 import { Icon } from "../components/Icon";
-import { confidenceBand, severity, type ConfidenceBand } from "../lib/status";
+import { confidenceBand, severity } from "../lib/status";
 import { formatDateTime } from "../lib/format";
-
-export interface ExtractionFieldSource {
-  document_id?: string | null;
-  file_name?: string | null;
-  page?: number | null;
-  section?: string | null;
-  snippet?: string | null;
-}
-
-export interface ExtractionField {
-  value: unknown;
-  status?: string;
-  confidence: number;
-  source?: ExtractionFieldSource;
-  notes?: string | null;
-}
+import { isExtractionField, type ExtractionField } from "../lib/extraction-fields";
 
 /** The risk sections Atlas can produce, in underwriting reading order. */
 const SECTIONS: { key: string; title: string; fields: [string, string][] }[] = [
@@ -128,40 +114,6 @@ const SECTIONS: { key: string; title: string; fields: [string, string][] }[] = [
   },
 ];
 
-export function isExtractionField(value: unknown): value is ExtractionField {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    "value" in (value as object) &&
-    "confidence" in (value as object)
-  );
-}
-
-/** Count fields whose confidence band falls into any of `bands`. */
-export function countByBand(
-  summary: Record<string, unknown> | null,
-  reviewed: boolean,
-  bands: ConfidenceBand[]
-): number {
-  if (!summary) return 0;
-  let total = 0;
-  const walk = (node: unknown) => {
-    if (!node || typeof node !== "object") return;
-    if (isExtractionField(node)) {
-      const { band } = confidenceBand(node.status, node.confidence, reviewed);
-      if (bands.includes(band)) total += 1;
-      return;
-    }
-    if (Array.isArray(node)) {
-      node.forEach(walk);
-      return;
-    }
-    Object.values(node as Record<string, unknown>).forEach(walk);
-  };
-  walk(summary);
-  return total;
-}
-
 function isWideField(value: unknown): boolean {
   if (Array.isArray(value) && value.length > 2) return true;
   const text = formatFieldValue(value);
@@ -188,6 +140,7 @@ function formatOne(item: unknown): string {
 
 export default function RiskInformationPanel({
   extraction,
+  extractionConfidence,
   canWrite,
   canManage,
   extracting,
@@ -196,6 +149,11 @@ export default function RiskInformationPanel({
 }: {
   submissionId: string;
   extraction: ExtractionRecord | null;
+  /**
+   * Pre-resolved confidence state from SubmissionDetail. Passing it down keeps
+   * every trust surface on the page in lock-step with a single resolution.
+   */
+  extractionConfidence?: ExtractionConfidenceState;
   canWrite: boolean;
   canManage: boolean;
   extracting: boolean;
@@ -308,7 +266,7 @@ export default function RiskInformationPanel({
 
   return (
     <div className="atlas-stack">
-      <ExtractionTrustSummary extraction={extraction} />
+      <ExtractionTrustSummary extraction={extraction} state={extractionConfidence} />
 
       {!reviewed && (
         <Notice tone="warning" title="This is an unreviewed extraction">

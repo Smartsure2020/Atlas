@@ -354,3 +354,161 @@ describe("Not shown when nothing is on file (equivalent to a leftover integratio
     expect(screen.queryByText(/Extraction trust/i)).toBeNull();
   });
 });
+
+/* -------------------------------------------------------------------------
+   M2 regression — crossed reviewed/provenance input
+   The extracted-only branch with source="reviewed" but no reviewed_json must
+   not tell the underwriter that a person has reviewed the extraction while
+   the Human review badge simultaneously says they have not.
+   ------------------------------------------------------------------------- */
+
+import ExtractionTrustSummary from "../components/ExtractionTrustSummary";
+import { resolveExtractionConfidence } from "../lib/extraction-confidence";
+
+describe("ExtractionTrustSummary — M2 crossed reviewed/provenance guard", () => {
+  const crossedRecord: ExtractionRecord = {
+    id: "ext_crossed",
+    extracted_json: {
+      overall_confidence: 0.6,
+      overall_confidence_available: true,
+      overall_confidence_source: "reviewed",
+    },
+    reviewed_json: null,
+    extraction_confidence: null,
+  };
+
+  it("resolves the source as provider and shows no contradictory 'reviewed' wording", () => {
+    const resolved = resolveExtractionConfidence(crossedRecord);
+    expect(resolved.state).toBe("available");
+    if (resolved.state === "available") {
+      expect(resolved.source).toBe("provider");
+    }
+
+    render(<ExtractionTrustSummary extraction={crossedRecord} />);
+
+    // Provenance label describes provider provenance, not reviewer provenance.
+    expect(screen.getByText(/Provider rating available/i)).toBeInTheDocument();
+    // The reviewer copy from the source==="reviewed" formatter must not appear.
+    expect(screen.queryByText(/reviewed the extraction/i)).toBeNull();
+    expect(screen.queryByText(/Provider rating \(reviewed\)/i)).toBeNull();
+    // Human review badge stays truthful: nobody has reviewed this.
+    expect(screen.getByText(/Awaiting human review/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Reviewed by a person$/i)).toBeNull();
+  });
+});
+
+/* -------------------------------------------------------------------------
+   M3 regression — Overview and Risk consume the SAME resolved state.
+   ExtractionTrustSummary accepts `state` and uses it verbatim when supplied.
+   The two surfaces on SubmissionDetail always supply that pre-resolved state,
+   so no independent re-resolution can drift the two views apart.
+   ------------------------------------------------------------------------- */
+
+describe("ExtractionTrustSummary — M3 authoritative state prop", () => {
+  it("uses the supplied state prop verbatim and does NOT re-resolve from the record", () => {
+    // The record on its own would resolve to `not_recorded` (empty JSONs, no
+    // legacy column). If the component silently re-resolved from the record
+    // it would render "Not recorded". We instead pass a distinct forced state
+    // and expect the DOM to reflect only THAT state.
+    const bareRecord: ExtractionRecord = {
+      id: "ext_bare",
+      extracted_json: {},
+      reviewed_json: null,
+      extraction_confidence: null,
+    };
+    // Baseline sanity: the record resolves to not_recorded on its own.
+    expect(resolveExtractionConfidence(bareRecord).state).toBe("not_recorded");
+
+    // Forced state — deliberately different from what the record would resolve to.
+    const forced: ExtractionConfidenceState = {
+      state: "available",
+      value: 0.33,
+      source: "provider",
+      available: true,
+    };
+
+    render(<ExtractionTrustSummary extraction={bareRecord} state={forced} />);
+    // Reflects the forced state.
+    expect(screen.getByText("33%")).toBeInTheDocument();
+    // Did NOT re-resolve to not_recorded.
+    expect(screen.queryByText(/Not recorded/i)).toBeNull();
+  });
+
+  it("Overview and Risk surfaces render identical headline when handed the same state", () => {
+    // Simulate the SubmissionDetail path: resolve once, thread twice.
+    const record: ExtractionRecord = {
+      id: "ext_shared",
+      extracted_json: {
+        overall_confidence: 0.55,
+        overall_confidence_available: true,
+        overall_confidence_source: "provider",
+      },
+      reviewed_json: null,
+      extraction_confidence: null,
+    };
+    const shared = resolveExtractionConfidence(record);
+
+    // "Overview" ETS
+    const overview = render(
+      <ExtractionTrustSummary extraction={record} state={shared} heading="Overview trust" />
+    );
+    const overviewMetric = overview.container.querySelector(".atlas-trust__metric")?.textContent;
+    overview.unmount();
+
+    // "Risk" ETS
+    const risk = render(
+      <ExtractionTrustSummary extraction={record} state={shared} heading="Risk trust" />
+    );
+    const riskMetric = risk.container.querySelector(".atlas-trust__metric")?.textContent;
+    risk.unmount();
+
+    expect(overviewMetric).toBe("55%");
+    expect(riskMetric).toBe("55%");
+    expect(overviewMetric).toBe(riskMetric);
+  });
+});
+
+/* -------------------------------------------------------------------------
+   M3 regression — RiskInformationPanel forwards the prop it receives.
+   ------------------------------------------------------------------------- */
+
+describe("RiskInformationPanel — forwards extractionConfidence to the trust summary", () => {
+  it("uses the parent-supplied state instead of re-resolving from the record", () => {
+    // A record that would otherwise resolve to available:0.55 provider.
+    const record: ExtractionRecord = {
+      id: "ext_forwarding",
+      extracted_json: {
+        overall_confidence: 0.55,
+        overall_confidence_available: true,
+        overall_confidence_source: "provider",
+      },
+      reviewed_json: null,
+      extraction_confidence: null,
+    };
+    // But the parent forces "unavailable". The panel must respect that.
+    const forced: ExtractionConfidenceState = {
+      state: "unavailable",
+      value: null,
+      source: "unavailable",
+      available: false,
+    };
+
+    render(
+      <RiskInformationPanel
+        submissionId="sub_1"
+        extraction={record}
+        extractionConfidence={forced}
+        canWrite={true}
+        canManage={true}
+        extracting={false}
+        onExtract={() => {}}
+        onSave={vi.fn()}
+      />
+    );
+
+    // Trust summary reflects the forced state — Unavailable, no percentage.
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
+    // If it had re-resolved from the record it would show "55%".
+    expect(screen.queryByText("55%")).toBeNull();
+  });
+});

@@ -278,3 +278,63 @@ describe("formatExtractionConfidence — display rules", () => {
     expect(formatted.explanation).not.toMatch(/70/);
   });
 });
+
+describe("resolveExtractionConfidence — crossed reviewed/provenance input (M2)", () => {
+  it("extracted-only row with source='reviewed' but no reviewed_json resolves as provider", () => {
+    const state = resolveExtractionConfidence(
+      record({
+        extracted_json: {
+          overall_confidence: 0.6,
+          overall_confidence_available: true,
+          overall_confidence_source: "reviewed",
+        },
+        reviewed_json: null,
+      })
+    );
+    expect(state.state).toBe("available");
+    if (state.state === "available") {
+      expect(state.source).toBe("provider");
+    }
+  });
+
+  it("extracted-only row with source='reviewed' and empty reviewed_json {} resolves as provider", () => {
+    const state = resolveExtractionConfidence(
+      record({
+        extracted_json: {
+          overall_confidence: 0.6,
+          overall_confidence_available: true,
+          overall_confidence_source: "reviewed",
+        },
+        reviewed_json: {},
+      })
+    );
+    expect(state.state).toBe("available");
+    if (state.state === "available") {
+      expect(state.source).toBe("provider");
+    }
+  });
+
+  it("extracted row with source='reviewed' AND a real reviewed_json still resolves via the reviewed number branch", () => {
+    // When a reviewer really has committed a reviewed_json (with its own valid
+    // number), the reviewed-number precedence branch fires — so source is
+    // "reviewed" for the legitimate reason, not from the extracted source string.
+    const state = resolveExtractionConfidence(
+      record({
+        extracted_json: {
+          overall_confidence: 0.6,
+          overall_confidence_available: true,
+          overall_confidence_source: "reviewed",
+        },
+        reviewed_json: {
+          overall_confidence: 0.72,
+          overall_confidence_available: true,
+        },
+      })
+    );
+    expect(state.state).toBe("available");
+    if (state.state === "available") {
+      expect(state.value).toBeCloseTo(0.72);
+      expect(state.source).toBe("reviewed");
+    }
+  });
+});
