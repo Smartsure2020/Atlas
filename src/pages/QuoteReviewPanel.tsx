@@ -48,6 +48,11 @@ import { EMPTY, formatDateTime, formatZAR } from "../lib/format";
 import type { WorkspaceData } from "./SubmissionDetail";
 import type { ExtractionConfidenceState } from "../lib/extraction-confidence";
 import type { SubmissionTab } from "../lib/router";
+import {
+  insurerChoiceList,
+  toneToReasonKind,
+  type InsurerChoiceEntry,
+} from "../lib/decision-workbench";
 
 type DecisionChoice = "proceed" | "refer" | "request_info" | "decline" | "override";
 
@@ -87,22 +92,10 @@ export default function QuoteReviewPanel({
   const [saving, setSaving] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const insurerChoices = useMemo(() => {
-    const top = recommendation?.reasoning_json.top;
-    return [
-      ...(top ? [{ insurer: top, group: "Recommended", ruledOut: false }] : []),
-      ...(recommendation?.secondary_options_json ?? []).map((insurer) => ({
-        insurer,
-        group: "Other viable options",
-        ruledOut: false,
-      })),
-      ...(recommendation?.not_recommended_json ?? []).map((insurer) => ({
-        insurer,
-        group: "Ruled out by appetite",
-        ruledOut: true,
-      })),
-    ];
-  }, [recommendation]);
+  const insurerChoices = useMemo<InsurerChoiceEntry[]>(
+    () => insurerChoiceList(recommendation),
+    [recommendation]
+  );
 
   const topInsurerId = recommendation?.reasoning_json.top?.insurer_id ?? "";
 
@@ -608,21 +601,6 @@ function SectionBlock({ section }: { section: QuoteReviewSection }) {
       )}
     </div>
   );
-}
-
-function toneToReasonKind(tone: string): "blocker" | "referral" | "concern" | "strength" | "info" {
-  switch (tone) {
-    case "danger":
-      return "blocker";
-    case "referral":
-      return "referral";
-    case "warning":
-      return "concern";
-    case "success":
-      return "strength";
-    default:
-      return "info";
-  }
 }
 
 /* ===========================================================================

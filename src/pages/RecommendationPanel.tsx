@@ -36,6 +36,7 @@ import type { MissingInfoItem } from "../lib/phase4";
 import { appetiteBand } from "../lib/status";
 import { formatDateTime } from "../lib/format";
 import type { SubmissionTab } from "../lib/router";
+import { groupFindings, ruleListMeta } from "../lib/decision-workbench";
 
 export default function RecommendationPanel({
   submissionId,
@@ -429,116 +430,6 @@ function InsurerBlock({
       </div>
     </article>
   );
-}
-
-function ruleListMeta(list: string) {
-  switch (list) {
-    case "preferred":
-      return { label: "Preferred", tone: "success" as const };
-    case "declined":
-    case "portfolio_declined":
-      return { label: "Declined", tone: "danger" as const };
-    case "referral":
-    case "portfolio_referral":
-      return { label: "Referral trigger", tone: "referral" as const };
-    case "caution":
-    case "portfolio_caution":
-      return { label: "Caution", tone: "warning" as const };
-    default:
-      return { label: "Base rule", tone: "neutral" as const };
-  }
-}
-
-/**
- * Turn the matcher's flat arrays into the structured reason shape the design
- * system uses: what the issue is, why it matters, and what happens next.
- */
-function groupFindings(insurer: ScoredInsurer): {
-  kind: "blocker" | "referral" | "concern" | "strength" | "info";
-  title: string;
-  body: string;
-  nextAction?: string;
-}[] {
-  const groups: ReturnType<typeof groupFindings> = [];
-
-  if (insurer.ruled_out) {
-    const declined = (insurer.matched_rules ?? []).filter(
-      (rule) => rule.list === "declined" || rule.list === "portfolio_declined"
-    );
-    groups.push({
-      kind: "blocker",
-      title: "Hard appetite failure",
-      body: declined.length
-        ? `The insurer's guideline declines this risk. Matched: ${declined
-            .flatMap((rule) => rule.matched_strings)
-            .join("; ")}.`
-        : "This risk falls outside the insurer's stated appetite, so Atlas cannot recommend it.",
-      nextAction:
-        "Placing here would need the insurer to make an exception. Record an override reason if a manager approves it.",
-    });
-  }
-
-  if (insurer.referral_required) {
-    const triggers = (insurer.matched_rules ?? [])
-      .filter((rule) => rule.list === "referral" || rule.list === "portfolio_referral")
-      .flatMap((rule) => rule.matched_strings);
-    groups.push({
-      kind: "referral",
-      title: "Referral required",
-      body: triggers.length
-        ? `The guideline requires a referral because of: ${triggers.join("; ")}.`
-        : "The guideline requires the insurer or a senior underwriter to approve this risk before you proceed.",
-      nextAction: "Prepare a referral pack with the risk summary, claims experience and mitigating factors.",
-    });
-  }
-
-  const caution = (insurer.matched_rules ?? [])
-    .filter((rule) => rule.list === "caution" || rule.list === "portfolio_caution")
-    .flatMap((rule) => rule.matched_strings);
-  if (caution.length > 0) {
-    groups.push({
-      kind: "concern",
-      title: "Written with caution",
-      body: `The guideline flags this risk for care: ${caution.join("; ")}.`,
-      nextAction: "Expect tighter terms, higher excesses, or additional warranties on this risk.",
-    });
-  }
-
-  const preferred = (insurer.matched_rules ?? [])
-    .filter((rule) => rule.list === "preferred")
-    .flatMap((rule) => rule.matched_strings);
-  if (preferred.length > 0) {
-    groups.push({
-      kind: "strength",
-      title: "Inside preferred appetite",
-      body: `The guideline actively wants this business: ${preferred.join("; ")}.`,
-    });
-  }
-
-  if ((insurer.missing_required_documents ?? []).length > 0) {
-    groups.push({
-      kind: "concern",
-      title: "Documents this insurer requires",
-      body: (insurer.missing_required_documents ?? []).join("; "),
-      nextAction: "Request these from the broker before submitting to this insurer.",
-    });
-  }
-
-  const unmatched = [
-    ...(insurer.unmatched_sections ?? []).map((item) => `section "${item}"`),
-    ...(insurer.unmatched_product_candidates ?? []).map((item) => `product "${item}"`),
-  ];
-  if (unmatched.length > 0) {
-    groups.push({
-      kind: "info",
-      title: "Not covered by any rule on file",
-      body: `Atlas found no guideline rule for ${unmatched.join(", ")}.`,
-      nextAction:
-        "Confirm the insurer's position on these directly, or ask a manager to add the missing appetite rules.",
-    });
-  }
-
-  return groups;
 }
 
 /* ===========================================================================
