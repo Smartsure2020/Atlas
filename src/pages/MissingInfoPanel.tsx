@@ -87,10 +87,14 @@ export default function MissingInfoPanel({
   } | null>(null);
   const [working, setWorking] = useState<string | null>(null);
 
-  // A stable `now` per render is enough for the day-level overdue derivation
-  // and keeps the summary and each row consistent within one paint.
-  const now = useMemo(() => new Date(), [items]);
-  const summary = useMemo(() => summariseMissingInfo(items, now), [items, now]);
+  // Day-level overdue derivation: a single `now` per render keeps the summary
+  // and each row consistent within one paint. The previous shape
+  // `useMemo(() => new Date(), [items])` was misleading — the callback never
+  // reads `items`, so the memo neither invalidates when items change nor
+  // computes anything the const wouldn't. A per-render Date is trivial and
+  // the derived summary is a small O(items) reduction.
+  const now = new Date();
+  const summary = summariseMissingInfo(items, now);
   const groups = useMemo(() => groupMissingInfo(items), [items]);
   const blocking = summary.outstanding + summary.awaiting_reply;
 

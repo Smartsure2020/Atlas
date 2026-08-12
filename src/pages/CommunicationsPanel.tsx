@@ -93,11 +93,19 @@ export default function CommunicationsPanel({
   const [warning, setWarning] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmSent, setConfirmSent] = useState<CommunicationRecord | null>(null);
-  // Track whether the last generated email was already persisted by the
-  // server so an explicit "Save to record" for a workflow draft never
-  // duplicates a saved email draft, and so we do not offer save for a draft
-  // the backend has already stored.
+  // Email drafts are always persisted server-side on generation (the endpoint
+  // inserts into atlas_communications before returning). When Supabase insert
+  // fails the response carries draft_persisted:false; recovery is to
+  // regenerate, which the warning below already asks the user to do. This
+  // flag drives the "already saved" hint on email drafts and is not a save
+  // gate — the Save-to-record action only exists for workflow drafts, which
+  // are the only source without server-side persistence at generation time.
   const [emailPersistedByServer, setEmailPersistedByServer] = useState(false);
+  // Workflow drafts have no server-side persistence at generation. Track a
+  // per-draft persisted flag locally so the Save-to-record action disappears
+  // after a successful save — this both signals success and prevents a
+  // double-save if the user re-clicks.
+  const [activeWorkflowPersisted, setActiveWorkflowPersisted] = useState(false);
 
   const openMissing = useMemo(
     () => data.missingInfo.filter((item) => item.status === "open" || item.status === "requested"),
@@ -138,6 +146,7 @@ export default function CommunicationsPanel({
       setActive({ source: "email", type });
       setDraft({ subject: result.subject, body: result.body });
       setEmailPersistedByServer(result.draft_persisted !== false);
+      setActiveWorkflowPersisted(false);
       if (result.based_on === "raw_extraction") {
         setWarning(
           "This draft was built from an unreviewed extraction. Verify every fact in it before copying or sending."
@@ -164,8 +173,10 @@ export default function CommunicationsPanel({
       setActive({ source: "workflow", type });
       setDraft({ subject: null, body: result.draft });
       // Workflow drafts are not persisted by the generation endpoint; the
-      // explicit Save to record is what stores them.
+      // explicit Save to record is what stores them. Reset both persistence
+      // flags so the fresh draft starts in the not-yet-saved state.
       setEmailPersistedByServer(false);
+      setActiveWorkflowPersisted(false);
     } catch {
       setError("The draft could not be generated. Run the extraction and quote review first.");
     } finally {
@@ -187,6 +198,7 @@ export default function CommunicationsPanel({
         related_missing_info_item_ids: openMissing.map((item) => item.id),
         related_section_keys: data.quoteSections.map((section) => section.section_key),
       });
+      setActiveWorkflowPersisted(true);
       await loadRecords();
       toast.notify("Draft saved to the communication record.", "success");
     } catch {
@@ -239,9 +251,13 @@ export default function CommunicationsPanel({
   );
   const recordGroups = useMemo(() => groupCommunications(records), [records]);
 
+  // Only workflow drafts are missing server-side persistence; email drafts
+  // are already stored on generation (or, if that insert failed, the fix is
+  // to regenerate — surfacing a separate Save-to-record path for them would
+  // duplicate the endpoint's own responsibility). Once a workflow draft has
+  // been saved this session, the action disappears too.
   const canSaveToRecord =
-    active?.source === "workflow" ||
-    (active?.source === "email" && !emailPersistedByServer);
+    active?.source === "workflow" && !activeWorkflowPersisted;
 
   return (
     <div className="atlas-stack">
@@ -327,12 +343,7 @@ export default function CommunicationsPanel({
                 </p>
               </div>
               <div className="atlas-actions">
-                {active.source === "workflow" && (
-                  <Button size="sm" loading={saving} loadingLabel="Saving…" onClick={onSaveDraft}>
-                    Save to record
-                  </Button>
-                )}
-                {active.source === "email" && !emailPersistedByServer && (
+                {canSaveToRecord && (
                   <Button size="sm" loading={saving} loadingLabel="Saving…" onClick={onSaveDraft}>
                     Save to record
                   </Button>
@@ -358,6 +369,13 @@ export default function CommunicationsPanel({
                 <p className="atlas-text-dense atlas-text-muted">
                   This draft is already saved to the communication record. Copy it into your mail
                   client, send it there, then record the manual send below.
+                </p>
+              )}
+
+              {active.source === "workflow" && activeWorkflowPersisted && (
+                <p className="atlas-text-dense atlas-text-muted">
+                  This draft is saved to the communication record. Copy it into your mail client,
+                  send it there, then record the manual send below.
                 </p>
               )}
 
@@ -400,11 +418,6 @@ export default function CommunicationsPanel({
                 />
               </div>
 
-              {!canSaveToRecord && active.source === "email" && (
-                <p className="atlas-field__hint">
-                  Saved by Atlas as part of generation — nothing more to record here.
-                </p>
-              )}
             </div>
           </div>
         )}

@@ -251,7 +251,7 @@ describe("CommunicationsPanel — draft chooser", () => {
     });
   });
 
-  it("surfaces the persistence warning when the server could not save the draft", async () => {
+  it("surfaces the persistence warning when the server could not save the draft, without offering a dead Save-to-record path", async () => {
     const user = userEvent.setup();
     generateEmailMock.mockResolvedValue({
       subject: "s",
@@ -263,8 +263,37 @@ describe("CommunicationsPanel — draft chooser", () => {
     await waitFor(() => {
       expect(screen.getByText(/could not be saved to the communication record/i)).toBeInTheDocument();
     });
-    // Because it was not persisted, Save to record is offered for the email draft too.
-    expect(screen.getByRole("button", { name: /Save to record/i })).toBeInTheDocument();
+    // The endpoint owns email persistence; recovery is to regenerate. We do
+    // NOT expose a Save-to-record button that would silently no-op because
+    // the handler only accepts workflow drafts.
+    expect(screen.queryByRole("button", { name: /Save to record/i })).toBeNull();
+    // The regenerate action remains reachable so the user can retry.
+    expect(screen.getByRole("button", { name: /Regenerate/i })).toBeInTheDocument();
+    expect(saveCommunicationMock).not.toHaveBeenCalled();
+  });
+
+  it("selecting an email draft never exposes an inert action", async () => {
+    const user = userEvent.setup();
+    // Cover both the persisted and non-persisted email response shapes.
+    for (const persisted of [true, false]) {
+      generateEmailMock.mockReset().mockResolvedValue({
+        subject: "s",
+        body: "b",
+        draft_persisted: persisted,
+      });
+      saveCommunicationMock.mockReset();
+      const { unmount } = renderPanel();
+      await user.click(screen.getByRole("button", { name: /Submit to the insurer/i }));
+      await screen.findByRole("textbox", { name: /Draft message/i });
+      // Never a Save-to-record button on either shape.
+      expect(screen.queryByRole("button", { name: /Save to record/i })).toBeNull();
+      // And no generic "Send" control ever appears.
+      expect(screen.queryByRole("button", { name: /^Send$/i })).toBeNull();
+      expect(screen.queryByRole("button", { name: /Send email/i })).toBeNull();
+      // No opportunistic save call on selection.
+      expect(saveCommunicationMock).not.toHaveBeenCalled();
+      unmount();
+    }
   });
 
   it("copy calls the clipboard without changing status or firing further requests", async () => {
@@ -289,18 +318,100 @@ describe("CommunicationsPanel — draft chooser", () => {
     expect(saveCommunicationMock).not.toHaveBeenCalled();
   });
 
-  it("Save to record for a workflow draft calls save exactly once", async () => {
+  it("transient workflow draft shows Save to record and, on click, calls saveCommunication exactly once with the expected payload", async () => {
     const user = userEvent.setup();
-    generateDraftMock.mockResolvedValue({ ok: true, draft: "Body" });
+    generateDraftMock.mockResolvedValue({ ok: true, draft: "Please supply the outstanding items." });
     saveCommunicationMock.mockResolvedValue({ ok: true, id: "cr_new" });
-    renderPanel();
+    renderPanel({
+      data: workspace({
+        missingInfo: [
+          missing({ id: "mi_a", status: "open" }),
+          missing({ id: "mi_b", status: "requested" }),
+          // Closed items must NOT be included in related_missing_info_item_ids.
+          missing({ id: "mi_c", status: "waived" }),
+        ],
+        quoteSections: [
+          { section_key: "coverage" } as never,
+          { section_key: "premium" } as never,
+        ],
+      }),
+    });
     await waitFor(() => expect(listCommunicationsMock).toHaveBeenCalled());
     await user.click(screen.getByRole("button", { name: /Outstanding information request/i }));
     await screen.findByRole("textbox", { name: /Draft message/i });
+    // Save to record is present for a transient workflow draft.
+    expect(screen.getByRole("button", { name: /Save to record/i })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Save to record/i }));
     await waitFor(() => {
       expect(saveCommunicationMock).toHaveBeenCalledTimes(1);
     });
+    // Payload contract: submission id, workflow type mapped to
+    // missing_info_request, broker audience, canonical subject, the draft
+    // body verbatim, and only the currently-active missing item ids.
+    expect(saveCommunicationMock).toHaveBeenCalledWith(
+      "sub_1",
+      expect.objectContaining({
+        communication_type: "missing_info_request",
+        audience: "broker",
+        subject: "Outstanding information request",
+        body: "Please supply the outstanding items.",
+        related_missing_info_item_ids: ["mi_a", "mi_b"],
+        related_section_keys: ["coverage", "premium"],
+      })
+    );
+    // After a successful save the action disappears — a re-click would
+    // otherwise duplicate the record.
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /Save to record/i })).toBeNull();
+    });
+    // And a saved-to-record explanation replaces it.
+    expect(
+      screen.getByText(/This draft is saved to the communication record\./i)
+    ).toBeInTheDocument();
+  });
+
+  it("persisted email draft does not expose Save to record and shows an already-saved explanation", async () => {
+    const user = userEvent.setup();
+    generateEmailMock.mockResolvedValue({
+      subject: "Re: your submission",
+      body: "Thank you for the submission…",
+      draft_persisted: true,
+    });
+    renderPanel();
+    await waitFor(() => expect(listCommunicationsMock).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: /Acknowledge the submission/i }));
+    await screen.findByRole("textbox", { name: /Draft message/i });
+    expect(screen.queryByRole("button", { name: /Save to record/i })).toBeNull();
+    expect(screen.getByText(/already saved to the communication record/i)).toBeInTheDocument();
+    expect(saveCommunicationMock).not.toHaveBeenCalled();
+  });
+
+  it("failure to save a workflow draft surfaces a recoverable notice and keeps the action available", async () => {
+    const user = userEvent.setup();
+    generateDraftMock.mockResolvedValue({ ok: true, draft: "Body" });
+    saveCommunicationMock.mockRejectedValueOnce(new Error("boom"));
+    renderPanel();
+    await user.click(screen.getByRole("button", { name: /Outstanding information request/i }));
+    await screen.findByRole("textbox", { name: /Draft message/i });
+    await user.click(screen.getByRole("button", { name: /Save to record/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/could not be saved to the communication record/i)).toBeInTheDocument();
+    });
+    // Action stays available so the user can retry.
+    expect(screen.getByRole("button", { name: /Save to record/i })).toBeInTheDocument();
+  });
+
+  it("read-only users never see Save to record on a workflow draft", async () => {
+    const user = userEvent.setup();
+    generateDraftMock.mockResolvedValue({ ok: true, draft: "Body" });
+    renderPanel({ canWrite: false });
+    // Chooser buttons are disabled, so no draft can be generated as a
+    // read-only user. The invariant we prove is that the record-list Save
+    // affordance is absent from the whole page.
+    expect(screen.queryByRole("button", { name: /Save to record/i })).toBeNull();
+    // Even if the chooser were bypassed, the generation call is a no-op.
+    await user.click(screen.getByRole("button", { name: /Outstanding information request/i }));
+    expect(generateDraftMock).not.toHaveBeenCalled();
   });
 });
 

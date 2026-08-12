@@ -41,19 +41,69 @@ export interface MissingInfoSummary {
   active_owners: MissingInfoOwner[];
 }
 
-/** Compare `due_date` (YYYY-MM-DD) against `today` deterministically. */
+/**
+ * Overdue policy — single consistent local-calendar-day comparison.
+ *
+ * A due date is a business date, not a moment in time. The comparison is:
+ *   - due_date < today's local calendar date → overdue
+ *   - due_date == today's local calendar date → NOT overdue
+ *   - due_date > today's local calendar date → NOT overdue
+ *   - missing / malformed → NOT overdue
+ *
+ * `due_date` is authored as YYYY-MM-DD, which `new Date(str)` parses as
+ * midnight UTC — that shifts the calendar day in any negative-offset locale.
+ * We therefore never construct a Date from a bare date string; we compare
+ * literal date keys instead. Full timestamps (if ever received) are converted
+ * to a local calendar key via `getFullYear/getMonth/getDate`. Never mix
+ * `getUTC*` and local `get*` in the same comparison.
+ */
+
+/** YYYY-MM-DD key from a date-only literal or a full timestamp; null if unparseable. */
+function calendarDayKey(value: string | Date): string | null {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return formatLocalDayKey(value);
+  }
+  // Date-only literal: preserve the authored calendar day exactly. Any leading
+  // "YYYY-MM-DD" prefix is accepted so trailing time+zone components (rare but
+  // possible if the field ever widens) do not shift the day.
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (match) {
+    const [, y, m, d] = match;
+    const month = Number(m);
+    const day = Number(d);
+    if (
+      month < 1 || month > 12 ||
+      day < 1 || day > 31
+    ) return null;
+    return `${y}-${m}-${d}`;
+  }
+  // Fall back to parsing as a timestamp and reading the LOCAL calendar day.
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return formatLocalDayKey(parsed);
+}
+
+function formatLocalDayKey(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+/** Compare `due_date` against `today` at local calendar-day granularity. */
 export function isOverdue(
   item: Pick<MissingInfoItem, "status" | "due_date">,
   today: Date
 ): boolean {
   if (item.status !== "requested" && item.status !== "open") return false;
   if (!item.due_date) return false;
-  const due = new Date(item.due_date);
-  if (Number.isNaN(due.getTime())) return false;
-  // Compare at day granularity — a due date on today is not yet overdue.
-  const dueDay = Date.UTC(due.getUTCFullYear(), due.getUTCMonth(), due.getUTCDate());
-  const nowDay = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
-  return dueDay < nowDay;
+  const dueKey = calendarDayKey(item.due_date);
+  if (!dueKey) return false;
+  const todayKey = formatLocalDayKey(today);
+  // Lexicographic comparison on zero-padded YYYY-MM-DD is equivalent to
+  // calendar order.
+  return dueKey < todayKey;
 }
 
 export function summariseMissingInfo(
