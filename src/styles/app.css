@@ -1391,6 +1391,11 @@
     height: auto;
     width: auto;
     overflow: visible;
+    /* Reset white-space: the caption inherits `nowrap` from `.atlas-sr-only`
+       (base.css). Without this reset the caption forces a ~1548px intrinsic
+       width, which then makes the useHorizontalOverflow wrapper expose a
+       redundant role="region"/tabIndex=0 in the stacked mobile layout. */
+    white-space: normal;
     margin: 0 0 var(--atlas-space-3);
     font-size: var(--atlas-fs-label);
     color: var(--atlas-ink-muted);
@@ -1854,13 +1859,16 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  /* The rail becomes an ordinary block above the content. */
+  /* Rail wraps under the primary tab content so the underwriter's active
+     work (Overview, Risk, Recommendation, Quote Review) is visible without
+     scrolling past the metadata cards on tablet and mobile. The source
+     order already puts primary content first — we deliberately do NOT set
+     `order: -1` here so visual order matches DOM/accessibility order. */
   .atlas-workspace__rail {
     position: static;
     max-height: none;
     flex-direction: row;
     flex-wrap: wrap;
-    order: -1;
   }
 
   .atlas-workspace__rail-card {
