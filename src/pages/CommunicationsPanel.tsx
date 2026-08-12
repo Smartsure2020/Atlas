@@ -450,7 +450,7 @@ export default function CommunicationsPanel({
                     ({group.items.length})
                   </span>
                 </h3>
-                <ul className="atlas-list">
+                <ul className="atlas-list atlas-list--stack-sm">
                   {group.items.map((record) => (
                     <CommunicationRow
                       key={record.id}
@@ -654,7 +654,7 @@ function ReferralReadiness({
         </Notice>
       )}
 
-      <ul className="atlas-list" style={{ marginTop: "var(--atlas-space-4)" }}>
+      <ul className="atlas-list atlas-list--stack-sm" style={{ marginTop: "var(--atlas-space-4)" }}>
         {checks.map((check) => (
           <li className="atlas-list__item" key={check.label}>
             <div className="atlas-list__main">

@@ -293,6 +293,47 @@ describe("MissingInfoPanel — cross-tab and no-write behaviour", () => {
   });
 });
 
+describe("MissingInfoPanel — responsive treatment", () => {
+  it("opts into the scoped mobile-stack modifier on lifecycle lists", () => {
+    renderPanel({
+      items: [
+        item({
+          id: "overdue-row",
+          title: "Three years of claims experience",
+          status: "requested",
+          due_date: "2020-01-01",
+        }),
+      ],
+    });
+    const list = screen.getByText(/Three years of claims experience/).closest("ul")!;
+    expect(list).toHaveClass("atlas-list");
+    expect(list).toHaveClass("atlas-list--stack-sm");
+  });
+
+  it("keeps the title, main content and both requested + overdue badges on the row", () => {
+    renderPanel({
+      items: [
+        item({
+          id: "overdue-row",
+          title: "Three years of claims experience",
+          status: "requested",
+          due_date: "2020-01-01",
+        }),
+      ],
+    });
+    const row = screen.getByText(/Three years of claims experience/).closest("li")!;
+    expect(within(row).getByText(/Three years of claims experience/)).toBeInTheDocument();
+    // The main content region is preserved so the title never gets crowded out.
+    expect(row.querySelector(".atlas-list__main")).not.toBeNull();
+    // Requested + overdue badges both survive the scoped treatment.
+    expect(within(row).getByText(/Requested/)).toBeInTheDocument();
+    expect(within(row).getByText(/Overdue/)).toBeInTheDocument();
+    // Action buttons remain reachable and correctly labelled.
+    expect(within(row).getByRole("button", { name: /Mark received/i })).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: /Edit/i })).toBeInTheDocument();
+  });
+});
+
 describe("MissingInfoPanel — axe", () => {
   it("is axe-clean when populated", async () => {
     const { container } = renderPanel({

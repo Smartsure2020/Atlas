@@ -440,6 +440,44 @@ describe("CommunicationsPanel — record and manual-send confirmation", () => {
   });
 });
 
+describe("CommunicationsPanel — responsive treatment", () => {
+  it("opts the record list into the scoped mobile-stack modifier", async () => {
+    listCommunicationsMock.mockResolvedValue({
+      communications: [
+        record({ id: "cr_1", subject: "Claims history chase", status: "draft" }),
+      ],
+    });
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText(/Claims history chase/i)).toBeInTheDocument();
+    });
+    const list = screen.getByText(/Claims history chase/i).closest("ul")!;
+    expect(list).toHaveClass("atlas-list");
+    expect(list).toHaveClass("atlas-list--stack-sm");
+  });
+
+  it("keeps subject, lifecycle badge and both actions on a draft row", async () => {
+    listCommunicationsMock.mockResolvedValue({
+      communications: [
+        record({ id: "cr_1", subject: "Claims history follow-up", status: "draft" }),
+      ],
+    });
+    renderPanel();
+    await waitFor(() => {
+      expect(screen.getByText(/Claims history follow-up/)).toBeInTheDocument();
+    });
+    const row = screen.getByText(/Claims history follow-up/).closest("li")!;
+    expect(within(row).getByText(/Claims history follow-up/)).toBeInTheDocument();
+    expect(row.querySelector(".atlas-list__main")).not.toBeNull();
+    // Lifecycle badge remains present on the side region.
+    const side = row.querySelector(".atlas-list__side")!;
+    expect(within(side as HTMLElement).getByText(/Draft/i)).toBeInTheDocument();
+    // Copy + Record manual send actions remain reachable and correctly labelled.
+    expect(within(row).getByRole("button", { name: /Copy message/i })).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: /Record manual send/i })).toBeInTheDocument();
+  });
+});
+
 describe("CommunicationsPanel — history error and clipboard fallback", () => {
   it("shows a recoverable notice when the history fails to load and offers retry", async () => {
     listCommunicationsMock.mockRejectedValueOnce(new Error("boom"));

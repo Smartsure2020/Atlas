@@ -1732,6 +1732,24 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   gap: var(--atlas-space-2);
 }
 
+/* Scoped Phase 4 modifier — stacks rows on narrow viewports so the main
+   content region stays full-width and the badges/actions wrap naturally
+   instead of pushing the row past the viewport. Applied only where opted in;
+   desktop and tablet layouts are unchanged. */
+@media (max-width: 640px) {
+  .atlas-list--stack-sm .atlas-list__item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .atlas-list--stack-sm .atlas-list__side {
+    flex: none;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}
+
 /* A ranked count list — replaces pie/donut charts for category breakdowns. */
 .atlas-rank {
   list-style: none;

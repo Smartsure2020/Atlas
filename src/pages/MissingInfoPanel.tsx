@@ -218,7 +218,7 @@ export default function MissingInfoPanel({
                 <p className="atlas-text-dense atlas-text-muted" style={{ margin: "2px 0 12px" }}>
                   {group.body}
                 </p>
-                <ul className="atlas-list">
+                <ul className="atlas-list atlas-list--stack-sm">
                   {group.items.map((item) => {
                     const overdue = isOverdue(item, now);
                     return (
