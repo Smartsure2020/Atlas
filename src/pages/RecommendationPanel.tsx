@@ -13,7 +13,15 @@
  * The governance disclaimer renders unconditionally, above everything.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { GovernanceDisclaimer } from "../components/GovernanceDisclaimer";
 import {
   Button,
@@ -743,6 +751,43 @@ function ComparisonMatrix({
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollable = useHorizontalOverflow(scrollRef, [shown]);
 
+  // Keyboard scrolling for the overflowing comparison region. Only intercept
+  // when the region itself is focused: `target !== currentTarget` means the
+  // key originated inside an interactive descendant (a button, input, select,
+  // textarea, link or disclosure control), and we must not hijack it.
+  //
+  // Atlas currently ships LTR only — no `dir="rtl"` in the tree, no logical
+  // scroll properties in the design system. If RTL support is ever added,
+  // ArrowLeft/ArrowRight should swap based on the region's computed direction.
+  const onScrollKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget) return;
+      const node = event.currentTarget;
+      // ~80% of the visible width — one page, minus a sliver of context so the
+      // reader keeps their bearings. Floor guarantees movement on very narrow
+      // viewports where 80% would otherwise round to zero.
+      const step = Math.max(40, Math.round(node.clientWidth * 0.8));
+      switch (event.key) {
+        case "ArrowRight":
+          node.scrollBy({ left: step, behavior: "auto" });
+          break;
+        case "ArrowLeft":
+          node.scrollBy({ left: -step, behavior: "auto" });
+          break;
+        case "Home":
+          node.scrollTo({ left: 0, behavior: "auto" });
+          break;
+        case "End":
+          node.scrollTo({ left: node.scrollWidth, behavior: "auto" });
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+    },
+    []
+  );
+
   return (
     <div style={{ marginTop: "var(--atlas-space-4)" }}>
       <fieldset className="atlas-matrix__picker">
@@ -789,6 +834,7 @@ function ComparisonMatrix({
                   "aria-label":
                     "Insurer comparison — scroll to see every criterion and insurer",
                   tabIndex: 0,
+                  onKeyDown: onScrollKeyDown,
                 }
               : {})}
           >

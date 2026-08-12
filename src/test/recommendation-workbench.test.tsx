@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, within, act } from "@testing-library/react";
+import { render, screen, within, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { axe } from "vitest-axe";
 
@@ -554,6 +554,206 @@ describe("RecommendationPanel — comparison scroll region", () => {
     expect(roCallbacks.length).toBeGreaterThan(0);
     unmount();
     expect(roCallbacks.length).toBe(0);
+  });
+});
+
+describe("RecommendationPanel — comparison keyboard scrolling", () => {
+  const roCallbacks: ResizeObserverCallback[] = [];
+
+  class FakeResizeObserver {
+    private cb: ResizeObserverCallback;
+    constructor(cb: ResizeObserverCallback) {
+      this.cb = cb;
+      roCallbacks.push(cb);
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {
+      const index = roCallbacks.indexOf(this.cb);
+      if (index >= 0) roCallbacks.splice(index, 1);
+    }
+  }
+
+  beforeEach(() => {
+    roCallbacks.length = 0;
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // jsdom does not lay out or scroll. We install measurable widths and
+  // scrollLeft, then wire scrollBy/scrollTo to mutate scrollLeft the same way
+  // a real browser would, so the assertions describe the component's chosen
+  // behaviour rather than jsdom internals.
+  function makeScrollable(
+    node: HTMLElement,
+    { scrollWidth, clientWidth }: { scrollWidth: number; clientWidth: number }
+  ) {
+    Object.defineProperty(node, "scrollWidth", {
+      configurable: true,
+      value: scrollWidth,
+    });
+    Object.defineProperty(node, "clientWidth", {
+      configurable: true,
+      value: clientWidth,
+    });
+    let scrollLeft = 0;
+    Object.defineProperty(node, "scrollLeft", {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => {
+        const max = Math.max(0, scrollWidth - clientWidth);
+        scrollLeft = Math.max(0, Math.min(max, value));
+      },
+    });
+    const scrollByMock = vi.fn((opts: ScrollToOptions) => {
+      const max = Math.max(0, scrollWidth - clientWidth);
+      scrollLeft = Math.max(0, Math.min(max, scrollLeft + (opts.left ?? 0)));
+    });
+    const scrollToMock = vi.fn((opts: ScrollToOptions) => {
+      const max = Math.max(0, scrollWidth - clientWidth);
+      scrollLeft = Math.max(0, Math.min(max, opts.left ?? 0));
+    });
+    (node as unknown as { scrollBy: typeof scrollByMock }).scrollBy = scrollByMock;
+    (node as unknown as { scrollTo: typeof scrollToMock }).scrollTo = scrollToMock;
+    return { scrollByMock, scrollToMock };
+  }
+
+  async function openComparison() {
+    const user = userEvent.setup();
+    const rendered = renderPanel();
+    await user.click(screen.getByRole("button", { name: /Compare/i }));
+    const scroll = rendered.container.querySelector(
+      ".atlas-matrix-scroll"
+    ) as HTMLElement;
+    return { user, ...rendered, scroll };
+  }
+
+  function overflow(scroll: HTMLElement, dims = { scrollWidth: 1200, clientWidth: 400 }) {
+    const controls = makeScrollable(scroll, dims);
+    act(() => {
+      roCallbacks.forEach((cb) => cb([], {} as ResizeObserver));
+    });
+    return controls;
+  }
+
+  it("exposes the named focusable region once the comparison overflows", async () => {
+    const { scroll } = await openComparison();
+    overflow(scroll);
+    const region = screen.getByRole("region", { name: /Insurer comparison/i });
+    expect(region).toBe(scroll);
+    expect(region).toHaveAttribute("tabindex", "0");
+  });
+
+  it("ArrowRight advances scrollLeft", async () => {
+    const { scroll } = await openComparison();
+    const { scrollByMock } = overflow(scroll, { scrollWidth: 1200, clientWidth: 400 });
+    scroll.focus();
+    fireEvent.keyDown(scroll, { key: "ArrowRight" });
+    expect(scrollByMock).toHaveBeenCalledTimes(1);
+    const step = scrollByMock.mock.calls[0][0]!.left as number;
+    expect(step).toBeGreaterThan(0);
+    // ~80% of clientWidth (400) → around 320.
+    expect(step).toBeGreaterThanOrEqual(300);
+    expect(step).toBeLessThanOrEqual(340);
+    expect(scroll.scrollLeft).toBe(step);
+  });
+
+  it("ArrowLeft reduces scrollLeft", async () => {
+    const { scroll } = await openComparison();
+    const { scrollByMock } = overflow(scroll, { scrollWidth: 1200, clientWidth: 400 });
+    scroll.focus();
+    // Move right first so there is somewhere to move back to.
+    fireEvent.keyDown(scroll, { key: "ArrowRight" });
+    const forward = scroll.scrollLeft;
+    fireEvent.keyDown(scroll, { key: "ArrowLeft" });
+    expect(scrollByMock).toHaveBeenCalledTimes(2);
+    expect(scrollByMock.mock.calls[1][0]!.left).toBeLessThan(0);
+    expect(scroll.scrollLeft).toBeLessThan(forward);
+  });
+
+  it("Home sets scrollLeft to 0", async () => {
+    const { scroll } = await openComparison();
+    const { scrollToMock } = overflow(scroll, { scrollWidth: 1200, clientWidth: 400 });
+    scroll.focus();
+    // Get somewhere non-zero, then Home.
+    fireEvent.keyDown(scroll, { key: "End" });
+    expect(scroll.scrollLeft).toBeGreaterThan(0);
+    fireEvent.keyDown(scroll, { key: "Home" });
+    const calls = scrollToMock.mock.calls;
+    const last = calls[calls.length - 1];
+    expect(last[0]!.left).toBe(0);
+    expect(scroll.scrollLeft).toBe(0);
+  });
+
+  it("End moves to the maximum horizontal position", async () => {
+    const { scroll } = await openComparison();
+    const { scrollToMock } = overflow(scroll, { scrollWidth: 1200, clientWidth: 400 });
+    scroll.focus();
+    fireEvent.keyDown(scroll, { key: "End" });
+    // Component passes scrollWidth; the browser (and our stub) clamps to max.
+    const arg = scrollToMock.mock.calls[0][0]!.left as number;
+    expect(arg).toBe(1200);
+    expect(scroll.scrollLeft).toBe(1200 - 400);
+  });
+
+  it("calls preventDefault only for keys it handles", async () => {
+    const { scroll } = await openComparison();
+    overflow(scroll);
+    scroll.focus();
+    for (const key of ["ArrowRight", "ArrowLeft", "Home", "End"]) {
+      const evt = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      scroll.dispatchEvent(evt);
+      expect(evt.defaultPrevented).toBe(true);
+    }
+  });
+
+  it("ignores unrelated keys without preventing default and without scrolling", async () => {
+    const { scroll } = await openComparison();
+    const { scrollByMock, scrollToMock } = overflow(scroll);
+    scroll.focus();
+    for (const key of ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "a", " "]) {
+      const evt = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      scroll.dispatchEvent(evt);
+      expect(evt.defaultPrevented).toBe(false);
+    }
+    expect(scrollByMock).not.toHaveBeenCalled();
+    expect(scrollToMock).not.toHaveBeenCalled();
+  });
+
+  it("does not hijack keyboard events originating inside interactive descendants", async () => {
+    const { scroll } = await openComparison();
+    const { scrollByMock, scrollToMock } = overflow(scroll);
+    // Anything nested inside the scroll region stands in for an interactive
+    // descendant — the handler must ignore events whose target is not the
+    // region itself.
+    const inner = scroll.querySelector("table") as HTMLElement;
+    expect(inner).not.toBeNull();
+    const evt = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    inner.dispatchEvent(evt);
+    expect(evt.defaultPrevented).toBe(false);
+    expect(scrollByMock).not.toHaveBeenCalled();
+    expect(scrollToMock).not.toHaveBeenCalled();
+  });
+
+  it("does not attach scroll-key behaviour when the comparison does not overflow", async () => {
+    const { scroll } = await openComparison();
+    // No overflow → no role, no tabindex, no onKeyDown wiring.
+    expect(scroll).not.toHaveAttribute("role");
+    expect(scroll).not.toHaveAttribute("tabindex");
+    const scrollByMock = vi.fn();
+    const scrollToMock = vi.fn();
+    (scroll as unknown as { scrollBy: typeof scrollByMock }).scrollBy = scrollByMock;
+    (scroll as unknown as { scrollTo: typeof scrollToMock }).scrollTo = scrollToMock;
+    fireEvent.keyDown(scroll, { key: "ArrowRight" });
+    fireEvent.keyDown(scroll, { key: "End" });
+    expect(scrollByMock).not.toHaveBeenCalled();
+    expect(scrollToMock).not.toHaveBeenCalled();
   });
 });
 
