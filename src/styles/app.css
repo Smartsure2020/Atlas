@@ -285,7 +285,7 @@
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--atlas-nav-ink-muted);
+  color: var(--atlas-nav-ink-role);
 }
 
 /* Collapsed rail: icons only, labels become accessible names. */
@@ -974,11 +974,102 @@
 
 /* ---- Recommendation ------------------------------------------------------ */
 
+/* Decision-oriented snapshot above the ranked view. Compact, calm, and never
+   competing with the ranked/comparison detail below. */
 .atlas-reco__summary {
-  padding: var(--atlas-space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+  padding: var(--atlas-space-4) var(--atlas-space-5);
   border: 1px solid var(--atlas-border);
+  border-left: 3px solid var(--atlas-primary);
   border-radius: var(--atlas-radius-card);
   background: var(--atlas-surface);
+  box-shadow: var(--atlas-shadow-sm);
+}
+
+.atlas-reco__summary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--atlas-space-4);
+  flex-wrap: wrap;
+}
+
+.atlas-reco__summary-eyebrow {
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+.atlas-reco__summary-title {
+  font-size: var(--atlas-fs-section);
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  margin: 2px 0 0;
+  line-height: var(--atlas-lh-snug);
+}
+
+.atlas-reco__summary-flags {
+  display: flex;
+  align-items: center;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.atlas-reco__summary-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--atlas-space-3) var(--atlas-space-4);
+  padding: var(--atlas-space-3) 0 0;
+  margin: 0;
+  border-top: 1px solid var(--atlas-border);
+}
+
+.atlas-reco__summary-count {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.atlas-reco__summary-count dt {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  letter-spacing: 0.03em;
+}
+
+.atlas-reco__summary-count dd {
+  margin: 0;
+  font-size: var(--atlas-fs-metric);
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.atlas-reco__summary-count--emphasise dt {
+  color: var(--atlas-warning-ink);
+  font-weight: var(--atlas-fw-semibold);
+}
+
+.atlas-reco__summary-meta {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+@media (max-width: 600px) {
+  .atlas-reco__summary {
+    padding: var(--atlas-space-4);
+  }
+  .atlas-reco__summary-count dd {
+    font-size: var(--atlas-fs-sub);
+  }
 }
 
 .atlas-reco__headline {
@@ -986,6 +1077,7 @@
   line-height: var(--atlas-lh-snug);
   color: var(--atlas-ink);
   max-width: var(--atlas-prose-max);
+  margin: 0;
 }
 
 .atlas-reco__divider {
@@ -1221,6 +1313,252 @@
   font-size: var(--atlas-fs-label);
   color: var(--atlas-ink-muted);
   line-height: var(--atlas-lh-snug);
+}
+
+.atlas-matrix__role {
+  display: block;
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-medium);
+  letter-spacing: 0.03em;
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-matrix thead th[data-pinned="true"] .atlas-matrix__role {
+  color: var(--atlas-primary-ink);
+  font-weight: var(--atlas-fw-semibold);
+}
+
+/* Per-cell insurer label. On desktop the column header already names the
+   insurer, so this is display:none (out of the a11y tree — no duplicate
+   announcement). It becomes a real, visible, announced label at the stacked
+   breakpoint where the header is dropped. */
+.atlas-matrix__mobile-insurer {
+  display: none;
+}
+
+/* Cells that carry the majority signature stay quiet; cells that differ are
+   marked so the eye lands on them. Never colour alone — the sr-only marker
+   in the DOM tells screen readers the same story.
+
+   Quieting uses a recessed cell surface rather than opacity: dimming the whole
+   cell composited the success badge ("None") and note text down to ~4.0:1,
+   below WCAG AA. A sunken surface leaves every foreground token at full
+   strength (success badge 8.2:1, note 4.96:1) while still setting uniform rows
+   back from the ones that differ. The sticky row header keeps its own surface. */
+.atlas-matrix tr[data-uniform="true"] td {
+  background: var(--atlas-surface-sunken);
+}
+
+.atlas-matrix td[data-differs="true"] {
+  background: var(--atlas-accent-surface);
+  box-shadow: inset 3px 0 0 var(--atlas-accent);
+}
+
+.atlas-matrix__picker {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--atlas-space-4);
+}
+
+/* When the comparison actually overflows it becomes a keyboard tab stop
+   (role="region", tabindex=0 applied in the component) so it can be reached
+   and scrolled with the arrow keys. Its wrapper clips overflow, so the focus
+   ring is inset to stay visible. */
+.atlas-matrix-scroll:focus-visible {
+  outline: 2px solid var(--atlas-focus-ring);
+  outline-offset: -2px;
+  border-radius: var(--atlas-radius-card);
+}
+
+/* Mobile: transpose the table into per-criterion stacked blocks so nothing
+   is clipped at 375px. The thead is dropped visually; each cell carries a real
+   DOM insurer label (.atlas-matrix__mobile-insurer) so the row header + insurer
+   name still sit next to the value without relying on generated content. */
+@media (max-width: 600px) {
+  .atlas-matrix-wrap .atlas-table-scroll {
+    overflow-x: visible;
+  }
+
+  .atlas-matrix {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .atlas-matrix caption {
+    position: static;
+    clip: auto;
+    height: auto;
+    width: auto;
+    overflow: visible;
+    /* Reset white-space: the caption inherits `nowrap` from `.atlas-sr-only`
+       (base.css). Without this reset the caption forces a ~1548px intrinsic
+       width, which then makes the useHorizontalOverflow wrapper expose a
+       redundant role="region"/tabIndex=0 in the stacked mobile layout. */
+    white-space: normal;
+    margin: 0 0 var(--atlas-space-3);
+    font-size: var(--atlas-fs-label);
+    color: var(--atlas-ink-muted);
+  }
+
+  .atlas-matrix thead {
+    display: none;
+  }
+
+  .atlas-matrix tbody,
+  .atlas-matrix tr {
+    display: block;
+  }
+
+  .atlas-matrix tr {
+    margin-bottom: var(--atlas-space-3);
+    padding: var(--atlas-space-3);
+    border: 1px solid var(--atlas-border);
+    border-radius: var(--atlas-radius-card);
+    background: var(--atlas-surface);
+  }
+
+  .atlas-matrix tbody th {
+    display: block;
+    position: static;
+    min-width: 0;
+    padding: 0 0 var(--atlas-space-2);
+    border-right: 0;
+    border-bottom: 1px solid var(--atlas-border);
+    margin-bottom: var(--atlas-space-2);
+    color: var(--atlas-ink);
+    font-size: var(--atlas-fs-dense);
+    font-weight: var(--atlas-fw-semibold);
+    background: transparent;
+  }
+
+  .atlas-matrix td {
+    display: block;
+    padding: var(--atlas-space-2) 0;
+    border-bottom: 1px dashed var(--atlas-border);
+  }
+
+  .atlas-matrix td:last-child {
+    border-bottom: 0;
+  }
+
+  .atlas-matrix__mobile-insurer {
+    display: block;
+    font-size: var(--atlas-fs-label);
+    font-weight: var(--atlas-fw-medium);
+    color: var(--atlas-ink-muted);
+    margin-bottom: 4px;
+  }
+
+  .atlas-matrix td[data-differs="true"] {
+    padding-left: var(--atlas-space-2);
+    border-left: 3px solid var(--atlas-accent);
+    background: var(--atlas-accent-surface);
+    border-radius: var(--atlas-radius-control);
+  }
+}
+
+/* ===========================================================================
+   Decision workbench — quote review + placement decision layout
+   ---------------------------------------------------------------------------
+   At wide viewports the review runs down the main column and the decision
+   form sits as a restrained right-hand rail. At tablet and mobile widths the
+   rail returns to normal document flow and any sticky positioning is dropped
+   so it can never cover the tab rail, dialogs or focus targets.
+   =========================================================================== */
+
+.atlas-decision-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--atlas-space-4);
+  align-items: start;
+}
+
+.atlas-decision-workbench__main {
+  min-width: 0;
+}
+
+.atlas-decision-workbench__rail {
+  position: sticky;
+  top: calc(var(--atlas-topbar-h) + 120px);
+  max-height: calc(100vh - var(--atlas-topbar-h) - 140px);
+  overflow-y: auto;
+  min-width: 0;
+}
+
+/* Tablet and below: fall back to a single column and drop sticky. */
+@media (max-width: 1100px) {
+  .atlas-decision-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .atlas-decision-workbench__rail {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+  }
+}
+
+/* Compact strip that keeps Atlas's recommendation and the pending human
+   selection visually separate at the top of the decision card. */
+.atlas-decision__context {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--atlas-space-2) var(--atlas-space-4);
+  padding: var(--atlas-space-3) var(--atlas-space-4);
+  margin: 0 0 var(--atlas-space-4);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-control);
+  background: var(--atlas-surface-muted);
+}
+
+.atlas-decision__context-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.atlas-decision__context-item dt {
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-decision__context-item dd {
+  margin: 0;
+  font-size: var(--atlas-fs-body);
+  color: var(--atlas-ink);
+  display: flex;
+  align-items: center;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+}
+
+.atlas-decision__context-badge {
+  margin-left: auto;
+}
+
+@media (min-width: 500px) {
+  .atlas-decision__context {
+    grid-template-columns: 1fr 1fr;
+  }
+  .atlas-decision__context-badge {
+    margin-left: 0;
+  }
+}
+
+/* Section-status summary — small strip of counts above the section list. */
+.atlas-decision__section-counts {
+  display: flex;
+  align-items: center;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+  padding: var(--atlas-space-3) 0 0;
+  margin: var(--atlas-space-3) 0 0;
+  border-top: 1px solid var(--atlas-border);
 }
 
 /* ===========================================================================
@@ -1521,13 +1859,16 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  /* The rail becomes an ordinary block above the content. */
+  /* Rail wraps under the primary tab content so the underwriter's active
+     work (Overview, Risk, Recommendation, Quote Review) is visible without
+     scrolling past the metadata cards on tablet and mobile. The source
+     order already puts primary content first — we deliberately do NOT set
+     `order: -1` here so visual order matches DOM/accessibility order. */
   .atlas-workspace__rail {
     position: static;
     max-height: none;
     flex-direction: row;
     flex-wrap: wrap;
-    order: -1;
   }
 
   .atlas-workspace__rail-card {

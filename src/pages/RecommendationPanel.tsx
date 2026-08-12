@@ -13,7 +13,15 @@
  * The governance disclaimer renders unconditionally, above everything.
  */
 
-import { useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { GovernanceDisclaimer } from "../components/GovernanceDisclaimer";
 import {
   Button,
@@ -36,6 +44,12 @@ import type { MissingInfoItem } from "../lib/phase4";
 import { appetiteBand } from "../lib/status";
 import { formatDateTime } from "../lib/format";
 import type { SubmissionTab } from "../lib/router";
+import {
+  classifyComparisonRow,
+  groupFindings,
+  ruleListMeta,
+  summariseRecommendation,
+} from "../lib/decision-workbench";
 
 export default function RecommendationPanel({
   submissionId,
@@ -208,7 +222,10 @@ export default function RecommendationPanel({
           />
         ) : (
           <>
-            <p className="atlas-reco__headline">{recommendation.reasoning_json.headline}</p>
+            <RecommendationSummary
+              recommendation={recommendation}
+              openMissingInfoCount={openMissingInfo.length}
+            />
 
             {openMissingInfo.length > 0 && (
               <div style={{ marginTop: "var(--atlas-space-4)" }}>
@@ -275,6 +292,145 @@ export default function RecommendationPanel({
           </>
         )}
       </Card>
+    </div>
+  );
+}
+
+/* ===========================================================================
+   Decision-oriented recommendation summary
+   ---------------------------------------------------------------------------
+   A compact snapshot above the ranked view. Communicates the top-level
+   answer, the review/referral flags and the counts an underwriter needs to
+   decide whether to keep reading. Nothing here is invented — every value is
+   derived from the recommendation payload the Worker already returns.
+   =========================================================================== */
+
+function RecommendationSummary({
+  recommendation,
+  openMissingInfoCount,
+}: {
+  recommendation: Recommendation;
+  openMissingInfoCount: number;
+}) {
+  const summary = summariseRecommendation(recommendation);
+  const top = recommendation.reasoning_json.top ?? null;
+
+  return (
+    <section className="atlas-reco__summary" aria-label="Recommendation summary">
+      <div className="atlas-reco__summary-head">
+        <div>
+          <p className="atlas-reco__summary-eyebrow">Atlas recommendation</p>
+          <p className="atlas-reco__summary-title">
+            {summary.hasViableTop
+              ? summary.topInsurerName
+              : "No insurer cleared appetite"}
+          </p>
+        </div>
+        <div className="atlas-reco__summary-flags">
+          {top ? (
+            <StatusBadge status={appetiteBand(top.band)} strong />
+          ) : (
+            <StatusBadge status={{ label: "Ruled out across the panel", tone: "danger" }} strong />
+          )}
+          {summary.requiresReferral && (
+            <StatusBadge
+              status={{
+                label: "Referral required",
+                tone: "referral",
+                description: "At least one recommended insurer requires a referral.",
+              }}
+            />
+          )}
+          {summary.requiresSeniorReview && (
+            <StatusBadge
+              status={{
+                label: "Senior review",
+                tone: "referral",
+                description: "A senior underwriter must sign this off.",
+              }}
+            />
+          )}
+          {summary.requiresManualReview && (
+            <StatusBadge
+              status={{
+                label: "Manual review",
+                tone: "warning",
+                description:
+                  "Atlas could not match a reliable product-level rule for the top pick. Treat the ranking as provisional.",
+              }}
+            />
+          )}
+        </div>
+      </div>
+
+      <p className="atlas-reco__headline">{recommendation.reasoning_json.headline}</p>
+
+      <dl className="atlas-reco__summary-counts" aria-label="Recommendation counts">
+        <SummaryCount
+          label="Viable insurers"
+          value={summary.viableCount}
+          hint="Insurers Atlas can recommend, including the top pick."
+        />
+        <SummaryCount
+          label="Ruled out"
+          value={summary.ruledOutCount}
+          hint="Insurers ruled out by a hard appetite failure."
+          emphasise={summary.ruledOutCount > 0}
+        />
+        <SummaryCount
+          label="Matched rules"
+          value={summary.matchedRuleCount}
+          hint="Appetite rules Atlas matched across the viable insurers."
+        />
+        <SummaryCount
+          label="Required documents"
+          value={summary.missingDocumentsCount}
+          hint="Distinct required documents outstanding across the viable insurers."
+          emphasise={summary.missingDocumentsCount > 0}
+        />
+        <SummaryCount
+          label="Unmatched coverage"
+          value={summary.unmatchedCoverageCount}
+          hint="Sections or products with no guideline rule on file."
+          emphasise={summary.unmatchedCoverageCount > 0}
+        />
+        {openMissingInfoCount > 0 && (
+          <SummaryCount
+            label="Outstanding information"
+            value={openMissingInfoCount}
+            hint="Tracked information items still outstanding on this submission."
+            emphasise
+          />
+        )}
+      </dl>
+
+      {summary.computedAt && (
+        <p className="atlas-reco__summary-meta">
+          Computed {formatDateTime(summary.computedAt)} against the reviewed risk information.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function SummaryCount({
+  label,
+  value,
+  hint,
+  emphasise,
+}: {
+  label: string;
+  value: number;
+  hint: string;
+  emphasise?: boolean;
+}) {
+  return (
+    <div
+      className={`atlas-reco__summary-count${emphasise ? " atlas-reco__summary-count--emphasise" : ""}`}
+      title={hint}
+    >
+      <dt>{label}</dt>
+      <dd>{value}</dd>
     </div>
   );
 }
@@ -431,129 +587,67 @@ function InsurerBlock({
   );
 }
 
-function ruleListMeta(list: string) {
-  switch (list) {
-    case "preferred":
-      return { label: "Preferred", tone: "success" as const };
-    case "declined":
-    case "portfolio_declined":
-      return { label: "Declined", tone: "danger" as const };
-    case "referral":
-    case "portfolio_referral":
-      return { label: "Referral trigger", tone: "referral" as const };
-    case "caution":
-    case "portfolio_caution":
-      return { label: "Caution", tone: "warning" as const };
-    default:
-      return { label: "Base rule", tone: "neutral" as const };
-  }
-}
-
-/**
- * Turn the matcher's flat arrays into the structured reason shape the design
- * system uses: what the issue is, why it matters, and what happens next.
- */
-function groupFindings(insurer: ScoredInsurer): {
-  kind: "blocker" | "referral" | "concern" | "strength" | "info";
-  title: string;
-  body: string;
-  nextAction?: string;
-}[] {
-  const groups: ReturnType<typeof groupFindings> = [];
-
-  if (insurer.ruled_out) {
-    const declined = (insurer.matched_rules ?? []).filter(
-      (rule) => rule.list === "declined" || rule.list === "portfolio_declined"
-    );
-    groups.push({
-      kind: "blocker",
-      title: "Hard appetite failure",
-      body: declined.length
-        ? `The insurer's guideline declines this risk. Matched: ${declined
-            .flatMap((rule) => rule.matched_strings)
-            .join("; ")}.`
-        : "This risk falls outside the insurer's stated appetite, so Atlas cannot recommend it.",
-      nextAction:
-        "Placing here would need the insurer to make an exception. Record an override reason if a manager approves it.",
-    });
-  }
-
-  if (insurer.referral_required) {
-    const triggers = (insurer.matched_rules ?? [])
-      .filter((rule) => rule.list === "referral" || rule.list === "portfolio_referral")
-      .flatMap((rule) => rule.matched_strings);
-    groups.push({
-      kind: "referral",
-      title: "Referral required",
-      body: triggers.length
-        ? `The guideline requires a referral because of: ${triggers.join("; ")}.`
-        : "The guideline requires the insurer or a senior underwriter to approve this risk before you proceed.",
-      nextAction: "Prepare a referral pack with the risk summary, claims experience and mitigating factors.",
-    });
-  }
-
-  const caution = (insurer.matched_rules ?? [])
-    .filter((rule) => rule.list === "caution" || rule.list === "portfolio_caution")
-    .flatMap((rule) => rule.matched_strings);
-  if (caution.length > 0) {
-    groups.push({
-      kind: "concern",
-      title: "Written with caution",
-      body: `The guideline flags this risk for care: ${caution.join("; ")}.`,
-      nextAction: "Expect tighter terms, higher excesses, or additional warranties on this risk.",
-    });
-  }
-
-  const preferred = (insurer.matched_rules ?? [])
-    .filter((rule) => rule.list === "preferred")
-    .flatMap((rule) => rule.matched_strings);
-  if (preferred.length > 0) {
-    groups.push({
-      kind: "strength",
-      title: "Inside preferred appetite",
-      body: `The guideline actively wants this business: ${preferred.join("; ")}.`,
-    });
-  }
-
-  if ((insurer.missing_required_documents ?? []).length > 0) {
-    groups.push({
-      kind: "concern",
-      title: "Documents this insurer requires",
-      body: (insurer.missing_required_documents ?? []).join("; "),
-      nextAction: "Request these from the broker before submitting to this insurer.",
-    });
-  }
-
-  const unmatched = [
-    ...(insurer.unmatched_sections ?? []).map((item) => `section "${item}"`),
-    ...(insurer.unmatched_product_candidates ?? []).map((item) => `product "${item}"`),
-  ];
-  if (unmatched.length > 0) {
-    groups.push({
-      kind: "info",
-      title: "Not covered by any rule on file",
-      body: `Atlas found no guideline rule for ${unmatched.join(", ")}.`,
-      nextAction:
-        "Confirm the insurer's position on these directly, or ask a manager to add the missing appetite rules.",
-    });
-  }
-
-  return groups;
-}
-
 /* ===========================================================================
    Comparison matrix
    =========================================================================== */
 
-const MATRIX_ROWS: {
+/**
+ * A comparison row. `signature` reduces each insurer's cell to a comparable
+ * value so the row can be classified as uniform, having a strict majority, or
+ * having no majority at all.
+ */
+interface MatrixRow {
   key: string;
   label: string;
   render: (insurer: ScoredInsurer) => ReactNode;
-}[] = [
+  signature: (insurer: ScoredInsurer) => string;
+}
+
+/**
+ * Track whether a horizontally-overflowing element actually overflows right
+ * now, so the comparison scroll region is only a keyboard tab stop when there
+ * is something to scroll. Re-measures on the supplied dependencies (insurer
+ * selection) and on element resize; degrades to a window-resize listener where
+ * `ResizeObserver` is unavailable (e.g. jsdom).
+ */
+function useHorizontalOverflow(
+  ref: React.RefObject<HTMLElement>,
+  deps: unknown[]
+): boolean {
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) {
+      setOverflowing(false);
+      return;
+    }
+    const measure = () => setOverflowing(node.scrollWidth > node.clientWidth + 1);
+    measure();
+
+    if (typeof ResizeObserver === "undefined") {
+      if (typeof window === "undefined") return;
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+    // `measure` closes over the current node; deps drive re-measurement on
+    // selection change. ref identity is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  return overflowing;
+}
+
+const MATRIX_ROWS: MatrixRow[] = [
   {
     key: "band",
     label: "Appetite",
     render: (insurer) => <StatusBadge status={appetiteBand(insurer.band)} />,
+    signature: (insurer) => insurer.band ?? "unknown",
   },
   {
     key: "blocker",
@@ -564,6 +658,7 @@ const MATRIX_ROWS: {
       ) : (
         <StatusBadge status={{ label: "None", tone: "success" }} />
       ),
+    signature: (insurer) => (insurer.ruled_out ? "ruled_out" : "none"),
   },
   {
     key: "referral",
@@ -574,6 +669,7 @@ const MATRIX_ROWS: {
       ) : (
         <StatusBadge status={{ label: "Not required", tone: "success" }} />
       ),
+    signature: (insurer) => (insurer.referral_required ? "required" : "none"),
   },
   {
     key: "documents",
@@ -589,6 +685,7 @@ const MATRIX_ROWS: {
         </>
       );
     },
+    signature: (insurer) => `${(insurer.missing_required_documents ?? []).length}`,
   },
   {
     key: "coverage",
@@ -607,11 +704,18 @@ const MATRIX_ROWS: {
         </>
       );
     },
+    signature: (insurer) => {
+      const count =
+        (insurer.unmatched_sections ?? []).length +
+        (insurer.unmatched_product_candidates ?? []).length;
+      return `${count}`;
+    },
   },
   {
     key: "reasoning",
     label: "Atlas reasoning",
     render: (insurer) => <span className="atlas-matrix__note">{insurer.reasoning || "—"}</span>,
+    signature: (insurer) => (insurer.reasoning || "").trim().toLowerCase(),
   },
 ];
 
@@ -633,9 +737,60 @@ function ComparisonMatrix({
     [insurers, selected]
   );
 
+  // For every row, classify it as uniform, strict-majority or no-majority so
+  // the matrix highlights only genuine outliers and never invents a "majority"
+  // from a tie or an all-distinct row.
+  const rowMeta = useMemo(() => {
+    return MATRIX_ROWS.map((row) => {
+      const signatures = shown.map((insurer) => row.signature(insurer));
+      return { row, signatures, state: classifyComparisonRow(signatures) };
+    });
+  }, [shown]);
+
+  // The scroll region is only a tab stop when it can actually scroll.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollable = useHorizontalOverflow(scrollRef, [shown]);
+
+  // Keyboard scrolling for the overflowing comparison region. Only intercept
+  // when the region itself is focused: `target !== currentTarget` means the
+  // key originated inside an interactive descendant (a button, input, select,
+  // textarea, link or disclosure control), and we must not hijack it.
+  //
+  // Atlas currently ships LTR only — no `dir="rtl"` in the tree, no logical
+  // scroll properties in the design system. If RTL support is ever added,
+  // ArrowLeft/ArrowRight should swap based on the region's computed direction.
+  const onScrollKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.target !== event.currentTarget) return;
+      const node = event.currentTarget;
+      // ~80% of the visible width — one page, minus a sliver of context so the
+      // reader keeps their bearings. Floor guarantees movement on very narrow
+      // viewports where 80% would otherwise round to zero.
+      const step = Math.max(40, Math.round(node.clientWidth * 0.8));
+      switch (event.key) {
+        case "ArrowRight":
+          node.scrollBy({ left: step, behavior: "auto" });
+          break;
+        case "ArrowLeft":
+          node.scrollBy({ left: -step, behavior: "auto" });
+          break;
+        case "Home":
+          node.scrollTo({ left: 0, behavior: "auto" });
+          break;
+        case "End":
+          node.scrollTo({ left: node.scrollWidth, behavior: "auto" });
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+    },
+    []
+  );
+
   return (
     <div style={{ marginTop: "var(--atlas-space-4)" }}>
-      <fieldset style={{ border: 0, padding: 0, margin: "0 0 var(--atlas-space-4)" }}>
+      <fieldset className="atlas-matrix__picker">
         <legend className="atlas-block__title" style={{ marginBottom: 8 }}>
           Insurers in the comparison
         </legend>
@@ -669,38 +824,77 @@ function ComparisonMatrix({
           body="Tick at least one insurer above to build the comparison."
         />
       ) : (
-        <div className="atlas-table-wrap">
-          <div className="atlas-table-scroll">
+        <div className="atlas-table-wrap atlas-matrix-wrap">
+          <div
+            ref={scrollRef}
+            className="atlas-table-scroll atlas-matrix-scroll"
+            {...(scrollable
+              ? {
+                  role: "region",
+                  "aria-label":
+                    "Insurer comparison — scroll to see every criterion and insurer",
+                  tabIndex: 0,
+                  onKeyDown: onScrollKeyDown,
+                }
+              : {})}
+          >
             <table className="atlas-matrix">
               <caption className="atlas-sr-only">
-                Insurer comparison across appetite, blockers, referrals and documentation
+                Insurer comparison across appetite, blockers, referrals and documentation.
+                Where a strict majority of the shown insurers share a value, the cells that
+                differ from it are marked "differs"; rows that are tied or all-distinct are
+                left unmarked so you can compare the values directly.
               </caption>
               <thead>
                 <tr>
                   <th scope="col" style={{ minWidth: 170 }}>
                     Criterion
                   </th>
-                  {shown.map((insurer) => (
-                    <th
-                      scope="col"
-                      key={insurer.insurer_id}
-                      data-pinned={insurer.insurer_id === topId ? "true" : undefined}
-                    >
-                      <span className="atlas-matrix__insurer">{insurer.insurer_name}</span>
-                      {insurer.insurer_id === topId ? "Recommended" : "Alternative"}
-                    </th>
-                  ))}
+                  {shown.map((insurer) => {
+                    const isTop = insurer.insurer_id === topId;
+                    return (
+                      <th
+                        scope="col"
+                        key={insurer.insurer_id}
+                        data-pinned={isTop ? "true" : undefined}
+                      >
+                        <span className="atlas-matrix__insurer">{insurer.insurer_name}</span>
+                        <span className="atlas-matrix__role">
+                          {isTop ? "Atlas recommended" : "Alternative"}
+                        </span>
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
-                {MATRIX_ROWS.map((row) => (
-                  <tr key={row.key}>
+                {rowMeta.map(({ row, signatures, state }) => (
+                  <tr key={row.key} data-uniform={state.kind === "uniform" ? "true" : undefined}>
                     <th scope="row">{row.label}</th>
-                    {shown.map((insurer) => (
-                      <td key={insurer.insurer_id}>
-                        <div className="atlas-matrix__cell">{row.render(insurer)}</div>
-                      </td>
-                    ))}
+                    {shown.map((insurer, index) => {
+                      const differs =
+                        state.kind === "majority" && signatures[index] !== state.signature;
+                      return (
+                        <td
+                          key={insurer.insurer_id}
+                          data-differs={differs ? "true" : undefined}
+                        >
+                          <div className="atlas-matrix__cell">
+                            {/* Real per-cell insurer label: hidden on desktop (the column
+                                header carries it) and shown at the stacked breakpoint where
+                                the header is dropped, so mobile screen readers still get the
+                                value↔insurer association without relying on CSS content. */}
+                            <span className="atlas-matrix__mobile-insurer">
+                              {insurer.insurer_name}
+                            </span>
+                            {row.render(insurer)}
+                            {differs && (
+                              <span className="atlas-sr-only"> (differs from the majority)</span>
+                            )}
+                          </div>
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
