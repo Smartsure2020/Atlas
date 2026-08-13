@@ -1783,16 +1783,8 @@
   border-radius: 0 0 var(--atlas-radius-card) var(--atlas-radius-card);
 }
 
-/* ===========================================================================
-   Oversight
-   =========================================================================== */
-
-.atlas-oversight__grid {
-  display: grid;
-  gap: var(--atlas-space-4);
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  align-items: start;
-}
+/* Note: the Manager Overview's own class family (.atlas-oversight, .atlas-oversight__*)
+   lives in components.css alongside the other workbenches. */
 
 .atlas-jobrow__error {
   font-size: var(--atlas-fs-label);
