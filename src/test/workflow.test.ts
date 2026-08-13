@@ -128,6 +128,33 @@ describe("isOverdue", () => {
     ).toBe(false);
   });
 
+  it("returns false for a well-formed but impossible calendar date", () => {
+    // These literals pass the range check for month/day but name days that
+    // do not exist on the Gregorian calendar. They must not be treated as
+    // any real day — never overdue, never on-time — so downstream counts do
+    // not silently include them.
+    for (const impossible of ["2026-02-30", "2026-04-31", "2025-02-29"]) {
+      expect(
+        isOverdue(item("requested", { due_date: impossible }), NOW)
+      ).toBe(false);
+    }
+  });
+
+  it("accepts real calendar dates including leap-year Feb 29 and month-end", () => {
+    // A due date strictly before today ⇒ overdue; strictly after ⇒ not.
+    // 2024-02-29 exists (leap year); 2026-01-31 and 2026-12-31 are real
+    // month-ends. Verify the validator lets each of them through.
+    expect(
+      isOverdue(item("requested", { due_date: "2024-02-29" }), NOW)
+    ).toBe(true);
+    expect(
+      isOverdue(item("requested", { due_date: "2026-01-31" }), NOW)
+    ).toBe(true);
+    expect(
+      isOverdue(item("requested", { due_date: "2026-12-31" }), NOW)
+    ).toBe(false);
+  });
+
   it("does not flag received, waived or not_required items as overdue", () => {
     for (const s of ["received", "waived", "not_required"] as MissingInfoStatus[]) {
       expect(isOverdue(item(s, { due_date: "2020-01-01" }), NOW)).toBe(false);
@@ -191,6 +218,19 @@ describe("summariseMissingInfo — overdue counts through the corrected helper",
     const justAfterMidnight = new Date(2026, 7, 15, 0, 1);
     expect(summariseMissingInfo([dueToday], lateEvening).overdue).toBe(0);
     expect(summariseMissingInfo([dueToday], justAfterMidnight).overdue).toBe(0);
+  });
+
+  it("ignores impossible calendar-date literals in the overdue count", () => {
+    // 2026-02-30 does not exist. Even though it is strictly less than today's
+    // key as a string, it must not contribute to the overdue count — the
+    // validator drops it upstream of the comparison. A real strictly-past
+    // date on the same item list is still counted, so we know the impossible
+    // date was the only one excluded.
+    const items = [
+      item("requested", { due_date: "2026-02-30" }), // impossible — excluded
+      item("requested", { due_date: "2026-08-10" }), // real, past — counted
+    ];
+    expect(summariseMissingInfo(items, NOW).overdue).toBe(1);
   });
 });
 

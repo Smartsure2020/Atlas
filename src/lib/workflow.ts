@@ -58,6 +58,22 @@ export interface MissingInfoSummary {
  * `getUTC*` and local `get*` in the same comparison.
  */
 
+/**
+ * Whether (year, month, day) is a real Gregorian calendar date. This is a pure
+ * structural check — no `Date` construction, no timezone involvement — so it
+ * rejects impossible literals such as 2026-02-30, 2026-04-31, 2025-02-29 while
+ * accepting 2024-02-29. Kept independent of the local-business-day comparison
+ * policy used for timestamps and `today`.
+ */
+function isRealCalendarDate(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12) return false;
+  if (day < 1) return false;
+  const daysInMonth = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const max = month === 2 && isLeap ? 29 : daysInMonth[month - 1];
+  return day <= max;
+}
+
 /** YYYY-MM-DD key from a date-only literal or a full timestamp; null if unparseable. */
 function calendarDayKey(value: string | Date): string | null {
   if (value instanceof Date) {
@@ -70,12 +86,10 @@ function calendarDayKey(value: string | Date): string | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
   if (match) {
     const [, y, m, d] = match;
+    const year = Number(y);
     const month = Number(m);
     const day = Number(d);
-    if (
-      month < 1 || month > 12 ||
-      day < 1 || day > 31
-    ) return null;
+    if (!isRealCalendarDate(year, month, day)) return null;
     return `${y}-${m}-${d}`;
   }
   // Fall back to parsing as a timestamp and reading the LOCAL calendar day.
