@@ -1,13 +1,16 @@
 /**
- * Atlas — missing information and next actions
+ * Atlas — missing information workbench
  * ----------------------------------------------------------------------------
- * Previously buried inside the quote-review card; now its own surface, because
- * chasing information is a distinct job that a different person often does.
+ * The operational path from "we know something is missing" through to
+ * "somebody has been asked and we are waiting on them". The lifecycle groups
+ * stay in job order (outstanding → requested → received → closed), each item
+ * shows the metadata a person needs to act (owner, due date, source, notes),
+ * and the summary line at the top names the next operational job in words —
+ * derived from the items on file, never from an invented priority or SLA.
  *
- * Items are grouped by what they block rather than by status alphabet, so the
- * things preventing a recommendation sit above the nice-to-haves. Editing an
- * item happens in a drawer so the list stays on screen, and waiving an item
- * asks for a note in a proper dialog rather than window.prompt().
+ * The tab tracks the requirement. Drafting the outward-facing message and
+ * recording that it went happens on the Communications tab; a cross-tab
+ * pointer here makes that relationship explicit without merging the two.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -24,6 +27,7 @@ import {
   Card,
   Drawer,
   EmptyState,
+  MetaTag,
   Notice,
   PromptDialog,
   SelectField,
@@ -40,9 +44,14 @@ import {
 } from "../lib/status";
 import { formatDate, humanise } from "../lib/format";
 import type { SubmissionTab } from "../lib/router";
+import {
+  groupMissingInfo,
+  isOverdue,
+  NOTE_REQUIRED_STATUSES,
+  summariseMissingInfo,
+} from "../lib/workflow";
 
-/** Items that need a note before the status change is allowed server-side. */
-const NOTE_REQUIRED: MissingInfoStatus[] = ["waived", "not_required"];
+const NOTE_REQUIRED: readonly MissingInfoStatus[] = NOTE_REQUIRED_STATUSES;
 
 const ITEM_TYPE_OPTIONS = [
   { value: "document", label: "Document" },
@@ -78,40 +87,16 @@ export default function MissingInfoPanel({
   } | null>(null);
   const [working, setWorking] = useState<string | null>(null);
 
-  const groups = useMemo(() => {
-    const open = items.filter((item) => item.status === "open");
-    const requested = items.filter((item) => item.status === "requested");
-    const received = items.filter((item) => item.status === "received");
-    const closed = items.filter((item) => item.status === "waived" || item.status === "not_required");
-    return [
-      {
-        key: "open",
-        title: "Outstanding — not yet requested",
-        body: "Identified by Atlas or by the team, but nobody has asked for them yet.",
-        items: open,
-      },
-      {
-        key: "requested",
-        title: "Requested — awaiting a reply",
-        body: "Already asked for. Follow up if the reply is overdue.",
-        items: requested,
-      },
-      {
-        key: "received",
-        title: "Received — awaiting review",
-        body: "Arrived but not yet acted on. Rerun the analysis if any of this changes the risk.",
-        items: received,
-      },
-      {
-        key: "closed",
-        title: "Waived or not required",
-        body: "Deliberately closed. The note explains why.",
-        items: closed,
-      },
-    ].filter((group) => group.items.length > 0);
-  }, [items]);
-
-  const blocking = items.filter((item) => item.status === "open" || item.status === "requested");
+  // Day-level overdue derivation: a single `now` per render keeps the summary
+  // and each row consistent within one paint. The previous shape
+  // `useMemo(() => new Date(), [items])` was misleading — the callback never
+  // reads `items`, so the memo neither invalidates when items change nor
+  // computes anything the const wouldn't. A per-render Date is trivial and
+  // the derived summary is a small O(items) reduction.
+  const now = new Date();
+  const summary = summariseMissingInfo(items, now);
+  const groups = useMemo(() => groupMissingInfo(items), [items]);
+  const blocking = summary.outstanding + summary.awaiting_reply;
 
   async function changeStatus(item: MissingInfoItem, status: MissingInfoStatus, notes?: string) {
     setWorking(item.id);
@@ -157,8 +142,8 @@ export default function MissingInfoPanel({
     <div className="atlas-stack">
       {error && <Notice tone="danger" title="That action did not complete">{error}</Notice>}
 
-      {blocking.length > 0 && (
-        <Notice tone="warning" title={`${blocking.length} item${blocking.length === 1 ? "" : "s"} still outstanding`}>
+      {blocking > 0 && (
+        <Notice tone="warning" title={`${blocking} item${blocking === 1 ? "" : "s"} still outstanding`}>
           Outstanding information can change the recommendation. Rerun the analysis once it arrives.
           <div style={{ marginTop: 8 }}>
             <Button size="sm" onClick={() => onGoToTab("recommendation")}>
@@ -168,9 +153,17 @@ export default function MissingInfoPanel({
         </Notice>
       )}
 
+      {items.length > 0 && (
+        <ActionSummary
+          summary={summary}
+          canWrite={canWrite}
+          onGoToTab={onGoToTab}
+        />
+      )}
+
       <Card
         title="Missing information"
-        description="What Atlas still needs, why it needs it, and who owes it."
+        description="What Atlas still needs, why it needs it, and who owes it. Draft the request itself on the Communications tab."
         actions={
           canWrite ? (
             <>
@@ -211,67 +204,89 @@ export default function MissingInfoPanel({
               <section
                 key={group.key}
                 style={{ marginBottom: "var(--atlas-space-6)" }}
-                aria-label={group.title}
+                aria-labelledby={`missing-group-${group.key}`}
               >
-                <h3 className="atlas-title-sub" style={{ fontSize: "var(--atlas-fs-body)" }}>
+                <h3
+                  id={`missing-group-${group.key}`}
+                  className="atlas-title-sub"
+                  style={{ fontSize: "var(--atlas-fs-body)" }}
+                >
                   {group.title}
+                  <span
+                    className="atlas-text-muted"
+                    style={{ fontWeight: 400, marginLeft: 8 }}
+                  >
+                    ({group.items.length})
+                  </span>
                 </h3>
                 <p className="atlas-text-dense atlas-text-muted" style={{ margin: "2px 0 12px" }}>
                   {group.body}
                 </p>
-                <ul className="atlas-list">
-                  {group.items.map((item) => (
-                    <li className="atlas-list__item" key={item.id}>
-                      <div className="atlas-list__main">
-                        <p className="atlas-list__title">{item.title}</p>
-                        {item.description && <p className="atlas-list__meta">{item.description}</p>}
-                        <p className="atlas-list__meta">
-                          {[
-                            item.section_key ? `Section: ${humanise(item.section_key)}` : null,
-                            `Type: ${humanise(item.item_type)}`,
-                            `Owed by: ${humanise(item.owner)}`,
-                            item.due_date ? `Due ${formatDate(item.due_date)}` : null,
-                            `Source: ${humanise(item.source)}`,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </p>
-                        {item.notes && (
+                <ul className="atlas-list atlas-list--stack-sm">
+                  {group.items.map((item) => {
+                    const overdue = isOverdue(item, now);
+                    return (
+                      <li className="atlas-list__item" key={item.id}>
+                        <div className="atlas-list__main">
+                          <p className="atlas-list__title">{item.title}</p>
+                          {item.description && <p className="atlas-list__meta">{item.description}</p>}
                           <p className="atlas-list__meta">
-                            <Icon name="info" size={12} /> {item.notes}
+                            {[
+                              item.section_key ? `Section: ${humanise(item.section_key)}` : null,
+                              `Type: ${humanise(item.item_type)}`,
+                              `Owed by: ${humanise(item.owner)}`,
+                              item.due_date ? `Due ${formatDate(item.due_date)}` : null,
+                              `Source: ${humanise(item.source)}`,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
                           </p>
-                        )}
-                      </div>
-                      <div className="atlas-list__side">
-                        <StatusBadge status={missingInfoStatus(item.status)} />
-                        {canWrite && (
-                          <>
-                            {item.status === "open" && (
-                              <Button
-                                size="sm"
-                                disabled={working === item.id}
-                                onClick={() => changeStatus(item, "requested")}
-                              >
-                                Mark requested
+                          {item.notes && (
+                            <p className="atlas-list__meta">
+                              <Icon name="info" size={12} /> {item.notes}
+                            </p>
+                          )}
+                        </div>
+                        <div className="atlas-list__side">
+                          <StatusBadge status={missingInfoStatus(item.status)} />
+                          {overdue && (
+                            <StatusBadge
+                              status={{
+                                label: "Overdue",
+                                tone: "danger",
+                                description: "The recorded due date has passed.",
+                              }}
+                            />
+                          )}
+                          {canWrite && (
+                            <>
+                              {item.status === "open" && (
+                                <Button
+                                  size="sm"
+                                  disabled={working === item.id}
+                                  onClick={() => changeStatus(item, "requested")}
+                                >
+                                  Mark requested
+                                </Button>
+                              )}
+                              {item.status === "requested" && (
+                                <Button
+                                  size="sm"
+                                  disabled={working === item.id}
+                                  onClick={() => changeStatus(item, "received")}
+                                >
+                                  Mark received
+                                </Button>
+                              )}
+                              <Button size="sm" icon="edit" onClick={() => setEditing(item)}>
+                                Edit
                               </Button>
-                            )}
-                            {item.status === "requested" && (
-                              <Button
-                                size="sm"
-                                disabled={working === item.id}
-                                onClick={() => changeStatus(item, "received")}
-                              >
-                                Mark received
-                              </Button>
-                            )}
-                            <Button size="sm" icon="edit" onClick={() => setEditing(item)}>
-                              Edit
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </li>
-                  ))}
+                            </>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               </section>
             ))}
@@ -340,6 +355,96 @@ export default function MissingInfoPanel({
         }}
       />
     </div>
+  );
+}
+
+/* ===========================================================================
+   Action summary
+   =========================================================================== */
+
+function ActionSummary({
+  summary,
+  canWrite,
+  onGoToTab,
+}: {
+  summary: ReturnType<typeof summariseMissingInfo>;
+  canWrite: boolean;
+  onGoToTab: (tab: SubmissionTab) => void;
+}) {
+  const rows: { label: string; value: number; hint: string; tone?: "warning" | "danger" | "info" | "success" }[] = [
+    {
+      label: "Not yet requested",
+      value: summary.outstanding,
+      hint: "Identified but not asked for yet.",
+      tone: summary.outstanding > 0 ? "warning" : undefined,
+    },
+    {
+      label: "Awaiting a reply",
+      value: summary.awaiting_reply,
+      hint: "Already requested. Follow up if it is overdue.",
+      tone: summary.awaiting_reply > 0 ? "info" : undefined,
+    },
+    {
+      label: "Awaiting review",
+      value: summary.awaiting_review,
+      hint: "Arrived but not yet acted on.",
+      tone: summary.awaiting_review > 0 ? "success" : undefined,
+    },
+    {
+      label: "Deliberately closed",
+      value: summary.closed,
+      hint: "Waived or not required, with a note.",
+    },
+  ];
+  return (
+    <section
+      className="atlas-workflow-summary"
+      aria-label="Missing information summary"
+    >
+      <div className="atlas-workflow-summary__row">
+        {rows.map((row) => (
+          <div
+            key={row.label}
+            className={`atlas-workflow-summary__cell${
+              row.tone ? ` atlas-workflow-summary__cell--${row.tone}` : ""
+            }`}
+          >
+            <span className="atlas-workflow-summary__label">{row.label}</span>
+            <span className="atlas-workflow-summary__value">{row.value}</span>
+            <span className="atlas-workflow-summary__hint">{row.hint}</span>
+          </div>
+        ))}
+      </div>
+      <div className="atlas-workflow-summary__foot">
+        {summary.overdue > 0 && (
+          <StatusBadge
+            status={{
+              label: `${summary.overdue} past due date`,
+              tone: "danger",
+              description: "Requested items whose recorded due date has passed.",
+            }}
+          />
+        )}
+        {summary.active_owners.length > 0 && (
+          <span className="atlas-workflow-summary__owners">
+            <span className="atlas-workflow-summary__owners-label">Owed by</span>
+            {summary.active_owners.map((owner) => (
+              <MetaTag key={owner}>{humanise(owner)}</MetaTag>
+            ))}
+          </span>
+        )}
+        {canWrite && (summary.outstanding + summary.awaiting_reply) > 0 && (
+          <Button
+            size="sm"
+            variant="link"
+            iconAfter="arrow-right"
+            onClick={() => onGoToTab("communications")}
+          >
+            Draft the request on Communications
+          </Button>
+        )}
+      </div>
+    </section>
   );
 }
 

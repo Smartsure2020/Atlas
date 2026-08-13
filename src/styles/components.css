@@ -1732,6 +1732,24 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   gap: var(--atlas-space-2);
 }
 
+/* Scoped Phase 4 modifier — stacks rows on narrow viewports so the main
+   content region stays full-width and the badges/actions wrap naturally
+   instead of pushing the row past the viewport. Applied only where opted in;
+   desktop and tablet layouts are unchanged. */
+@media (max-width: 640px) {
+  .atlas-list--stack-sm .atlas-list__item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .atlas-list--stack-sm .atlas-list__side {
+    flex: none;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}
+
 /* A ranked count list — replaces pie/donut charts for category breakdowns. */
 .atlas-rank {
   list-style: none;
@@ -1771,4 +1789,168 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   height: 100%;
   border-radius: 999px;
   background: var(--atlas-accent);
+}
+
+/* ===========================================================================
+   Workflow summary — the operational at-a-glance row shared by the missing
+   information and communications workbenches. Values are only ever counts of
+   existing records; nothing here derives a fabricated score or priority.
+   =========================================================================== */
+
+.atlas-workflow-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+  padding: var(--atlas-space-4) var(--atlas-space-5);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface);
+}
+
+.atlas-workflow-summary__row {
+  display: grid;
+  gap: var(--atlas-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.atlas-workflow-summary__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--atlas-space-3);
+  border-radius: var(--atlas-radius);
+  background: var(--atlas-surface-muted);
+  border: 1px solid var(--atlas-border);
+}
+
+.atlas-workflow-summary__cell--warning {
+  background: var(--atlas-warning-surface);
+  border-color: var(--atlas-warning-border);
+}
+
+.atlas-workflow-summary__cell--danger {
+  background: var(--atlas-danger-surface);
+  border-color: var(--atlas-danger-border);
+}
+
+.atlas-workflow-summary__cell--info {
+  background: var(--atlas-info-surface);
+  border-color: var(--atlas-info-border);
+}
+
+.atlas-workflow-summary__cell--success {
+  background: var(--atlas-success-surface);
+  border-color: var(--atlas-success-border);
+}
+
+.atlas-workflow-summary__label {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-workflow-summary__value {
+  font-size: var(--atlas-fs-title-sub, 20px);
+  font-weight: 600;
+  color: var(--atlas-ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.atlas-workflow-summary__hint {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-secondary);
+}
+
+.atlas-workflow-summary__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--atlas-space-3);
+  align-items: center;
+}
+
+.atlas-workflow-summary__owners {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--atlas-space-2);
+}
+
+.atlas-workflow-summary__owners-label {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-muted);
+}
+
+/* ===========================================================================
+   Communications workbench safety line and draft chooser refinements
+   =========================================================================== */
+
+.atlas-draft-chooser {
+  display: grid;
+  gap: var(--atlas-space-4);
+}
+
+.atlas-draft-chooser__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-2);
+}
+
+.atlas-draft-chooser__group-title {
+  font-size: var(--atlas-fs-dense);
+  font-weight: 600;
+  color: var(--atlas-ink-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+
+.atlas-draft-chooser__group-hint {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-muted);
+  margin: -4px 0 0;
+}
+
+.atlas-draft-chooser__grid {
+  display: grid;
+  gap: var(--atlas-space-2);
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+}
+
+.atlas-draft-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--atlas-space-3) var(--atlas-space-3);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius);
+  background: var(--atlas-surface);
+  text-align: left;
+  cursor: pointer;
+  min-height: 84px;
+}
+
+.atlas-draft-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.atlas-draft-card[aria-pressed="true"] {
+  border-color: var(--atlas-primary);
+  background: var(--atlas-primary-surface);
+}
+
+.atlas-draft-card__label {
+  font-weight: 600;
+  color: var(--atlas-ink);
+}
+
+.atlas-draft-card__description {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-secondary);
+}
+
+.atlas-draft-card__audience {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-muted);
+  margin-top: 2px;
 }
