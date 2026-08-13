@@ -121,27 +121,48 @@ export default function ManagerDashboard({
   const requestSeq = useRef(0);
 
   useEffect(() => {
-    // Sequence-guarded fetch: a slower earlier response for stale filters can
-    // never overwrite the newest data.
+    // Two guards work together here.
+    //
+    // 1. Cancellation gate. The fetch call itself is deferred by one
+    //    microtask, and the effect's cleanup flips `cancelled`. Under React
+    //    18/19 StrictMode the mount effect runs, its cleanup runs, and the
+    //    replacement mount effect runs — all synchronously, before any
+    //    microtask drains. That means the discarded mount's fetch is
+    //    cancelled *before* it is issued, and only the surviving mount
+    //    reaches the network. Under a real remount or a genuine dependency
+    //    change, the same mechanism cancels the previous in-flight
+    //    scheduling and starts a fresh one, so refresh-with-existing-data
+    //    and retry paths keep working.
+    // 2. Sequence guard. If a request slips past the cancellation gate and
+    //    is still resolving when a newer one has already landed, its
+    //    setState calls are dropped so a stale response cannot overwrite
+    //    the newer data.
+    let cancelled = false;
     const seq = ++requestSeq.current;
-    setLoading(true);
-    getManagerStatsFiltered(toApi(applied))
-      .then((result) => {
-        if (requestSeq.current !== seq) return;
-        setStats(result.stats);
-        setError(null);
-      })
-      .catch((cause: Error) => {
-        if (requestSeq.current !== seq) return;
-        setError(
-          cause.message === "manager_only"
-            ? "This overview is available to underwriting managers and administrators only."
-            : "The manager overview could not be loaded. The Atlas API did not respond."
-        );
-      })
-      .finally(() => {
-        if (requestSeq.current === seq) setLoading(false);
-      });
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setLoading(true);
+      getManagerStatsFiltered(toApi(applied))
+        .then((result) => {
+          if (requestSeq.current !== seq) return;
+          setStats(result.stats);
+          setError(null);
+        })
+        .catch((cause: Error) => {
+          if (requestSeq.current !== seq) return;
+          setError(
+            cause.message === "manager_only"
+              ? "This overview is available to underwriting managers and administrators only."
+              : "The manager overview could not be loaded. The Atlas API did not respond."
+          );
+        })
+        .finally(() => {
+          if (requestSeq.current === seq) setLoading(false);
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [applied, reloadToken]);
 
   const applyDraft = useCallback(

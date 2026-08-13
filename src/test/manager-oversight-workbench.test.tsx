@@ -396,4 +396,38 @@ describe("Manager oversight workbench", () => {
     await screen.findByText(/underwriting managers and administrators only/i);
     expect(await axe(container)).toHaveNoViolations();
   });
+
+  it("issues exactly one fetch per applied state under React StrictMode", async () => {
+    // Regression test for the StrictMode double-mount that used to fire two
+    // /api/manager/stats requests for the initial applied state. The fetch
+    // is deferred by a microtask and cancelled by the effect cleanup, so the
+    // discarded mount's request never leaves the client.
+    const { StrictMode } = await import("react");
+    statsMock.mockResolvedValue({ ok: true, stats: stats() });
+    const onOpen = vi.fn<(id: string) => void>();
+    render(
+      <StrictMode>
+        <ManagerDashboard onOpenSubmission={onOpen} />
+      </StrictMode>
+    );
+
+    await screen.findByRole("heading", { name: /manager overview/i });
+    // Wait long enough for the microtask queue to drain twice — once for the
+    // discarded StrictMode mount, once for the surviving one.
+    await waitFor(() => expect(statsMock).toHaveBeenCalledTimes(1));
+    // Give any late duplicate a chance to appear, then re-assert.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(statsMock).toHaveBeenCalledTimes(1);
+
+    // A subsequent applied-state change must still fire exactly one fetch —
+    // the guard cancels stale scheduled fetches, it does not suppress
+    // legitimate ones.
+    const user = userEvent.setup();
+    statsMock.mockClear();
+    statsMock.mockResolvedValue({ ok: true, stats: stats({ quote_reviews_completed: 33 }) });
+    await user.selectOptions(screen.getByLabelText(/^period$/i), "7d");
+    await waitFor(() => expect(statsMock).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(statsMock).toHaveBeenCalledTimes(1);
+  });
 });
