@@ -1954,3 +1954,417 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   color: var(--atlas-ink-muted);
   margin-top: 2px;
 }
+
+/* ===========================================================================
+   Manager oversight workbench
+   ---------------------------------------------------------------------------
+   The screen is intentionally quiet — no gradients, no invented percentages,
+   no decorative motion. Structure comes from typography and spacing; the only
+   ambient tone is the warning surface used to mark exception tiles that hold
+   a non-zero count.
+   =========================================================================== */
+
+.atlas-oversight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-4);
+}
+
+.atlas-oversight__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-6);
+}
+
+.atlas-oversight__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+}
+
+.atlas-oversight__section-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.atlas-oversight__caption {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-muted);
+  line-height: var(--atlas-lh-snug, 1.4);
+  max-width: 78ch;
+  margin: 0;
+}
+
+.atlas-oversight__hint {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+/* --- Filter bar ---------------------------------------------------------- */
+
+.atlas-oversight__filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+  padding: var(--atlas-space-3) var(--atlas-space-4);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface);
+}
+
+.atlas-oversight__filters-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--atlas-space-3);
+  flex-wrap: wrap;
+}
+
+.atlas-oversight__period {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+
+.atlas-oversight__advanced {
+  display: grid;
+  gap: var(--atlas-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  align-items: end;
+  padding-top: var(--atlas-space-2);
+}
+
+.atlas-oversight__apply {
+  display: flex;
+  align-items: end;
+  justify-content: flex-start;
+  grid-column: 1 / -1;
+}
+
+/* --- Exception tiles ---------------------------------------------------- */
+
+.atlas-oversight__exception-grid {
+  display: grid;
+  gap: var(--atlas-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.atlas-oversight__tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--atlas-space-3) var(--atlas-space-4);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface);
+  min-width: 0;
+}
+
+.atlas-oversight__tile--attention {
+  border-color: var(--atlas-warning-border);
+  background: var(--atlas-warning-surface);
+}
+
+.atlas-oversight__tile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--atlas-space-2);
+}
+
+.atlas-oversight__tile-label {
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-medium);
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-oversight__tile-value {
+  font-size: 28px;
+  font-weight: var(--atlas-fw-semibold);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--atlas-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.atlas-oversight__tile-value--attention {
+  color: var(--atlas-warning-ink);
+}
+
+.atlas-oversight__tile-scope {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.atlas-oversight__tile-hint {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  line-height: var(--atlas-lh-snug, 1.4);
+}
+
+/* --- Attention queue wrapper -------------------------------------------- */
+
+.atlas-oversight__attention {
+  padding: var(--atlas-space-3);
+}
+
+/* --- Proportional bars (outcomes + patterns) ---------------------------- */
+
+.atlas-oversight__bars {
+  margin: 0;
+  padding: var(--atlas-space-3) var(--atlas-space-4);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface);
+}
+
+.atlas-oversight__bar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+}
+
+.atlas-oversight__bar-list--compact {
+  gap: var(--atlas-space-2);
+}
+
+.atlas-oversight__bar-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: var(--atlas-space-3);
+  row-gap: 4px;
+  align-items: center;
+}
+
+.atlas-oversight__bar-label {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.atlas-oversight__bar-count {
+  font-size: var(--atlas-fs-dense);
+  font-weight: var(--atlas-fw-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--atlas-ink);
+}
+
+.atlas-oversight__bar-track {
+  grid-column: 1 / -1;
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--atlas-surface-sunken);
+  overflow: hidden;
+}
+
+.atlas-oversight__bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--atlas-accent);
+  min-width: 0;
+}
+
+/* --- Recurring pattern grid --------------------------------------------- */
+
+.atlas-oversight__pattern-grid {
+  display: grid;
+  gap: var(--atlas-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-items: start;
+}
+
+.atlas-oversight__pattern {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+  padding: var(--atlas-space-4);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface);
+  min-width: 0;
+}
+
+.atlas-oversight__pattern-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.atlas-oversight__pattern-title {
+  font-size: 14px;
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  margin: 0;
+}
+
+.atlas-oversight__pattern-hint {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  line-height: var(--atlas-lh-snug, 1.4);
+  margin: 0;
+}
+
+.atlas-oversight__pattern-empty {
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+/* --- Communications follow-through -------------------------------------- */
+
+.atlas-oversight__comms {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+  padding: var(--atlas-space-4);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface);
+}
+
+.atlas-oversight__comms-pair {
+  display: grid;
+  gap: var(--atlas-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.atlas-oversight__comms-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--atlas-space-3);
+  border-radius: var(--atlas-radius-control);
+  background: var(--atlas-surface-sunken);
+  border: 1px solid var(--atlas-border);
+}
+
+.atlas-oversight__comms-cell--muted {
+  background: var(--atlas-surface-muted);
+}
+
+.atlas-oversight__comms-label {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-oversight__comms-value {
+  font-size: 22px;
+  font-weight: var(--atlas-fw-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  color: var(--atlas-ink);
+}
+
+.atlas-oversight__comms-note {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-secondary);
+  line-height: var(--atlas-lh-snug, 1.4);
+  margin: 0;
+}
+
+/* --- Supporting workload ------------------------------------------------- */
+
+.atlas-oversight__workload {
+  list-style: none;
+  display: grid;
+  gap: var(--atlas-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin: 0;
+  padding: var(--atlas-space-3) var(--atlas-space-4);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface-muted);
+}
+
+.atlas-oversight__workload-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  min-width: 0;
+}
+
+.atlas-oversight__workload-label,
+.atlas-oversight__workload-value,
+.atlas-oversight__workload-scope,
+.atlas-oversight__workload-hint {
+  display: block;
+}
+
+.atlas-oversight__workload-label {
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-medium);
+  color: var(--atlas-ink-muted);
+  margin: 0;
+}
+
+.atlas-oversight__workload-value {
+  font-size: 20px;
+  font-weight: var(--atlas-fw-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--atlas-ink);
+  margin: 0;
+  line-height: 1.1;
+}
+
+.atlas-oversight__workload-scope {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 2px 0 0;
+}
+
+.atlas-oversight__workload-hint {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  line-height: var(--atlas-lh-snug, 1.4);
+  margin: 2px 0 0;
+}
+
+/* Mobile refinements ------------------------------------------------------- */
+
+@media (max-width: 760px) {
+  .atlas-oversight__exception-grid {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+
+  .atlas-oversight__pattern-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .atlas-oversight__comms-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .atlas-oversight__workload {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .atlas-oversight__filters-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .atlas-oversight__period {
+    width: 100%;
+  }
+}
+
+@media (max-width: 380px) {
+  .atlas-oversight__exception-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .atlas-oversight__tile-value {
+    font-size: 24px;
+  }
+}
