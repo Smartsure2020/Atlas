@@ -9,195 +9,111 @@
  *    scan a history you are looking for who decided what;
  *  - technical metadata stays behind a disclosure, so the timeline reads as
  *    prose rather than as a JSON dump.
+ *
+ * Phase 6 additions:
+ *  - the filter row is a keyboard-navigable toggle group;
+ *  - unknown events land in an "Other activity" group rather than being
+ *    silently reclassified as "changes";
+ *  - the actor line distinguishes "signed-in user (identifier withheld)"
+ *    from "Atlas automation" from "Actor not recorded" — no fabricated
+ *    attribution;
+ *  - times carry an ISO dateTime for tooling plus a visible timezone suffix
+ *    so a scrolled reader knows which clock they are reading.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { getAuditTimeline, type AuditEvent } from "../lib/decisions";
-import { Button, Card, EmptyState, ErrorState, Skeleton } from "../components/ui";
+import { Card, EmptyState, ErrorState, Skeleton } from "../components/ui";
 import { Icon, type IconName } from "../components/Icon";
-import { formatDateTime, formatDayHeading, humanise } from "../lib/format";
+import { formatDateTime } from "../lib/format";
+import {
+  describeAuditEvent,
+  filterAuditEvents,
+  groupAuditByDay,
+  humaniseValue,
+  type AuditGroup,
+} from "../lib/operations-evidence";
 
-type EventGroup = "decisions" | "processing" | "documents" | "communications" | "changes";
+type FilterId = "all" | AuditGroup;
 
-interface EventMeta {
-  label: string;
-  group: EventGroup;
-  /** Human decisions read louder than automated steps. */
-  actor: "human" | "system";
-  tone?: "danger";
-  icon: IconName;
-}
-
-const EVENTS: Record<string, EventMeta> = {
-  submission_created: { label: "Submission created", group: "changes", actor: "human", icon: "plus" },
-  document_uploaded: { label: "Document uploaded", group: "documents", actor: "human", icon: "upload" },
-  extraction_run: { label: "Extraction run", group: "processing", actor: "system", icon: "refresh" },
-  extraction_denied: {
-    label: "Extraction refused — not an underwriting manager",
-    group: "processing",
-    actor: "system",
-    tone: "danger",
-    icon: "x-circle",
-  },
-  extraction_reviewed: {
-    label: "Risk information reviewed and corrected",
-    group: "decisions",
-    actor: "human",
-    icon: "check-circle",
-  },
-  recommendation_run: {
-    label: "Insurer recommendation run",
-    group: "processing",
-    actor: "system",
-    icon: "refresh",
-  },
-  decision_accepted: {
-    label: "Decision recorded — Atlas recommendation accepted",
-    group: "decisions",
-    actor: "human",
-    icon: "check-circle",
-  },
-  decision_overridden: {
-    label: "Decision recorded — Atlas recommendation overridden",
-    group: "decisions",
-    actor: "human",
-    icon: "arrow-up-right",
-  },
-  decision_override_ruled_out: {
-    label: "Decision recorded — routed to an insurer that was ruled out",
-    group: "decisions",
-    actor: "human",
-    tone: "danger",
-    icon: "alert-triangle",
-  },
-  decision_blocked_ruled_out_override: {
-    label: "Decision blocked — a manager is required for this override",
-    group: "decisions",
-    actor: "system",
-    tone: "danger",
-    icon: "x-circle",
-  },
-  email_draft_generated: {
-    label: "Communication drafted",
-    group: "communications",
-    actor: "human",
-    icon: "copy",
-  },
-  insurer_created: { label: "Insurer added", group: "changes", actor: "human", icon: "plus" },
-  insurer_edited: { label: "Insurer edited", group: "changes", actor: "human", icon: "edit" },
-  insurer_document_uploaded: {
-    label: "Insurer guideline uploaded",
-    group: "documents",
-    actor: "human",
-    icon: "upload",
-  },
-  insurer_document_processed: {
-    label: "Insurer guideline processed",
-    group: "processing",
-    actor: "system",
-    icon: "refresh",
-  },
-  appetite_confirmed: { label: "Appetite rule confirmed", group: "changes", actor: "human", icon: "check" },
-  appetite_edited: { label: "Appetite rule edited", group: "changes", actor: "human", icon: "edit" },
-  appetite_deactivated: {
-    label: "Appetite rule deactivated",
-    group: "changes",
-    actor: "human",
-    icon: "minus-circle",
-  },
-  appetite_manual_added: {
-    label: "Appetite rule added manually",
-    group: "changes",
-    actor: "human",
-    icon: "plus",
-  },
-  sign_in: { label: "Signed in", group: "changes", actor: "human", icon: "user" },
-  dev_sign_in: { label: "Development sign-in", group: "changes", actor: "human", icon: "user" },
-};
-
-function metaFor(action: string): EventMeta {
-  return (
-    EVENTS[action] ?? {
-      label: humanise(action, "Activity"),
-      group: "changes",
-      actor: "system",
-      icon: "info",
-    }
-  );
-}
-
-const FILTERS: { id: "all" | EventGroup; label: string }[] = [
+const FILTERS: { id: FilterId; label: string }[] = [
   { id: "all", label: "All activity" },
   { id: "decisions", label: "Decisions" },
   { id: "processing", label: "Processing" },
   { id: "documents", label: "Documents" },
   { id: "communications", label: "Communications" },
   { id: "changes", label: "Changes" },
+  { id: "other", label: "Other activity" },
 ];
+
+const RESOLVED_TIME_ZONE = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
+})();
+
+const TIME_ZONE_SUFFIX = (() => {
+  try {
+    const parts = new Intl.DateTimeFormat("en-ZA", {
+      timeZoneName: "short",
+    }).formatToParts(new Date());
+    return parts.find((p) => p.type === "timeZoneName")?.value ?? "";
+  } catch {
+    return "";
+  }
+})();
 
 export default function AuditTimeline({ submissionId }: { submissionId: string }) {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"all" | EventGroup>("all");
+  const [filter, setFilter] = useState<FilterId>("all");
   const [reloadToken, setReloadToken] = useState(0);
+  const requestSeq = useRef(0);
 
   useEffect(() => {
-    let live = true;
-    setLoading(true);
-    getAuditTimeline(submissionId)
-      .then((result) => {
-        if (!live) return;
-        setEvents(result.events);
-        setError(null);
-      })
-      .catch(() => {
-        if (live) setError("The activity history could not be loaded.");
-      })
-      .finally(() => {
-        if (live) setLoading(false);
-      });
+    // Same StrictMode-safe pattern the Phase 5 manager overview uses: a
+    // deferred load, a per-instance sequence guard, and a cleanup flag
+    // that runs before the microtask drains under a discarded mount.
+    let cancelled = false;
+    const seq = ++requestSeq.current;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setLoading(true);
+      getAuditTimeline(submissionId)
+        .then((result) => {
+          if (requestSeq.current !== seq) return;
+          setEvents(result.events);
+          setError(null);
+        })
+        .catch(() => {
+          if (requestSeq.current !== seq) return;
+          setError("The activity history could not be loaded.");
+        })
+        .finally(() => {
+          if (requestSeq.current === seq) setLoading(false);
+        });
+    });
     return () => {
-      live = false;
+      cancelled = true;
     };
   }, [submissionId, reloadToken]);
 
-  const visible = useMemo(
-    () => (filter === "all" ? events : events.filter((event) => metaFor(event.action).group === filter)),
-    [events, filter]
+  const visible = useMemo(() => filterAuditEvents(events, filter), [events, filter]);
+  const days = useMemo(
+    () => groupAuditByDay(visible, { timeZone: RESOLVED_TIME_ZONE }),
+    [visible]
   );
-
-  // Group by calendar day once the history is long enough for it to help.
-  const days = useMemo(() => {
-    const buckets = new Map<string, AuditEvent[]>();
-    for (const event of visible) {
-      const key = formatDayHeading(event.created_at);
-      const bucket = buckets.get(key);
-      if (bucket) bucket.push(event);
-      else buckets.set(key, [event]);
-    }
-    return Array.from(buckets.entries());
-  }, [visible]);
 
   return (
     <Card
       title="Activity history"
       description="Every recorded action on this submission, newest first. This is the audit trail."
-      actions={
-        <div className="atlas-actions">
-          {FILTERS.map((option) => (
-            <Button
-              key={option.id}
-              size="sm"
-              variant={filter === option.id ? "primary" : "ghost"}
-              onClick={() => setFilter(option.id)}
-            >
-              {option.label}
-            </Button>
-          ))}
-        </div>
-      }
     >
+      <FilterToggleGroup filter={filter} onChange={setFilter} />
+
       {loading ? (
         <div aria-hidden="true">
           <Skeleton width="30%" />
@@ -223,59 +139,13 @@ export default function AuditTimeline({ submissionId }: { submissionId: string }
         />
       ) : (
         <div>
-          {days.map(([day, dayEvents]) => (
-            <section key={day}>
-              <h3 className="atlas-timeline__daygroup">{day}</h3>
+          {days.map((day) => (
+            <section key={day.key} aria-label={day.heading}>
+              <h3 className="atlas-timeline__daygroup">{day.heading}</h3>
               <ol className="atlas-timeline">
-                {dayEvents.map((event) => {
-                  const meta = metaFor(event.action);
-                  const metadata =
-                    event.metadata !== null &&
-                    typeof event.metadata === "object" &&
-                    Object.keys(event.metadata as object).length > 0
-                      ? (event.metadata as Record<string, unknown>)
-                      : null;
-                  return (
-                    <li
-                      className={`atlas-event atlas-event--${meta.actor}${
-                        meta.tone === "danger" ? " atlas-event--danger" : ""
-                      }`}
-                      key={event.id}
-                    >
-                      <span className="atlas-event__mark">
-                        <Icon name={meta.icon} size={14} />
-                      </span>
-                      <div>
-                        <p className="atlas-event__title">{meta.label}</p>
-                        <p className="atlas-event__meta">
-                          {event.actor_email ?? (event.actor_id ? "A user" : "Atlas (automated)")}
-                        </p>
-                        {metadata && (
-                          <details className="atlas-disclosure" style={{ marginTop: 4 }}>
-                            <summary>Recorded detail</summary>
-                            <div className="atlas-disclosure__body">
-                              <dl className="atlas-kv">
-                                {Object.entries(metadata).map(([key, value]) => (
-                                  <div className="atlas-kv__item" key={key}>
-                                    <dt className="atlas-kv__key">{humanise(key)}</dt>
-                                    <dd className="atlas-kv__value atlas-text-dense">
-                                      {typeof value === "object" && value !== null
-                                        ? JSON.stringify(value)
-                                        : String(value)}
-                                    </dd>
-                                  </div>
-                                ))}
-                              </dl>
-                            </div>
-                          </details>
-                        )}
-                      </div>
-                      <time className="atlas-event__time" dateTime={event.created_at}>
-                        {formatDateTime(event.created_at)}
-                      </time>
-                    </li>
-                  );
-                })}
+                {day.events.map((event) => (
+                  <TimelineRow key={event.id} event={event} />
+                ))}
               </ol>
             </section>
           ))}
@@ -283,4 +153,128 @@ export default function AuditTimeline({ submissionId }: { submissionId: string }
       )}
     </Card>
   );
+}
+
+/* ===========================================================================
+   Filter toggle group — one row of aria-pressed buttons, keyboard nav.
+   =========================================================================== */
+
+function FilterToggleGroup({
+  filter,
+  onChange,
+}: {
+  filter: FilterId;
+  onChange: (next: FilterId) => void;
+}) {
+  const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const index = FILTERS.findIndex((f) => f.id === filter);
+    if (index < 0) return;
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % FILTERS.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + FILTERS.length) % FILTERS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = FILTERS.length - 1;
+    else return;
+    event.preventDefault();
+    const target = FILTERS[next];
+    onChange(target.id);
+    refs.current[target.id]?.focus();
+  }
+
+  return (
+    <nav aria-label="Filter activity by category">
+      <div
+        className="atlas-timeline__filterbar"
+        role="group"
+        aria-label="Activity filters"
+        onKeyDown={onKeyDown}
+      >
+        {FILTERS.map((option) => {
+          const active = filter === option.id;
+          return (
+            <button
+              key={option.id}
+              ref={(node) => {
+                refs.current[option.id] = node;
+              }}
+              type="button"
+              className={
+                "atlas-btn atlas-btn--sm" +
+                (active ? " atlas-btn--primary" : " atlas-btn--ghost")
+              }
+              aria-pressed={active}
+              onClick={() => onChange(option.id)}
+            >
+              <span>{option.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+/* ===========================================================================
+   Timeline row — the presentation of one audit event.
+   =========================================================================== */
+
+function TimelineRow({ event }: { event: AuditEvent }) {
+  const presentation = describeAuditEvent(event);
+  const displayTime = TIME_ZONE_SUFFIX
+    ? `${formatDateTime(event.created_at)} ${TIME_ZONE_SUFFIX}`
+    : formatDateTime(event.created_at);
+  const classes = [
+    "atlas-event",
+    `atlas-event--${presentation.actorKind === "person" ? "human" : presentation.actorKind}`,
+    presentation.tone === "danger" ? "atlas-event--danger" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <li className={classes}>
+      <span className="atlas-event__mark">
+        <Icon name={presentation.icon as IconName} size={14} />
+      </span>
+      <div>
+        <p className="atlas-event__title">{presentation.label}</p>
+        <p className="atlas-event__meta">{presentation.actorLabel}</p>
+        {presentation.metadataEntries && (
+          <details className="atlas-disclosure" style={{ marginTop: 4 }}>
+            <summary>Recorded detail</summary>
+            <div className="atlas-disclosure__body">
+              <dl className="atlas-kv">
+                {presentation.metadataEntries.map(([key, value]) => (
+                  <div className="atlas-kv__item" key={key}>
+                    <dt className="atlas-kv__key">{key}</dt>
+                    <dd className="atlas-kv__value atlas-text-dense">
+                      <MetadataValue value={value} />
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          </details>
+        )}
+      </div>
+      <time className="atlas-event__time" dateTime={event.created_at}>
+        {displayTime}
+      </time>
+    </li>
+  );
+}
+
+/**
+ * Multi-line values (pretty-printed JSON from an object metadata entry) go
+ * into a scrollable <pre> so a long payload never pushes the timeline
+ * horizontally. Scalar values render inline.
+ */
+function MetadataValue({ value }: { value: string }) {
+  if (value.includes("\n")) {
+    return (
+      <pre style={{ overflowX: "auto", margin: 0, whiteSpace: "pre" }}>{value}</pre>
+    );
+  }
+  return <span>{humaniseValue(value)}</span>;
 }

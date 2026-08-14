@@ -2452,3 +2452,77 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
     justify-content: flex-start;
   }
 }
+
+/* ===========================================================================
+   Audit timeline filterbar (Phase 6)
+   ---------------------------------------------------------------------------
+   A horizontal toggle group. On narrow viewports it scrolls rather than
+   wrapping, so the reader is never forced to look at a two-row grid of
+   buttons.
+   =========================================================================== */
+
+.atlas-timeline__filterbar {
+  display: flex;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--atlas-space-3);
+}
+
+@media (max-width: 480px) {
+  .atlas-timeline__filterbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: var(--atlas-space-1);
+  }
+}
+
+.atlas-event--unknown .atlas-event__mark {
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-event--unknown .atlas-event__title {
+  color: var(--atlas-ink-secondary);
+}
+
+/* ===========================================================================
+   Submission document groups (Phase 6)
+   ---------------------------------------------------------------------------
+   Trust-first sections inside the documents card. Each h3 carries the tone
+   of its section; hint copy explains what Atlas has and has not done to
+   the files below it.
+   =========================================================================== */
+
+.atlas-doc-groups {
+  display: block;
+}
+
+.atlas-doc-groups__section {
+  margin-top: var(--atlas-space-4);
+}
+
+.atlas-doc-groups__section:first-of-type {
+  margin-top: var(--atlas-space-3);
+}
+
+.atlas-doc-groups__heading {
+  font-size: 14px;
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  margin: 0 0 var(--atlas-space-1);
+}
+
+.atlas-doc-groups__heading--danger {
+  color: var(--atlas-danger-ink);
+}
+
+.atlas-doc-groups__heading--warning {
+  color: var(--atlas-warning-ink);
+}
+
+.atlas-doc-groups__hint {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  line-height: var(--atlas-lh-snug, 1.4);
+  margin: 0 0 var(--atlas-space-2);
+  max-width: 78ch;
+}
