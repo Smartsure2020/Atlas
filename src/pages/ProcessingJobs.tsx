@@ -117,24 +117,25 @@ export default function ProcessingJobs({
     queueMicrotask(() => {
       if (cancelled) return;
       setLoading(true);
+      // `listJobs` is the essential call — its failure surface says the
+      // reader lacks permission (or the API is down), so it flows through
+      // the outer catch. The other three are supporting context and keep
+      // their per-call `.catch(() => null)` so a single failing supporting
+      // endpoint never blanks the whole page.
       Promise.all([
         getSystemStatus().catch(() => null),
-        listJobs().catch(() => null),
+        listJobs(),
         cleanupPreview().catch(() => null),
         listAlerts().catch(() => ({ alerts: [] as OperationalAlert[] })),
       ])
         .then(([status, jobResult, cleanup, alertResult]) => {
           if (requestSeq.current !== seq) return;
           setSystemStatus(status);
-          setJobs(jobResult?.jobs ?? []);
-          setSummary(jobResult?.summary ?? null);
+          setJobs(jobResult.jobs);
+          setSummary(jobResult.summary);
           setExpiredDocuments(cleanup ? cleanup.expired_active_documents.length : null);
           setAlerts(alertResult.alerts);
-          setLoadError(
-            jobResult
-              ? null
-              : "Job history could not be loaded. You may not have permission, or the server may be temporarily unavailable."
-          );
+          setLoadError(null);
           setHydrated(true);
         })
         .catch((cause: Error) => {
@@ -142,7 +143,7 @@ export default function ProcessingJobs({
           setLoadError(
             cause.message === "not_authenticated"
               ? "Your session has expired. Sign in again to view processing health."
-              : "Processing health could not be loaded. This screen requires an administrator or manager account."
+              : "Processing health could not be loaded. This screen requires an administrator or manager account. You may not have permission, or the server may be temporarily unavailable."
           );
         })
         .finally(() => {
@@ -435,8 +436,12 @@ export default function ProcessingJobs({
         title="Processing and alerts"
         description="Extraction, appetite matching, quote review and guideline ingestion all run as background jobs. This is where failures surface."
         actions={
-          <Button icon="refresh" onClick={refresh} loading={loading} loadingLabel="Refreshing…">
-            Refresh
+          // Refresh is intentionally not disabled while a fetch is in
+          // flight — the sequence guard drops stale responses, and a
+          // user who wants a re-fetch after a click has taken too long
+          // should not be blocked from asking.
+          <Button icon="refresh" onClick={refresh} aria-busy={loading || undefined}>
+            {loading ? "Refreshing…" : "Refresh"}
           </Button>
         }
       />
