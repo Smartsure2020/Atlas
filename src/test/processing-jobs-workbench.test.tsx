@@ -227,7 +227,7 @@ describe("Processing operations workbench", () => {
   });
 
   it("does not let a slow initial response overwrite a fresher refresh", async () => {
-    let resolveSlow: ((value: unknown) => void) | null = null;
+    let resolveSlow: (value: unknown) => void = () => undefined;
     listJobsMock.mockReturnValueOnce(
       new Promise((r) => {
         resolveSlow = r;
@@ -262,7 +262,7 @@ describe("Processing operations workbench", () => {
     expect(await screen.findByText("222")).toBeInTheDocument();
 
     // Now release the stale response.
-    resolveSlow?.({ ok: true, jobs: [], summary: summary() });
+    resolveSlow({ ok: true, jobs: [], summary: summary() });
     await new Promise((r) => setTimeout(r, 20));
     // The stale 111 must never appear.
     expect(screen.queryByText("111")).not.toBeInTheDocument();
