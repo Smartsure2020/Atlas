@@ -30,7 +30,6 @@ import {
   describeAuditEvent,
   filterAuditEvents,
   groupAuditByDay,
-  humaniseValue,
   type AuditGroup,
 } from "../lib/operations-evidence";
 
@@ -268,7 +267,9 @@ function TimelineRow({ event }: { event: AuditEvent }) {
 /**
  * Multi-line values (pretty-printed JSON from an object metadata entry) go
  * into a scrollable <pre> so a long payload never pushes the timeline
- * horizontally. Scalar values render inline.
+ * horizontally. Scalar values render inline. The incoming string was
+ * already humanised by describeAuditEvent, so no further conversion is
+ * needed here.
  */
 function MetadataValue({ value }: { value: string }) {
   if (value.includes("\n")) {
@@ -276,5 +277,5 @@ function MetadataValue({ value }: { value: string }) {
       <pre style={{ overflowX: "auto", margin: 0, whiteSpace: "pre" }}>{value}</pre>
     );
   }
-  return <span>{humaniseValue(value)}</span>;
+  return <span>{value}</span>;
 }

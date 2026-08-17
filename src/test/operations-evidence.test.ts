@@ -671,4 +671,102 @@ describe("groupAuditByDay", () => {
     });
     expect(buckets.map((b) => b.events.map((e) => e.id))).toEqual([["x", "z"], ["y"]]);
   });
+
+  // ------------------------------------------------------------------------
+  // Timezone-safe heading regression: the visible day-heading must never
+  // shift by the browser's local timezone. The key is already a resolved
+  // calendar day in the caller's timezone (calendarKey); formatting it must
+  // treat it as that literal day, not as UTC midnight reinterpreted locally.
+  // ------------------------------------------------------------------------
+
+  it("renders an older-bucket heading identically across every browser timezone", () => {
+    // Use an event that lands on 2026-08-13 in every timezone under test so
+    // the key is stable across runs and we can assert the exact heading.
+    const events = [event({ id: "older", created_at: "2026-08-13T12:00:00Z" })];
+    const now = new Date("2026-08-15T09:00:00Z");
+
+    for (const timeZone of ["UTC", "Africa/Johannesburg", "America/Los_Angeles", "America/New_York"]) {
+      const buckets = groupAuditByDay(events, { now, timeZone });
+      // Only one bucket, keyed 2026-08-13, and its heading is "13 Aug 2026".
+      expect(buckets).toHaveLength(1);
+      expect(buckets[0].key).toBe("2026-08-13");
+      expect(buckets[0].heading).toBe("13 Aug 2026");
+    }
+  });
+
+  it("does not shift the heading across a month boundary in a west-of-UTC timezone", () => {
+    // Event at 2026-07-31 15:00 UTC — 08:00 local in America/Los_Angeles.
+    // The key is 2026-07-31 in every timezone under test.
+    const events = [event({ id: "eom", created_at: "2026-07-31T15:00:00Z" })];
+    const now = new Date("2026-08-05T09:00:00Z");
+    for (const timeZone of ["UTC", "America/Los_Angeles"]) {
+      const buckets = groupAuditByDay(events, { now, timeZone });
+      expect(buckets[0].key).toBe("2026-07-31");
+      expect(buckets[0].heading).toBe("31 Jul 2026");
+    }
+  });
+
+  it("does not shift the heading across a year boundary in a west-of-UTC timezone", () => {
+    // 2025-12-31 20:00 UTC → 12:00 local in America/Los_Angeles. Key is
+    // 2025-12-31 in both UTC and LA; heading must read "31 Dec 2025".
+    const events = [event({ id: "eoy", created_at: "2025-12-31T20:00:00Z" })];
+    const now = new Date("2026-01-10T09:00:00Z");
+    for (const timeZone of ["UTC", "America/Los_Angeles"]) {
+      const buckets = groupAuditByDay(events, { now, timeZone });
+      expect(buckets[0].key).toBe("2025-12-31");
+      expect(buckets[0].heading).toBe("31 Dec 2025");
+    }
+  });
+
+  it("renders the leap day correctly", () => {
+    const events = [event({ id: "leap", created_at: "2024-02-29T12:00:00Z" })];
+    const now = new Date("2024-03-05T09:00:00Z");
+    for (const timeZone of ["UTC", "Africa/Johannesburg", "America/Los_Angeles"]) {
+      const buckets = groupAuditByDay(events, { now, timeZone });
+      expect(buckets[0].key).toBe("2024-02-29");
+      expect(buckets[0].heading).toBe("29 Feb 2024");
+    }
+  });
+
+  it("keeps the Today / Yesterday labels stable in a west-of-UTC timezone", () => {
+    // now is 15:00 UTC on 14 Aug → 08:00 LA-local same day. An event 3
+    // hours earlier (12:00 UTC = 05:00 LA) is Today in LA; an event 30
+    // hours earlier (09:00 UTC 13 Aug = 02:00 LA 13 Aug) is Yesterday.
+    const now = new Date("2026-08-14T15:00:00Z");
+    const events = [
+      event({ id: "today", created_at: "2026-08-14T12:00:00Z" }),
+      event({ id: "yest", created_at: "2026-08-13T09:00:00Z" }),
+    ];
+    const buckets = groupAuditByDay(events, { now, timeZone: "America/Los_Angeles" });
+    const byKey = Object.fromEntries(buckets.map((b) => [b.events[0].id, b.heading]));
+    expect(byKey.today).toBe("Today");
+    expect(byKey.yest).toBe("Yesterday");
+  });
+
+  it("falls back safely when the key cannot be parsed as YYYY-MM-DD", () => {
+    // Direct constructor for an unparseable timestamp: the caller assigns
+    // key "unknown", which formats as "Unknown date".
+    const buckets = groupAuditByDay(
+      [event({ id: "broken", created_at: "definitely-not-a-date" })],
+      { now: new Date("2026-08-14T00:00:00Z"), timeZone: "UTC" }
+    );
+    expect(buckets[0].heading).toBe("Unknown date");
+  });
+
+  it("does not mutate its input events", () => {
+    const events = [
+      event({ id: "a", created_at: "2026-08-14T09:00:00Z" }),
+      event({ id: "b", created_at: "2026-08-13T09:00:00Z" }),
+    ];
+    Object.freeze(events);
+    const buckets = groupAuditByDay(events, {
+      now: new Date("2026-08-14T12:00:00Z"),
+      timeZone: "UTC",
+    });
+    expect(buckets).toHaveLength(2);
+    // Original array is untouched.
+    expect(events.map((e) => e.id)).toEqual(["a", "b"]);
+    // Group order is preserved.
+    expect(buckets.map((b) => b.events.map((e) => e.id))).toEqual([["a"], ["b"]]);
+  });
 });

@@ -768,6 +768,19 @@ function headingFor(key: string, today: string, yesterday: string): string {
   if (key === "unknown") return "Unknown date";
   if (key === today) return "Today";
   if (key === yesterday) return "Yesterday";
-  // Recompose the ISO date so formatDate can render it in the en-ZA short form.
-  return formatDate(`${key}T00:00:00Z`);
+  // The key already resolves to one calendar day in the caller's timezone
+  // (see calendarKey). Format it with an explicit UTC anchor so the
+  // browser's local timezone cannot shift the displayed day — e.g.
+  // "2026-08-13" must read as "13 Aug 2026" in Africa/Johannesburg, UTC
+  // and America/Los_Angeles alike.
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+  if (!match) return formatDate(key);
+  const [, y, m, d] = match;
+  const utc = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
+  return new Intl.DateTimeFormat("en-ZA", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(utc);
 }

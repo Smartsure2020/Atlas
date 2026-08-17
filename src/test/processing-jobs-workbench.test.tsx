@@ -639,4 +639,189 @@ describe("Processing operations workbench", () => {
     await screen.findByText(/You may not have permission/i);
     expect(await axe(container)).toHaveNoViolations();
   });
+
+  /* -------- MED-1 regression: refresh-failure stale-data warning -------- */
+
+  it("keeps prior data visible and surfaces a stale-data warning when refresh fails", async () => {
+    mockPopulated({
+      status: status({ failed_count: 7 }),
+      jobs: [job({ id: "j1", status: "completed" })],
+      alerts: [alert({ id: "a1", severity: "warning", status: "open", title: "Cache warm" })],
+    });
+    renderPage();
+    // Populated hydration.
+    await screen.findByText(/Where operations need attention/i);
+    expect(screen.getByText("7")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Operational alerts/i })).toBeInTheDocument();
+
+    // Arm every endpoint to reject on the refresh — listJobs is the flow
+    // that trips the outer catch.
+    getSystemStatusMock.mockClear();
+    listJobsMock.mockClear();
+    listAlertsMock.mockClear();
+    cleanupPreviewMock.mockClear();
+    getSystemStatusMock.mockResolvedValue(null);
+    cleanupPreviewMock.mockResolvedValue(null);
+    listAlertsMock.mockResolvedValue({ ok: true, alerts: [] });
+    listJobsMock.mockRejectedValue(new Error("boom"));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Refresh$/i }));
+
+    // Persistent warning appears with the required copy.
+    expect(
+      await screen.findByText(/Atlas could not refresh this page/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/The information shown may be outdated/i)
+    ).toBeInTheDocument();
+
+    // Prior counters, jobs and alerts stay visible.
+    expect(screen.getByText("7")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Operational alerts/i })).toBeInTheDocument();
+
+    // The permission-denied full ErrorState is NOT shown — we still have data.
+    expect(screen.queryByText(/You may not have permission/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Your session has expired/i)).not.toBeInTheDocument();
+
+    // Refresh button is not stuck in a busy state (it returned to idle).
+    const headerRefresh = screen.getByRole("button", { name: /^Refresh$/i });
+    expect(headerRefresh).not.toHaveAttribute("aria-busy", "true");
+  });
+
+  it("Try again inside the stale-data warning issues exactly one refresh", async () => {
+    mockPopulated({
+      status: status({ failed_count: 3 }),
+      jobs: [job({ id: "j1", status: "completed" })],
+    });
+    renderPage();
+    await screen.findByText(/Where operations need attention/i);
+
+    // Fail the first refresh so the warning appears.
+    getSystemStatusMock.mockResolvedValue(null);
+    cleanupPreviewMock.mockResolvedValue(null);
+    listAlertsMock.mockResolvedValue({ ok: true, alerts: [] });
+    listJobsMock.mockRejectedValueOnce(new Error("boom"));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Refresh$/i }));
+    await screen.findByText(/Atlas could not refresh this page/i);
+
+    // Clear counters for the retry we care about.
+    getSystemStatusMock.mockClear();
+    listJobsMock.mockClear();
+    listAlertsMock.mockClear();
+    cleanupPreviewMock.mockClear();
+    // Arm a successful retry.
+    getSystemStatusMock.mockResolvedValue(status({ failed_count: 9 }));
+    cleanupPreviewMock.mockResolvedValue({
+      ok: true,
+      mode: "preview_only",
+      expired_active_documents: [],
+      orphan_storage_note: "",
+    });
+    listAlertsMock.mockResolvedValue({ ok: true, alerts: [] });
+    listJobsMock.mockResolvedValue({ ok: true, jobs: [], summary: summary() });
+
+    await user.click(screen.getByRole("button", { name: /Try again/i }));
+
+    await waitFor(() => expect(listJobsMock).toHaveBeenCalledTimes(1));
+    expect(getSystemStatusMock).toHaveBeenCalledTimes(1);
+    expect(listAlertsMock).toHaveBeenCalledTimes(1);
+    expect(cleanupPreviewMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the stale-data warning once a refresh succeeds", async () => {
+    mockPopulated({ status: status({ failed_count: 3 }) });
+    renderPage();
+    await screen.findByText(/Where operations need attention/i);
+
+    // Fail the first refresh.
+    getSystemStatusMock.mockResolvedValue(null);
+    cleanupPreviewMock.mockResolvedValue(null);
+    listAlertsMock.mockResolvedValue({ ok: true, alerts: [] });
+    listJobsMock.mockRejectedValueOnce(new Error("boom"));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Refresh$/i }));
+    await screen.findByText(/Atlas could not refresh this page/i);
+
+    // Arm a successful retry.
+    getSystemStatusMock.mockResolvedValue(status({ failed_count: 21 }));
+    cleanupPreviewMock.mockResolvedValue({
+      ok: true,
+      mode: "preview_only",
+      expired_active_documents: [],
+      orphan_storage_note: "",
+    });
+    listAlertsMock.mockResolvedValue({ ok: true, alerts: [] });
+    listJobsMock.mockResolvedValue({ ok: true, jobs: [], summary: summary() });
+
+    await user.click(screen.getByRole("button", { name: /Try again/i }));
+
+    // Warning disappears and the fresh counter is visible.
+    await waitFor(() =>
+      expect(screen.queryByText(/Atlas could not refresh this page/i)).not.toBeInTheDocument()
+    );
+    expect(screen.getByText("21")).toBeInTheDocument();
+  });
+
+  it("uses the session-expired copy when the refresh rejects with not_authenticated", async () => {
+    mockPopulated();
+    renderPage();
+    await screen.findByText(/Where operations need attention/i);
+
+    getSystemStatusMock.mockResolvedValue(null);
+    cleanupPreviewMock.mockResolvedValue(null);
+    listAlertsMock.mockResolvedValue({ ok: true, alerts: [] });
+    listJobsMock.mockRejectedValueOnce(new Error("not_authenticated"));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Refresh$/i }));
+
+    expect(
+      await screen.findByText(/Your session has expired, so Atlas could not refresh/i)
+    ).toBeInTheDocument();
+    // Still not the full ErrorState — prior workbench body remains.
+    expect(screen.getByText(/Where operations need attention/i)).toBeInTheDocument();
+  });
+
+  it("keyboard-activates the Try again button in the stale-data warning", async () => {
+    mockPopulated();
+    renderPage();
+    await screen.findByText(/Where operations need attention/i);
+
+    getSystemStatusMock.mockResolvedValue(null);
+    cleanupPreviewMock.mockResolvedValue(null);
+    listAlertsMock.mockResolvedValue({ ok: true, alerts: [] });
+    listJobsMock.mockRejectedValueOnce(new Error("boom"));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Refresh$/i }));
+    const retry = await screen.findByRole("button", { name: /Try again/i });
+
+    listJobsMock.mockClear();
+    listJobsMock.mockResolvedValueOnce({ ok: true, jobs: [], summary: summary() });
+
+    retry.focus();
+    expect(retry).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(listJobsMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("is axe-clean while the stale-data warning is visible", async () => {
+    mockPopulated();
+    const { container } = renderPage();
+    await screen.findByText(/Where operations need attention/i);
+
+    getSystemStatusMock.mockResolvedValue(null);
+    cleanupPreviewMock.mockResolvedValue(null);
+    listAlertsMock.mockResolvedValue({ ok: true, alerts: [] });
+    listJobsMock.mockRejectedValueOnce(new Error("boom"));
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Refresh$/i }));
+    await screen.findByText(/Atlas could not refresh this page/i);
+    expect(await axe(container)).toHaveNoViolations();
+  });
 });

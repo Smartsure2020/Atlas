@@ -94,6 +94,11 @@ export default function ProcessingJobs({
   const [loading, setLoading] = useState(true);
   const [hydrated, setHydrated] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Post-hydration refresh failures live in a separate slot so the full
+  // error state stays reserved for the "no trustworthy data at all" case
+  // while a stale-data warning surfaces alongside the previously loaded
+  // counters, alerts and jobs.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const requestSeq = useRef(0);
@@ -136,15 +141,26 @@ export default function ProcessingJobs({
           setExpiredDocuments(cleanup ? cleanup.expired_active_documents.length : null);
           setAlerts(alertResult.alerts);
           setLoadError(null);
+          setRefreshError(null);
           setHydrated(true);
         })
         .catch((cause: Error) => {
           if (requestSeq.current !== seq) return;
-          setLoadError(
+          const message =
             cause.message === "not_authenticated"
               ? "Your session has expired. Sign in again to view processing health."
-              : "Processing health could not be loaded. This screen requires an administrator or manager account. You may not have permission, or the server may be temporarily unavailable."
-          );
+              : "Processing health could not be loaded. This screen requires an administrator or manager account. You may not have permission, or the server may be temporarily unavailable.";
+          if (hydrated) {
+            // We already had trustworthy data on screen — keep it and warn
+            // that it is now stale rather than blanking the page.
+            setRefreshError(
+              cause.message === "not_authenticated"
+                ? "Your session has expired, so Atlas could not refresh the operational data. The information shown may be outdated. Sign in again to reload."
+                : "Atlas could not refresh the operational data. The information shown may be outdated."
+            );
+          } else {
+            setLoadError(message);
+          }
         })
         .finally(() => {
           if (requestSeq.current === seq) setLoading(false);
@@ -458,6 +474,27 @@ export default function ProcessingJobs({
             }
           >
             {actionError}
+          </Notice>
+        </div>
+      )}
+
+      {refreshError && (
+        <div style={{ marginBottom: "var(--atlas-space-4)" }}>
+          {/* Persistent stale-data warning. `role="status"` announces once
+              politely and does not interrupt with every re-render; the
+              notice is only removed by a successful refresh, so a fresh
+              failure alongside unchanged copy will not double-announce. */}
+          <Notice
+            tone="warning"
+            role="status"
+            title="Atlas could not refresh this page"
+            actions={
+              <Button size="sm" icon="refresh" onClick={refresh} aria-busy={loading || undefined}>
+                {loading ? "Refreshing…" : "Try again"}
+              </Button>
+            }
+          >
+            {refreshError}
           </Notice>
         </div>
       )}
