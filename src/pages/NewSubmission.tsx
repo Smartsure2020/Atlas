@@ -4,46 +4,57 @@
  * Captures the request, the broker's email, and the client documents, then
  * creates the submission and uploads each file.
  *
- * The upload area is a real drop zone with per-file classification and removal,
- * because misclassified documents are the most common cause of a poor
- * extraction. Nothing is created until the user commits.
+ * The Phase 7 rewrite makes intake retry-safe. The old flow held the
+ * submissionId in a local `let` inside onSubmit and dropped it whenever an
+ * upload rejected, so a second click re-hit createSubmission and produced a
+ * duplicate record. This version:
+ *
+ *   1. Anchors every create decision to `submissionIdRef` — the id lives in a
+ *      ref (and its mirror state) that persists across renders. The moment
+ *      createSubmission returns, the ref is populated; every subsequent
+ *      click on the primary button routes to a retry loop over just the
+ *      remaining files, and never touches createSubmission again.
+ *   2. Tracks per-file upload status by a stable `clientId`, so a retry
+ *      only re-tries what actually failed. React keys and remove-by-id
+ *      match, so removing a file cannot steal focus from the row above.
+ *   3. Presents the partial state honestly. The recovery notice says the
+ *      submission was created and names how many files still need to
+ *      upload — never "open the submission and add them there" (that
+ *      screen has no upload control), and never labels the whole intake
+ *      as failed while a submissionId exists.
  *
  * Note: no HTML <form> element — plain controlled inputs and an explicit
  * submit handler, matching the rest of the codebase.
  */
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { createSubmission, uploadDocument } from "../lib/atlas";
 import {
   Button,
   Card,
+  ConfirmDialog,
   Field,
   IconButton,
   Notice,
   PageHeader,
   ProgressStages,
   SelectField,
+  StatusBadge,
   TextAreaField,
   TextField,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
-import { formatFileSize, truncateMiddle } from "../lib/format";
+import { formatFileSize, pluralise, truncateMiddle } from "../lib/format";
 import { DOCUMENT_TYPE_OPTIONS, LINE_OF_BUSINESS_OPTIONS } from "../lib/status";
-import { guessDocumentType } from "../lib/intake-intelligence";
+import {
+  assignClientIds,
+  intakePhaseSummary,
+  remainingUploads,
+  type IntakePhase,
+  type PendingFile,
+} from "../lib/intake-intelligence";
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
-
-interface PendingFile {
-  file: File;
-  type: string;
-  /** Set when the file cannot be uploaded as-is. */
-  problem?: string;
-}
-
-type UploadPhase =
-  | { kind: "idle" }
-  | { kind: "creating" }
-  | { kind: "uploading"; index: number; total: number; name: string };
 
 export default function NewSubmission({
   onCreated,
@@ -61,14 +72,30 @@ export default function NewSubmission({
     line_of_business: "commercial" as "personal" | "commercial",
   });
   const [files, setFiles] = useState<PendingFile[]>([]);
-  const [phase, setPhase] = useState<UploadPhase>({ kind: "idle" });
+  const [phase, setPhase] = useState<IntakePhase>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const working = phase.kind !== "idle";
+  // The submissionId lives here so a second click on the primary button
+  // never re-hits createSubmission. Once set, the intake is committed;
+  // only the uploads can retry. The mirrored state exists so a future
+  // render branch (e.g. surfacing the id in a dev-only diagnostic) can
+  // read it without reaching into a ref — the ref is the authoritative
+  // guard against re-entrant creates.
+  const submissionIdRef = useRef<string | null>(null);
+  const [, setSubmissionId] = useState<string | null>(null);
+  // Guard against re-entrant onCreated calls: the effect that transitions
+  // the phase to "complete" would otherwise call onCreated on every render
+  // after the last upload landed.
+  const notifiedRef = useRef(false);
+
+  const working =
+    phase.kind === "creating" || phase.kind === "uploading";
   const clientMissing = touched && !form.client_name.trim();
+  const summary = useMemo(() => intakePhaseSummary(phase, files), [phase, files]);
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -76,27 +103,92 @@ export default function NewSubmission({
 
   function addFiles(list: FileList | null) {
     if (!list) return;
+    if (working) return;
     const existing = new Set(files.map((item) => `${item.file.name}:${item.file.size}`));
-    const added: PendingFile[] = [];
+    const kept: File[] = [];
     for (const file of Array.from(list)) {
       const signature = `${file.name}:${file.size}`;
       if (existing.has(signature)) continue;
       existing.add(signature);
-      added.push({
-        file,
-        type: guessDocumentType(file.name),
-        problem:
-          file.size > MAX_FILE_BYTES
-            ? `Larger than the 25 MB limit (${formatFileSize(file.size)}).`
-            : file.type && file.type !== "application/pdf"
-            ? "Atlas reads PDF documents only."
-            : undefined,
-      });
+      kept.push(file);
     }
-    if (added.length > 0) setFiles((current) => [...current, ...added]);
+    if (kept.length === 0) return;
+    const added = assignClientIds(kept).map((item) => ({
+      ...item,
+      problem: describeFileProblem(item.file),
+    }));
+    setFiles((current) => [...current, ...added]);
+  }
+
+  function removeFile(clientId: string) {
+    setFiles((current) => current.filter((entry) => entry.clientId !== clientId));
+  }
+
+  function retypeFile(clientId: string, type: string) {
+    setFiles((current) =>
+      current.map((entry) => (entry.clientId === clientId ? { ...entry, type } : entry))
+    );
+  }
+
+  function updateFile(clientId: string, patch: (entry: PendingFile) => PendingFile) {
+    setFiles((current) => current.map((entry) => (entry.clientId === clientId ? patch(entry) : entry)));
   }
 
   const blockingFiles = files.filter((item) => item.problem);
+
+  async function runUploads(id: string) {
+    // Only touch files that actually still need to upload. A retry never
+    // re-uploads a file that already landed.
+    const queue = remainingUploads(files);
+    let index = 0;
+    let sawFailure = false;
+
+    for (const entry of queue) {
+      index += 1;
+      setPhase({ kind: "uploading", index, total: queue.length, name: entry.file.name });
+      updateFile(entry.clientId, (item) => ({ ...item, upload: { status: "uploading" } }));
+      try {
+        await uploadDocument(id, entry.file, entry.type);
+        updateFile(entry.clientId, (item) => ({ ...item, upload: { status: "uploaded" } }));
+      } catch (cause) {
+        sawFailure = true;
+        const message =
+          (cause as Error).message === "not_authenticated"
+            ? "Your session expired mid-upload. Sign in again to retry."
+            : "The upload failed. Try again.";
+        updateFile(entry.clientId, (item) => ({
+          ...item,
+          upload: { status: "failed", error: message },
+        }));
+        // Halt the loop — leave remaining files as pending so the retry
+        // button attempts them together with the failed one on the next
+        // click. This keeps the behaviour predictable when the network is
+        // flapping.
+        break;
+      }
+    }
+
+    // Recompute status from the authoritative post-loop file list.
+    setFiles((current) => {
+      const failedCount = current.filter((f) => f.upload.status === "failed").length;
+      const pendingCount = current.filter((f) => f.upload.status === "pending").length;
+      if (sawFailure || pendingCount > 0) {
+        setPhase({
+          kind: "partial",
+          submissionId: id,
+          failedCount,
+          remainingCount: pendingCount,
+        });
+      } else {
+        setPhase({ kind: "complete", submissionId: id });
+        if (!notifiedRef.current) {
+          notifiedRef.current = true;
+          onCreated(id);
+        }
+      }
+      return current;
+    });
+  }
 
   async function onSubmit() {
     setTouched(true);
@@ -109,59 +201,81 @@ export default function NewSubmission({
       return;
     }
     setError(null);
+
+    // Entry guard: if the submission already exists, this is a retry —
+    // never re-hit createSubmission.
+    if (submissionIdRef.current !== null) {
+      await runUploads(submissionIdRef.current);
+      return;
+    }
+
     setPhase({ kind: "creating" });
-    let submissionId: string | null = null;
     try {
       const { id } = await createSubmission(form);
-      submissionId = id;
-      for (let index = 0; index < files.length; index += 1) {
-        const item = files[index];
-        setPhase({ kind: "uploading", index: index + 1, total: files.length, name: item.file.name });
-        await uploadDocument(id, item.file, item.type);
-      }
-      onCreated(id);
+      submissionIdRef.current = id;
+      setSubmissionId(id);
     } catch (cause) {
       const message = (cause as Error).message;
       setPhase({ kind: "idle" });
-      if (submissionId) {
-        // The record exists; only the attachments failed. Say so precisely,
-        // and offer the way forward rather than stranding the user here.
-        setError(
-          "The submission was created, but one or more documents failed to upload. " +
-            "Open the submission and add the remaining documents there."
-        );
-      } else {
-        setError(
-          message === "not_authenticated"
-            ? "Your session has expired. Sign in again and re-enter the submission."
-            : "The submission could not be created. The Atlas API rejected the request."
-        );
-      }
+      setError(
+        message === "not_authenticated"
+          ? "Your session has expired. Sign in again and re-enter the submission."
+          : "The submission could not be created. The Atlas API rejected the request."
+      );
+      return;
     }
+
+    const id = submissionIdRef.current;
+    if (!id) return;
+
+    if (files.length === 0) {
+      // No attachments — the submission exists, so we're done.
+      setPhase({ kind: "complete", submissionId: id });
+      if (!notifiedRef.current) {
+        notifiedRef.current = true;
+        onCreated(id);
+      }
+      return;
+    }
+
+    await runUploads(id);
   }
+
+  function requestCancel() {
+    if (phase.kind === "partial") {
+      setLeaveOpen(true);
+      return;
+    }
+    onCancel();
+  }
+
+  const primaryLabel =
+    phase.kind === "partial" ? "Retry remaining uploads" : "Create submission";
+  const primaryLoadingLabel =
+    phase.kind === "uploading"
+      ? `Uploading ${phase.index} of ${phase.total}…`
+      : phase.kind === "creating"
+      ? "Creating submission…"
+      : "Uploading…";
 
   return (
     <div>
       <PageHeader
-        breadcrumbs={[{ label: "Work queue", onClick: onCancel }, { label: "New submission" }]}
+        breadcrumbs={[{ label: "Work queue", onClick: requestCancel }, { label: "New submission" }]}
         title="New submission"
         description="Capture the broker request and attach the client documents. Atlas reads them during extraction."
         actions={
           <>
-            <Button onClick={onCancel} disabled={working}>
+            <Button onClick={requestCancel} disabled={working}>
               Cancel
             </Button>
             <Button
               variant="primary"
               onClick={onSubmit}
               loading={working}
-              loadingLabel={
-                phase.kind === "uploading"
-                  ? `Uploading ${phase.index} of ${phase.total}…`
-                  : "Creating submission…"
-              }
+              loadingLabel={primaryLoadingLabel}
             >
-              Create submission
+              {primaryLabel}
             </Button>
           </>
         }
@@ -179,6 +293,47 @@ export default function NewSubmission({
             }
           >
             {error}
+          </Notice>
+        )}
+
+        {phase.kind === "partial" && (
+          <Notice
+            tone="warning"
+            title={summary.headline}
+            actions={
+              <Button
+                size="sm"
+                icon="refresh"
+                variant="primary"
+                onClick={onSubmit}
+                loading={working}
+                loadingLabel="Uploading…"
+              >
+                Retry remaining uploads
+              </Button>
+            }
+          >
+            The submission itself is on file — a fresh Create would only produce a duplicate.
+            {phase.failedCount > 0 && (
+              <>
+                {" "}
+                {pluralise(phase.failedCount, "document")} could not be uploaded.
+              </>
+            )}
+            {phase.remainingCount > 0 && (
+              <>
+                {" "}
+                {pluralise(phase.remainingCount, "document")}{" "}
+                {phase.remainingCount === 1 ? "still needs" : "still need"} to upload.
+              </>
+            )}{" "}
+            Only the outstanding files will be sent when you retry.
+          </Notice>
+        )}
+
+        {phase.kind === "complete" && (
+          <Notice tone="success" title={summary.headline}>
+            The submission is on file and every document was uploaded.
           </Notice>
         )}
 
@@ -280,53 +435,62 @@ export default function NewSubmission({
 
             {files.length > 0 && (
               <ul className="atlas-list" aria-label="Documents to upload">
-                {files.map((item, index) => (
-                  <li className="atlas-doc" key={`${item.file.name}-${index}`}>
-                    <Icon name="document" size={18} className="atlas-doc__icon" />
-                    <div className="atlas-doc__main">
-                      <p className="atlas-doc__name" title={item.file.name}>
-                        {truncateMiddle(item.file.name, 52)}
-                      </p>
-                      <p className="atlas-doc__meta">
-                        <span>{formatFileSize(item.file.size)}</span>
-                        {item.problem && (
-                          <span style={{ color: "var(--atlas-danger-ink)" }}>{item.problem}</span>
+                {files.map((item) => {
+                  const uploaded = item.upload.status === "uploaded";
+                  const failed = item.upload.status === "failed";
+                  const uploading = item.upload.status === "uploading";
+                  return (
+                    <li
+                      className="atlas-doc"
+                      key={item.clientId}
+                      aria-label={`${item.file.name} (${uploadStatusLabel(item.upload.status)})`}
+                    >
+                      <Icon name="document" size={18} className="atlas-doc__icon" />
+                      <div className="atlas-doc__main">
+                        <p className="atlas-doc__name" title={item.file.name}>
+                          {truncateMiddle(item.file.name, 52)}
+                        </p>
+                        <p className="atlas-doc__meta">
+                          <span>{formatFileSize(item.file.size)}</span>
+                          {item.problem && (
+                            <span style={{ color: "var(--atlas-danger-ink)" }}>{item.problem}</span>
+                          )}
+                          {failed && item.upload.status === "failed" && (
+                            <span style={{ color: "var(--atlas-danger-ink)" }}>
+                              {item.upload.error}
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                      <div className="atlas-doc__side">
+                        <Field label="Document type" htmlFor={`doc-type-${item.clientId}`}>
+                          <select
+                            id={`doc-type-${item.clientId}`}
+                            className="atlas-select atlas-select--sm"
+                            value={item.type}
+                            disabled={working || uploaded}
+                            onChange={(event) => retypeFile(item.clientId, event.target.value)}
+                          >
+                            {DOCUMENT_TYPE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                        <StatusBadge status={uploadStatusMeta(item.upload.status)} />
+                        {!uploaded && (
+                          <IconButton
+                            icon="close"
+                            label={`Remove ${item.file.name}`}
+                            disabled={working || uploading}
+                            onClick={() => removeFile(item.clientId)}
+                          />
                         )}
-                      </p>
-                    </div>
-                    <div className="atlas-doc__side">
-                      <Field label="Document type" htmlFor={`doc-type-${index}`}>
-                        <select
-                          id={`doc-type-${index}`}
-                          className="atlas-select atlas-select--sm"
-                          value={item.type}
-                          disabled={working}
-                          onChange={(event) =>
-                            setFiles((current) =>
-                              current.map((entry, entryIndex) =>
-                                entryIndex === index ? { ...entry, type: event.target.value } : entry
-                              )
-                            )
-                          }
-                        >
-                          {DOCUMENT_TYPE_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </Field>
-                      <IconButton
-                        icon="close"
-                        label={`Remove ${item.file.name}`}
-                        disabled={working}
-                        onClick={() =>
-                          setFiles((current) => current.filter((_, entryIndex) => entryIndex !== index))
-                        }
-                      />
-                    </div>
-                  </li>
-                ))}
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             )}
 
@@ -340,24 +504,79 @@ export default function NewSubmission({
         </Card>
 
         <div className="atlas-actions atlas-actions--end">
-          <Button onClick={onCancel} disabled={working}>
+          <Button onClick={requestCancel} disabled={working}>
             Cancel
           </Button>
           <Button
             variant="primary"
             onClick={onSubmit}
             loading={working}
-            loadingLabel={
-              phase.kind === "uploading"
-                ? `Uploading ${phase.index} of ${phase.total}…`
-                : "Creating submission…"
-            }
+            loadingLabel={primaryLoadingLabel}
           >
-            Create submission
+            {primaryLabel}
           </Button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={leaveOpen && phase.kind === "partial"}
+        destructive={false}
+        title="Leave without retrying the outstanding uploads?"
+        confirmLabel="Leave the intake"
+        cancelLabel="Stay and retry"
+        working={false}
+        onCancel={() => setLeaveOpen(false)}
+        onConfirm={() => {
+          setLeaveOpen(false);
+          onCancel();
+        }}
+        body={
+          <>
+            <p>
+              The submission itself is safe — it has already been created and cannot be
+              duplicated by leaving. Uploads that succeeded remain attached.
+            </p>
+            <p style={{ marginTop: 8 }}>
+              Anything still failed or pending will not be sent when you leave, and this screen
+              cannot be reopened to retry the same session's outstanding uploads. A manager can
+              upload the missing documents later from the submission itself.
+            </p>
+          </>
+        }
+      />
     </div>
   );
+}
+
+function describeFileProblem(file: File): string | undefined {
+  if (file.size > MAX_FILE_BYTES) {
+    return `Larger than the 25 MB limit (${formatFileSize(file.size)}).`;
+  }
+  if (file.type && file.type !== "application/pdf") {
+    return "Atlas reads PDF documents only.";
+  }
+  return undefined;
+}
+
+function uploadStatusMeta(status: PendingFile["upload"]["status"]) {
+  switch (status) {
+    case "uploaded":
+      return { label: "Uploaded", tone: "success" as const };
+    case "uploading":
+      return { label: "Uploading…", tone: "info" as const };
+    case "failed":
+      return {
+        label: "Upload failed",
+        tone: "danger" as const,
+        description: "Retry from the notice above.",
+      };
+    case "pending":
+    default:
+      return { label: "Not yet uploaded", tone: "neutral" as const };
+  }
+}
+
+function uploadStatusLabel(status: PendingFile["upload"]["status"]): string {
+  return uploadStatusMeta(status).label;
 }
 
