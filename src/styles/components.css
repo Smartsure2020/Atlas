@@ -2368,3 +2368,172 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
     font-size: 24px;
   }
 }
+
+/* ===========================================================================
+   Operational alerts (Phase 6)
+   ---------------------------------------------------------------------------
+   The alert list is a stack of rows with a subtle severity marker on the
+   left edge. No decorative motion, no gradients — the marker exists purely
+   so a critical row is visually distinct from a warning without depending
+   on the badge colour alone.
+   =========================================================================== */
+
+.atlas-alerts {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-2);
+  margin: 0;
+  padding: 0;
+}
+
+.atlas-alerts__item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--atlas-space-3);
+  padding: var(--atlas-space-3) var(--atlas-space-4);
+  border: 1px solid var(--atlas-border);
+  border-left-width: 3px;
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface);
+}
+
+.atlas-alerts__item--critical {
+  border-left-color: var(--atlas-danger-border);
+  background: var(--atlas-danger-surface);
+}
+
+.atlas-alerts__item--warning {
+  border-left-color: var(--atlas-warning-border);
+  background: var(--atlas-warning-surface);
+}
+
+.atlas-alerts__item--info {
+  border-left-color: var(--atlas-info-border);
+  background: var(--atlas-info-surface);
+}
+
+.atlas-alerts__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.atlas-alerts__title {
+  font-size: var(--atlas-fs-dense);
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  margin: 0;
+}
+
+.atlas-alerts__meta {
+  margin: 3px 0 0;
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-secondary);
+  line-height: var(--atlas-lh-snug, 1.4);
+}
+
+.atlas-alerts__side {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 640px) {
+  .atlas-alerts__item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .atlas-alerts__side {
+    justify-content: flex-start;
+  }
+}
+
+/* ===========================================================================
+   Audit timeline filterbar (Phase 6)
+   ---------------------------------------------------------------------------
+   A horizontal toggle group. On narrow viewports it scrolls rather than
+   wrapping, so the reader is never forced to look at a two-row grid of
+   buttons.
+   =========================================================================== */
+
+.atlas-timeline__filterbar {
+  display: flex;
+  gap: var(--atlas-space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--atlas-space-3);
+}
+
+@media (max-width: 480px) {
+  .atlas-timeline__filterbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: var(--atlas-space-1);
+  }
+
+  /* Timestamp + timezone suffix would otherwise pin the auto grid column
+     to its unwrapped min-content width, pushing the row past narrow
+     viewports (audited at 375 and 320 px). Allow the cell to wrap onto a
+     second line so the suffix stays visible and the row grows in height
+     rather than the page in width. Desktop and tablet layouts are
+     unaffected. */
+  .atlas-event__time {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+.atlas-event--unknown .atlas-event__mark {
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-event--unknown .atlas-event__title {
+  color: var(--atlas-ink-secondary);
+}
+
+/* ===========================================================================
+   Submission document groups (Phase 6)
+   ---------------------------------------------------------------------------
+   Trust-first sections inside the documents card. Each h3 carries the tone
+   of its section; hint copy explains what Atlas has and has not done to
+   the files below it.
+   =========================================================================== */
+
+.atlas-doc-groups {
+  display: block;
+}
+
+.atlas-doc-groups__section {
+  margin-top: var(--atlas-space-4);
+}
+
+.atlas-doc-groups__section:first-of-type {
+  margin-top: var(--atlas-space-3);
+}
+
+.atlas-doc-groups__heading {
+  font-size: 14px;
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink);
+  margin: 0 0 var(--atlas-space-1);
+}
+
+.atlas-doc-groups__heading--danger {
+  color: var(--atlas-danger-ink);
+}
+
+.atlas-doc-groups__heading--warning {
+  color: var(--atlas-warning-ink);
+}
+
+.atlas-doc-groups__hint {
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+  line-height: var(--atlas-lh-snug, 1.4);
+  margin: 0 0 var(--atlas-space-2);
+  max-width: 78ch;
+}
