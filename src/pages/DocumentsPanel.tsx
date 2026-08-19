@@ -13,6 +13,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { processInsurerDocument, uploadGuideline, type InsurerDocument } from "../lib/insurers";
+import { presentGuidelineResult } from "../lib/intake-intelligence";
 import {
   Button,
   Card,
@@ -129,8 +130,9 @@ export function DocumentsPanel({
 
       setPhase("processing");
       try {
-        await processInsurerDocument(document_id);
-        toast.notify("Guideline read. Review the proposed rules.", "success");
+        const response = await processInsurerDocument(document_id);
+        const presentation = presentGuidelineResult(response);
+        toast.notify(presentation.message, toastToneFor(presentation.tone));
       } catch {
         // The failure is recorded on the document row; the list offers a retry.
         setError(
@@ -153,8 +155,9 @@ export function DocumentsPanel({
     setRetrying(documentId);
     setError(null);
     try {
-      await processInsurerDocument(documentId);
-      toast.notify("Guideline read. Review the proposed rules.", "success");
+      const response = await processInsurerDocument(documentId);
+      const presentation = presentGuidelineResult(response);
+      toast.notify(presentation.message, toastToneFor(presentation.tone));
     } catch {
       setError(
         "Atlas could not read that document. The failure reason is on the row below — a scanned PDF without a text layer is the usual cause."
@@ -366,4 +369,14 @@ export function DocumentsPanel({
       </Card>
     </div>
   );
+}
+
+/**
+ * Toast tones support "default", not "info", so map the neutral guideline
+ * presentations onto the platform's toast palette.
+ */
+function toastToneFor(
+  tone: "success" | "info" | "warning" | "danger"
+): "default" | "success" | "warning" | "danger" {
+  return tone === "info" ? "default" : tone;
 }

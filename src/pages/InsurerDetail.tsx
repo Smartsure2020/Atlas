@@ -16,7 +16,7 @@
  * so, because the previous version made "Confirm" look like a formality.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   confirmAppetite,
   deactivateAppetite,
@@ -27,6 +27,10 @@ import {
   type InsurerDocument,
   type InsurerListItem,
 } from "../lib/insurers";
+import {
+  insurerSetupSummary,
+  orderRules,
+} from "../lib/intake-intelligence";
 import { AddRuleForm } from "./AddRuleForm";
 import { DocumentsPanel } from "./DocumentsPanel";
 import {
@@ -74,53 +78,105 @@ export default function InsurerDetail({
   const canManage = roleCanManage(role);
   const toast = useToast();
   const [loading, setLoading] = useState(true);
+  const [hydrated, setHydrated] = useState(false);
   const [insurer, setInsurer] = useState<InsurerListItem | null>(null);
   const [documents, setDocuments] = useState<InsurerDocument[]>([]);
   const [appetite, setAppetite] = useState<AppetiteRow[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("guidelines");
   const [renameOpen, setRenameOpen] = useState(false);
   const [addingRule, setAddingRule] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
+  const requestSeq = useRef(0);
+  // Initial-tab landing is a per-insurer decision: fire exactly once per
+  // insurer id. Once the user picks a tab, we honour their choice on every
+  // subsequent reload unless it becomes impossible to render.
+  const initFor = useRef<string | null>(null);
 
-  async function load() {
-    setLoading(true);
-    try {
-      const result = await getInsurer(insurerId);
-      setInsurer(result.insurer);
-      setDocuments(result.documents);
-      setAppetite(result.appetite);
-      setError(null);
-    } catch (cause) {
-      setError(
-        (cause as Error).message === "manager_only"
-          ? "Insurer guidelines and appetite rules are available to underwriting managers only."
-          : "This insurer could not be loaded. It may have been removed, or the Atlas API did not respond."
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
+  const load = useCallback(() => setReloadToken((token) => token + 1), []);
 
   useEffect(() => {
-    void load();
+    let cancelled = false;
+    const seq = ++requestSeq.current;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setLoading(true);
+      getInsurer(insurerId)
+        .then((result) => {
+          if (requestSeq.current !== seq) return;
+          setInsurer(result.insurer);
+          setDocuments(result.documents);
+          setAppetite(result.appetite);
+          setLoadError(null);
+          setRefreshError(null);
+          setHydrated(true);
+        })
+        .catch((cause: Error) => {
+          if (requestSeq.current !== seq) return;
+          const message =
+            cause.message === "manager_only"
+              ? "Insurer guidelines and appetite rules are available to underwriting managers only."
+              : "This insurer could not be loaded. It may have been removed, or the Atlas API did not respond.";
+          if (hydrated) {
+            setRefreshError(
+              cause.message === "not_authenticated"
+                ? "Your session has expired, so Atlas could not refresh this insurer. The information shown may be outdated. Sign in again to reload."
+                : "Atlas could not refresh this insurer. The information shown may be outdated."
+            );
+          } else {
+            setLoadError(message);
+          }
+        })
+        .finally(() => {
+          if (requestSeq.current === seq) setLoading(false);
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // See Insurers.tsx for why hydrated is intentionally omitted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadToken, insurerId]);
+
+  // Reset the init-tab guard whenever the insurer changes.
+  useEffect(() => {
+    if (initFor.current !== insurerId) {
+      initFor.current = null;
+    }
   }, [insurerId]);
 
-  const proposed = useMemo(() => appetite.filter((row) => !row.is_active), [appetite]);
-  const active = useMemo(() => appetite.filter((row) => row.is_active), [appetite]);
+  const proposed = useMemo(() => orderRules(appetite.filter((row) => !row.is_active)), [appetite]);
+  const active = useMemo(() => orderRules(appetite.filter((row) => row.is_active)), [appetite]);
+  const setupSummary = useMemo(
+    () => insurerSetupSummary({ insurer, documents, appetite }),
+    [insurer, documents, appetite]
+  );
 
-  // Land the manager where the work is: unreviewed proposals first.
+  // Land the manager where the work is on first hydration: unreviewed
+  // proposals first, then the active matrix, then guidelines. After that
+  // the user's tab choice sticks — reloads and polling do not blow it
+  // away — unless the tab has become empty and impossible to render, in
+  // which case we fall back through the same priority order.
   useEffect(() => {
-    if (loading) return;
-    if (proposed.length > 0) setTab("proposed");
-    else if (active.length > 0) setTab("active");
-    else setTab("guidelines");
-    // Only on first load of a given insurer.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, insurerId]);
+    if (loading || !hydrated) return;
+    if (initFor.current !== insurerId) {
+      const next: Tab =
+        proposed.length > 0 ? "proposed" : active.length > 0 ? "active" : "guidelines";
+      initFor.current = insurerId;
+      setTab(next);
+      return;
+    }
+    if (tab === "proposed" && proposed.length === 0) {
+      const fallback: Tab = active.length > 0 ? "active" : "guidelines";
+      setTab(fallback);
+    } else if (tab === "active" && active.length === 0 && proposed.length === 0 && documents.length === 0) {
+      setTab("guidelines");
+    }
+  }, [loading, hydrated, insurerId, tab, proposed.length, active.length, documents.length]);
 
-  if (loading && !insurer) {
+  if (loading && !hydrated) {
     return (
       <div className="atlas-stack">
         <CardSkeleton lines={2} />
@@ -129,14 +185,14 @@ export default function InsurerDetail({
     );
   }
 
-  if (error) {
+  if (loadError && !hydrated) {
     return (
       <div className="atlas-stack">
         <PageHeader
           breadcrumbs={[{ label: "Insurers", onClick: onBack }, { label: "Insurer" }]}
           title="Insurer"
         />
-        <ErrorState title="This insurer could not be opened" message={error} onRetry={() => void load()} />
+        <ErrorState title="This insurer could not be opened" message={loadError} onRetry={load} />
       </div>
     );
   }
@@ -155,23 +211,54 @@ export default function InsurerDetail({
             : "Atlas cannot recommend this insurer yet — no appetite rule has been confirmed."
         }
         badges={
-          active.length > 0 ? (
-            <StatusBadge
-              status={{
-                label: pluralise(active.length, "active rule"),
-                tone: "success",
-                description: "These rules are read on every recommendation.",
-              }}
-            />
-          ) : (
-            <StatusBadge
-              status={{
-                label: "Not in the matrix",
-                tone: "warning",
-                description: "Confirm at least one rule to bring this insurer into recommendations.",
-              }}
-            />
-          )
+          <>
+            {setupSummary.hasActiveRules ? (
+              <StatusBadge
+                status={{
+                  label: pluralise(active.length, "active rule"),
+                  tone: "success",
+                  description: "These rules are read on every recommendation.",
+                }}
+              />
+            ) : (
+              <StatusBadge
+                status={{
+                  label: "Not in the matrix",
+                  tone: "warning",
+                  description: "Confirm at least one rule to bring this insurer into recommendations.",
+                }}
+              />
+            )}
+            {setupSummary.proposedCount > 0 && (
+              <StatusBadge
+                status={{
+                  label: `${setupSummary.proposedCount} proposed`,
+                  tone: "warning",
+                  description: "Rules Atlas has read from a guideline that still need a manager decision.",
+                }}
+              />
+            )}
+            {setupSummary.failedGuidelineCount > 0 && (
+              <StatusBadge
+                status={{
+                  label: `${setupSummary.failedGuidelineCount} failed guideline${
+                    setupSummary.failedGuidelineCount === 1 ? "" : "s"
+                  }`,
+                  tone: "danger",
+                  description: "Guideline documents Atlas could not read — their rules are missing from the matrix.",
+                }}
+              />
+            )}
+            {setupSummary.scanPendingCount > 0 && (
+              <StatusBadge
+                status={{
+                  label: `${setupSummary.scanPendingCount} awaiting scan`,
+                  tone: "info",
+                  description: "Uploaded documents still going through the virus scan before Atlas can read them.",
+                }}
+              />
+            )}
+          </>
         }
         actions={
           canManage ? (
@@ -181,6 +268,23 @@ export default function InsurerDetail({
           ) : undefined
         }
       />
+
+      {refreshError && (
+        <div style={{ marginBottom: "var(--atlas-space-4)" }}>
+          <Notice
+            tone="warning"
+            role="status"
+            title="Atlas could not refresh this insurer"
+            actions={
+              <Button size="sm" icon="refresh" onClick={load} aria-busy={loading || undefined}>
+                {loading ? "Refreshing…" : "Try again"}
+              </Button>
+            }
+          >
+            {refreshError}
+          </Notice>
+        </div>
+      )}
 
       {actionError && (
         <div style={{ marginBottom: "var(--atlas-space-4)" }}>
@@ -263,7 +367,7 @@ export default function InsurerDetail({
               insurerId={insurerId}
               onAdded={() => {
                 setAddingRule(false);
-                void load();
+                load();
                 toast.notify("Rule added to the active matrix.", "success");
               }}
               onCancel={() => setAddingRule(false)}
@@ -286,9 +390,9 @@ export default function InsurerDetail({
         open={renameOpen}
         insurer={insurer}
         onClose={() => setRenameOpen(false)}
-        onSaved={async () => {
+        onSaved={() => {
           setRenameOpen(false);
-          await load();
+          load();
           toast.notify("Insurer updated.", "success");
         }}
       />
@@ -583,18 +687,36 @@ function EditRuleDrawer({
   onSaved: () => void;
   onError: (message: string) => void;
 }) {
-  // Remounting on a new row is deliberate: it resets the draft without an
-  // effect, and keeps the body free of null checks.
-  if (!row) return null;
-  return <EditRuleDrawerBody key={row.id} row={row} onClose={onClose} onSaved={onSaved} onError={onError} />;
+  // Keep the last-opened row around while the drawer is closing so the
+  // Drawer's exit animation has a body to render. Remounting on a new row
+  // is deliberate: it resets the draft without an effect, and keeps the
+  // body free of null checks.
+  const [lastRow, setLastRow] = useState<AppetiteRow | null>(row);
+  useEffect(() => {
+    if (row) setLastRow(row);
+  }, [row]);
+  const active = row ?? lastRow;
+  if (!active) return null;
+  return (
+    <EditRuleDrawerBody
+      key={active.id}
+      open={row !== null}
+      row={active}
+      onClose={onClose}
+      onSaved={onSaved}
+      onError={onError}
+    />
+  );
 }
 
 function EditRuleDrawerBody({
+  open,
   row,
   onClose,
   onSaved,
   onError,
 }: {
+  open: boolean;
   row: AppetiteRow;
   onClose: () => void;
   onSaved: () => void;
@@ -643,7 +765,7 @@ function EditRuleDrawerBody({
 
   return (
     <Drawer
-      open
+      open={open}
       title="Edit appetite rule"
       description="Corrections here change what every future recommendation is scored against."
       onClose={onClose}
@@ -795,11 +917,24 @@ function EditInsurerDrawer({
   const [name, setName] = useState(insurer.name);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const wasOpen = useRef(open);
 
   useEffect(() => {
-    if (!open) return;
-    setName(insurer.name);
-    setError(null);
+    // Reset the draft name when the drawer transitions from closed to
+    // open. A background reload that updates insurer.name while the
+    // drawer is open must NOT clobber whatever the user has typed —
+    // hence the transition guard rather than a value-change dependency.
+    if (!wasOpen.current && open) {
+      setName(insurer.name);
+      setError(null);
+    }
+    // If the insurer name changed on the server while the drawer is
+    // closed, keep the closed-state draft in sync so the next open shows
+    // the freshest value.
+    if (!open) {
+      setName(insurer.name);
+    }
+    wasOpen.current = open;
   }, [open, insurer.name]);
 
   async function save() {

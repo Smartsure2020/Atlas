@@ -8,9 +8,19 @@
  * An insurer with no active rules is not a neutral state — it means Atlas will
  * silently skip that insurer on every submission. That is called out here
  * rather than left as a "0".
+ *
+ * The lifecycle guards mirror the Phase 6 processing workbench:
+ *   1. Cancellation gate — the load call is deferred by one microtask and
+ *      cancelled by the effect cleanup, so React StrictMode's discarded
+ *      mount never issues a duplicate request.
+ *   2. Sequence guard — if a slow response outraces a newer one, its
+ *      setState calls are dropped.
+ *   3. Hydrated / refresh-error split — a refresh failure surfaces as a
+ *      stale-data warning alongside the previously loaded list, rather
+ *      than blanking the page.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createInsurer, listInsurers, type InsurerListItem } from "../lib/insurers";
 import {
   Button,
@@ -29,6 +39,10 @@ import {
 } from "../components/ui";
 import { canManage as roleCanManage, type AtlasUiRole } from "../components/AppShell";
 import { humanise, pluralise } from "../lib/format";
+import {
+  filterInsurersByCoverage,
+  type CoverageMode,
+} from "../lib/intake-intelligence";
 
 export default function Insurers({
   role,
@@ -41,50 +55,81 @@ export default function Insurers({
   const toast = useToast();
   const [items, setItems] = useState<InsurerListItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [coverage, setCoverage] = useState<CoverageMode>("all");
   const [addOpen, setAddOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  const requestSeq = useRef(0);
 
   useEffect(() => {
-    let live = true;
-    setLoading(true);
-    listInsurers()
-      .then((result) => {
-        if (!live) return;
-        setItems(result.insurers);
-        setError(null);
-      })
-      .catch((cause: Error) => {
-        if (!live) return;
-        setError(
-          cause.message === "not_authenticated"
-            ? "Your session has expired. Sign in again to view the insurer list."
-            : "The insurer list could not be loaded. The Atlas API did not respond."
-        );
-      })
-      .finally(() => {
-        if (live) setLoading(false);
-      });
+    let cancelled = false;
+    const seq = ++requestSeq.current;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setLoading(true);
+      listInsurers()
+        .then((result) => {
+          if (requestSeq.current !== seq) return;
+          setItems(result.insurers);
+          setLoadError(null);
+          setRefreshError(null);
+          setHydrated(true);
+        })
+        .catch((cause: Error) => {
+          if (requestSeq.current !== seq) return;
+          const message =
+            cause.message === "not_authenticated"
+              ? "Your session has expired. Sign in again to view the insurer list."
+              : "The insurer list could not be loaded. The Atlas API did not respond.";
+          if (hydrated) {
+            setRefreshError(
+              cause.message === "not_authenticated"
+                ? "Your session has expired, so Atlas could not refresh the insurer list. The information shown may be outdated. Sign in again to reload."
+                : "Atlas could not refresh the insurer list. The information shown may be outdated."
+            );
+          } else {
+            setLoadError(message);
+          }
+        })
+        .finally(() => {
+          if (requestSeq.current === seq) setLoading(false);
+        });
+    });
     return () => {
-      live = false;
+      cancelled = true;
     };
+    // `hydrated` is deliberately not in the dep list — the effect only
+    // re-runs on an explicit refresh (reloadToken), and the closure
+    // captured on that re-render already reflects the latest hydrated
+    // value. Listing hydrated here would fire a second fetch the moment
+    // the first successful load flipped it from false to true.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadToken]);
 
   const visible = useMemo(() => {
+    const scoped = filterInsurersByCoverage(items, coverage);
     const query = search.trim().toLowerCase();
-    if (!query) return items;
-    return items.filter(
+    if (!query) return scoped;
+    return scoped.filter(
       (item) =>
         item.name.toLowerCase().includes(query) ||
         (item.quote_channel ?? "").toLowerCase().includes(query)
     );
-  }, [items, search]);
+  }, [items, search, coverage]);
 
-  const withRules = items.filter((item) => item.active_appetite_count > 0);
-  const withoutRules = items.filter((item) => item.active_appetite_count === 0);
+  const withRules = useMemo(
+    () => items.filter((item) => item.active_appetite_count > 0),
+    [items]
+  );
+  const withoutRules = useMemo(
+    () => items.filter((item) => item.active_appetite_count === 0),
+    [items]
+  );
 
-  if (error) {
+  if (loadError && !hydrated) {
     return (
       <div>
         <PageHeader
@@ -94,7 +139,7 @@ export default function Insurers({
         />
         <ErrorState
           title="The insurer list could not be loaded"
-          message={error}
+          message={loadError}
           onRetry={() => setReloadToken((token) => token + 1)}
         />
       </div>
@@ -116,23 +161,45 @@ export default function Insurers({
         }
       />
 
+      {refreshError && (
+        <div style={{ marginBottom: "var(--atlas-space-4)" }}>
+          <Notice
+            tone="warning"
+            role="status"
+            title="Atlas could not refresh the insurer list"
+            actions={
+              <Button
+                size="sm"
+                icon="refresh"
+                onClick={() => setReloadToken((token) => token + 1)}
+                aria-busy={loading || undefined}
+              >
+                {loading ? "Refreshing…" : "Try again"}
+              </Button>
+            }
+          >
+            {refreshError}
+          </Notice>
+        </div>
+      )}
+
       <section className="atlas-metrics" aria-label="Matrix coverage" style={{ marginBottom: "var(--atlas-space-4)" }}>
         <Metric
           label="Insurers on file"
           value={items.length}
-          loading={loading}
+          loading={loading && !hydrated}
           hint="Every insurer Atlas knows about."
         />
         <Metric
           label="Scored on appetite"
           value={withRules.length}
-          loading={loading}
+          loading={loading && !hydrated}
           hint="Insurers with at least one active rule, so Atlas can consider them."
         />
         <Metric
           label="No active rules"
           value={withoutRules.length}
-          loading={loading}
+          loading={loading && !hydrated}
           tone={withoutRules.length > 0 ? "warning" : "default"}
           hint="Atlas skips these on every submission until a guideline is processed and confirmed."
         />
@@ -140,7 +207,10 @@ export default function Insurers({
 
       {withoutRules.length > 0 && (
         <div style={{ marginBottom: "var(--atlas-space-4)" }}>
-          <Notice tone="warning" title={`${withoutRules.length} insurer${withoutRules.length === 1 ? "" : "s"} cannot be recommended`}>
+          <Notice
+            tone="warning"
+            title={`${withoutRules.length} insurer${withoutRules.length === 1 ? "" : "s"} cannot be recommended`}
+          >
             {withoutRules.map((item) => item.name).join(", ")}{" "}
             {withoutRules.length === 1 ? "has" : "have"} no active appetite rules. Atlas reports them as
             a data gap on every recommendation rather than considering them.
@@ -164,11 +234,13 @@ export default function Insurers({
         </div>
         <div className="atlas-toolbar__spacer" />
         <p className="atlas-result-count">
-          {loading ? "Loading…" : `${pluralise(visible.length, "insurer")} shown`}
+          {loading && !hydrated ? "Loading…" : `${pluralise(visible.length, "insurer")} shown`}
         </p>
       </div>
 
-      {loading ? (
+      <CoverageFilter mode={coverage} onChange={setCoverage} />
+
+      {loading && !hydrated ? (
         <ul className="atlas-insurer-grid" aria-hidden="true">
           {Array.from({ length: 6 }).map((_, index) => (
             <li key={index}>
@@ -196,9 +268,16 @@ export default function Insurers({
             />
           ) : (
             <EmptyState
-              title="No insurers match that search"
-              body="Nothing on file matches the name or quote channel you searched for."
-              actions={<Button onClick={() => setSearch("")}>Clear search</Button>}
+              title="No insurers match this view"
+              body="Nothing on file matches the current search and coverage filter."
+              actions={
+                <>
+                  {search && <Button onClick={() => setSearch("")}>Clear search</Button>}
+                  {coverage !== "all" && (
+                    <Button onClick={() => setCoverage("all")}>Show all insurers</Button>
+                  )}
+                </>
+              }
             />
           )}
         </Card>
@@ -250,6 +329,52 @@ export default function Insurers({
           onOpen(id);
         }}
       />
+    </div>
+  );
+}
+
+/* ===========================================================================
+   Coverage filter — three-option toggle group (aria-pressed pattern from
+   AuditTimeline). The "All" state carries no chip; only the two narrower
+   modes reveal the FilterChips-style clear button.
+   =========================================================================== */
+
+const COVERAGE_OPTIONS: { id: CoverageMode; label: string }[] = [
+  { id: "all", label: "All insurers" },
+  { id: "active", label: "Active in matrix" },
+  { id: "needs_setup", label: "Needs setup" },
+];
+
+function CoverageFilter({
+  mode,
+  onChange,
+}: {
+  mode: CoverageMode;
+  onChange: (next: CoverageMode) => void;
+}) {
+  return (
+    <div
+      className="atlas-chips"
+      role="group"
+      aria-label="Filter insurers by matrix coverage"
+      style={{ marginBottom: "var(--atlas-space-4)" }}
+    >
+      {COVERAGE_OPTIONS.map((option) => {
+        const active = mode === option.id;
+        return (
+          <button
+            key={option.id}
+            type="button"
+            className={
+              "atlas-btn atlas-btn--sm" + (active ? " atlas-btn--primary" : " atlas-btn--ghost")
+            }
+            aria-pressed={active}
+            onClick={() => onChange(option.id)}
+          >
+            <span>{option.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
