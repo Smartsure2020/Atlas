@@ -29,6 +29,7 @@ import {
 import { Icon } from "../components/Icon";
 import { formatFileSize, truncateMiddle } from "../lib/format";
 import { DOCUMENT_TYPE_OPTIONS, LINE_OF_BUSINESS_OPTIONS } from "../lib/status";
+import { guessDocumentType } from "../lib/intake-intelligence";
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
@@ -360,15 +361,3 @@ export default function NewSubmission({
   );
 }
 
-/** A sensible default classification from the file name, still user-editable. */
-function guessDocumentType(name: string): string {
-  const lower = name.toLowerCase();
-  if (lower.includes("schedule") && lower.includes("vehicle")) return "vehicle_schedule";
-  if (lower.includes("schedule") && lower.includes("build")) return "building_schedule";
-  if (lower.includes("schedule") || lower.includes("policy")) return "policy_schedule";
-  if (lower.includes("proposal")) return "proposal_form";
-  if (lower.includes("claim") || lower.includes("loss")) return "claims_history";
-  if (lower.includes("quote") || lower.includes("quotation")) return "quote";
-  if (lower.includes("email") || lower.includes(".msg") || lower.includes(".eml")) return "broker_email";
-  return "supporting";
-}
