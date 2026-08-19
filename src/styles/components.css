@@ -2474,6 +2474,17 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
     overflow-x: auto;
     padding-bottom: var(--atlas-space-1);
   }
+
+  /* Timestamp + timezone suffix would otherwise pin the auto grid column
+     to its unwrapped min-content width, pushing the row past narrow
+     viewports (audited at 375 and 320 px). Allow the cell to wrap onto a
+     second line so the suffix stays visible and the row grows in height
+     rather than the page in width. Desktop and tablet layouts are
+     unaffected. */
+  .atlas-event__time {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }
 
 .atlas-event--unknown .atlas-event__mark {
