@@ -235,6 +235,7 @@ export function DocumentsPanel({
                 ref={fileInput}
                 type="file"
                 accept="application/pdf"
+                aria-label="Select insurer guideline document"
                 className="atlas-sr-only"
                 onChange={(event) => {
                   chooseFile(event.target.files?.[0] ?? null);

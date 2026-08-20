@@ -502,6 +502,83 @@ describe("Insurer intelligence workbench", () => {
     expect(screen.queryByText(/Guideline read\./i)).not.toBeInTheDocument();
   });
 
+  it("exposes the guideline file picker to assistive technology by an accurate accessible name", async () => {
+    getInsurerMock.mockResolvedValue({
+      ok: true,
+      insurer: insurer(),
+      documents: [],
+      appetite: [],
+    });
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: /CIB/i });
+    // On the Guidelines tab (initial when nothing else is
+    // populated) the guideline file input is present and
+    // discoverable by its accessible name.
+    const picker = screen.getByLabelText(/select insurer guideline document/i);
+    expect(picker.tagName).toBe("INPUT");
+    expect(picker).toHaveAttribute("type", "file");
+    // The visible activation button remains present.
+    expect(
+      screen.getByRole("button", { name: /Choose file/i })
+    ).toBeInTheDocument();
+  });
+
+  it("renders a valid heading sequence on each populated intelligence tab", async () => {
+    getInsurerMock.mockResolvedValue({
+      ok: true,
+      insurer: insurer({ active_appetite_count: 1 }),
+      documents: [doc()],
+      appetite: [
+        rule({ id: "r_prop", is_active: false }),
+        rule({ id: "r_act", is_active: true }),
+      ],
+    });
+    renderPage();
+    // Initial priority tab is "Awaiting review".
+    await screen.findByRole("heading", { level: 1, name: /CIB/i });
+    const user = userEvent.setup();
+
+    // Assert valid hierarchy on the Awaiting review tab.
+    // The page has exactly one h1, at least one h2 naming the
+    // section, and any h3s (rule titles) live under an h2 — never
+    // directly under h1.
+    const assertNoSkip = () => {
+      const headings = Array.from(
+        document.querySelectorAll<HTMLHeadingElement>("h1, h2, h3, h4, h5, h6")
+      );
+      const levels = headings.map((h) => Number(h.tagName.slice(1)));
+      expect(levels.length).toBeGreaterThan(0);
+      expect(levels[0]).toBe(1);
+      for (let i = 1; i < levels.length; i += 1) {
+        const jump = levels[i] - levels[i - 1];
+        // A heading may stay at the same level, go up (shallower),
+        // or descend by exactly one level. Skipping (e.g. h1 → h3)
+        // is what axe flags as heading-order.
+        expect(jump).toBeLessThanOrEqual(1);
+      }
+    };
+
+    // Awaiting review tab (initial).
+    expect(
+      screen.getByRole("heading", { level: 2, name: /Rules awaiting review/i })
+    ).toBeInTheDocument();
+    assertNoSkip();
+
+    // Switch to Active matrix.
+    await user.click(screen.getByRole("tab", { name: /Active matrix/i }));
+    expect(
+      screen.getByRole("heading", { level: 2, name: /Active appetite matrix/i })
+    ).toBeInTheDocument();
+    assertNoSkip();
+
+    // Switch to Guidelines.
+    await user.click(screen.getByRole("tab", { name: /Guidelines/i }));
+    expect(
+      screen.getByRole("heading", { level: 2, name: /Guideline documents/i })
+    ).toBeInTheDocument();
+    assertNoSkip();
+  });
+
   it("resets init-tab guard and clears actionError when the insurer id changes", async () => {
     // Insurer A — one active rule so initial tab is Active. First we
     // simulate a mutation failure to leave an actionError behind.

@@ -352,6 +352,22 @@ describe("New submission workbench", () => {
     expect(createSubmissionMock).toHaveBeenCalledTimes(1);
   });
 
+  it("exposes the file picker to assistive technology by an accurate accessible name", () => {
+    renderPage();
+    // A screen-reader user discovers the file control by name, not
+    // by its rendered "Choose files" button. getByLabelText finds
+    // inputs by their accessible label — this proves the hidden
+    // input carries an accurate name and is reachable programmatically.
+    const picker = screen.getByLabelText(/select submission documents/i);
+    expect(picker.tagName).toBe("INPUT");
+    expect(picker).toHaveAttribute("type", "file");
+    // The visible activation control remains present, so the
+    // primary keyboard/mouse path is unchanged.
+    expect(
+      screen.getByRole("button", { name: /Choose files/i })
+    ).toBeInTheDocument();
+  });
+
   it("allows a deliberate retry after a genuine creation failure", async () => {
     // First attempt fails before returning an id, so submissionIdRef
     // must stay null. The user must be able to click Create a second

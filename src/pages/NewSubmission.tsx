@@ -443,6 +443,7 @@ export default function NewSubmission({
                 type="file"
                 multiple
                 accept="application/pdf"
+                aria-label="Select submission documents"
                 className="atlas-sr-only"
                 onChange={(event) => {
                   addFiles(event.target.files);

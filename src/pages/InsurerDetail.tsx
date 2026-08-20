@@ -354,6 +354,9 @@ export default function InsurerDetail({
       </div>
 
       <TabPanel id="guidelines" active={tab}>
+        {/* DocumentsPanel wraps its content in a Card titled
+            "Guideline documents", which renders an <h2>. No extra
+            heading needed here to keep h1 → h2 → h3 valid. */}
         <DocumentsPanel
           insurerId={insurerId}
           canManage={canManage}
@@ -363,6 +366,11 @@ export default function InsurerDetail({
       </TabPanel>
 
       <TabPanel id="proposed" active={tab}>
+        {/* Named section between the page h1 (insurer name) and the
+            child rule h3 titles so heading-order stays valid.
+            Visually hidden — the tab label already provides the
+            visible section name. */}
+        <h2 className="atlas-sr-only">Rules awaiting review</h2>
         <RuleList
           rows={proposed}
           canManage={canManage}
@@ -375,6 +383,7 @@ export default function InsurerDetail({
       </TabPanel>
 
       <TabPanel id="active" active={tab}>
+        <h2 className="atlas-sr-only">Active appetite matrix</h2>
         <div className="atlas-stack">
           {canManage && (
             <div className="atlas-actions atlas-actions--end">
