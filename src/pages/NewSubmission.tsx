@@ -444,6 +444,13 @@ export default function NewSubmission({
                 multiple
                 accept="application/pdf"
                 aria-label="Select submission documents"
+                // Removed from sequential focus: the visible
+                // "Choose files" Button is the only intended
+                // keyboard entry point. Programmatic click via
+                // fileInput.current?.click() still works, and
+                // assistive tech can still discover the input by
+                // its accessible name.
+                tabIndex={-1}
                 className="atlas-sr-only"
                 onChange={(event) => {
                   addFiles(event.target.files);

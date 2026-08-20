@@ -368,6 +368,44 @@ describe("New submission workbench", () => {
     ).toBeInTheDocument();
   });
 
+  it("skips the hidden file input in the Tab sequence and routes keyboard focus to the next visible control", async () => {
+    renderPage();
+    const user = userEvent.setup();
+    const choose = screen.getByRole("button", { name: /Choose files/i });
+    const hidden = screen.getByLabelText(/select submission documents/i);
+    // Baseline: focus the visible Choose files button.
+    choose.focus();
+    expect(document.activeElement).toBe(choose);
+    // Press Tab. The hidden input must NOT receive focus — it
+    // participated in the sequential Tab order until this
+    // correction, which surfaced as a 1×1 invisible focus stop.
+    await user.tab();
+    expect(document.activeElement).not.toBe(hidden);
+    // Focus lands on the next visible control — Cancel (header
+    // button in the intake toolbar). We assert the accessible name
+    // rather than the specific element identity to stay resilient
+    // to layout changes.
+    expect(document.activeElement?.tagName).toBe("BUTTON");
+    expect((document.activeElement as HTMLElement).textContent).toMatch(
+      /Cancel/i
+    );
+  });
+
+  it("preserves button-driven picker activation after removing the hidden input from Tab order", () => {
+    renderPage();
+    const hidden = screen.getByLabelText(
+      /select submission documents/i
+    ) as HTMLInputElement;
+    // Spy on the input's native .click() — this is exactly what
+    // the visible Choose files button invokes via
+    // fileInput.current?.click(). tabIndex={-1} does not affect
+    // programmatic click dispatch.
+    const clickSpy = vi.spyOn(hidden, "click");
+    screen.getByRole("button", { name: /Choose files/i }).click();
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    clickSpy.mockRestore();
+  });
+
   it("allows a deliberate retry after a genuine creation failure", async () => {
     // First attempt fails before returning an id, so submissionIdRef
     // must stay null. The user must be able to click Create a second

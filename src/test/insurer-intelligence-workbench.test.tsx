@@ -523,6 +523,48 @@ describe("Insurer intelligence workbench", () => {
     ).toBeInTheDocument();
   });
 
+  it("skips the hidden guideline input in the Tab sequence and routes focus to the next visible control", async () => {
+    getInsurerMock.mockResolvedValue({
+      ok: true,
+      insurer: insurer(),
+      documents: [],
+      appetite: [],
+    });
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: /CIB/i });
+    const user = userEvent.setup();
+    const choose = screen.getByRole("button", { name: /Choose file/i });
+    const hidden = screen.getByLabelText(/select insurer guideline document/i);
+    choose.focus();
+    expect(document.activeElement).toBe(choose);
+    // Press Tab. The hidden input must NOT receive focus.
+    await user.tab();
+    expect(document.activeElement).not.toBe(hidden);
+    // The next visible control is the "Document type" select in
+    // the guideline upload form.
+    expect(
+      (document.activeElement as HTMLElement | null)?.tagName
+    ).toBe("SELECT");
+  });
+
+  it("preserves button-driven guideline picker activation after removing the hidden input from Tab order", async () => {
+    getInsurerMock.mockResolvedValue({
+      ok: true,
+      insurer: insurer(),
+      documents: [],
+      appetite: [],
+    });
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: /CIB/i });
+    const hidden = screen.getByLabelText(
+      /select insurer guideline document/i
+    ) as HTMLInputElement;
+    const clickSpy = vi.spyOn(hidden, "click");
+    screen.getByRole("button", { name: /Choose file/i }).click();
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    clickSpy.mockRestore();
+  });
+
   it("renders a valid heading sequence on each populated intelligence tab", async () => {
     getInsurerMock.mockResolvedValue({
       ok: true,
