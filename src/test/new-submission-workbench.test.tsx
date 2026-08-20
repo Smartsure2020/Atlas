@@ -285,9 +285,11 @@ describe("New submission workbench", () => {
 
   it("guards against a second entry while createSubmission is still pending (in-flight lock)", async () => {
     // Manually controlled promise: the mock stays unresolved so we can
-    // fire a second click while the first is still awaiting. Without
-    // the synchronous operation lock, the second click would reach
-    // createSubmission a second time and create a duplicate.
+    // attempt to re-enter onSubmit while the first invocation is
+    // still awaiting. This test deliberately BYPASSES the visible
+    // disabled-button safeguard so the only remaining protection is
+    // operationLockRef inside NewSubmission.tsx. If the ref lock is
+    // removed, this test fails with two createSubmission calls.
     const gate = deferred<{ ok: true; id: string }>();
     createSubmissionMock.mockReturnValueOnce(gate.promise);
     uploadDocumentMock.mockResolvedValue({ ok: true, document_id: "doc" });
@@ -295,19 +297,54 @@ describe("New submission workbench", () => {
     const user = userEvent.setup();
     await fillClientName(user);
     await chooseFiles([pdf("policy.pdf")]);
-    const button = screen.getAllByRole("button", { name: /Create submission/i })[0];
-    // Two rapid activations while the create promise is still pending.
-    await user.click(button);
-    await user.click(button);
-    // Give React a chance to flush any re-entrant handler.
+    const button = screen.getAllByRole("button", {
+      name: /Create submission/i,
+    })[0] as HTMLButtonElement;
+    // Extract the current onClick from React's internal fiber props
+    // and invoke it directly. This bypasses the event system
+    // altogether — no disabled check, no synthetic-event
+    // suppression. It simulates the exact failure mode the lock
+    // exists for: onSubmit re-entered while createSubmission is
+    // still pending. The operationLockRef inside NewSubmission.tsx
+    // is the only remaining protection.
+    const invokeOnClick = (el: HTMLElement) => {
+      const propsKey = Object.keys(el).find((key) =>
+        key.startsWith("__reactProps")
+      );
+      if (!propsKey) throw new Error("react props key not found on button");
+      const handler = (el as unknown as Record<string, { onClick?: () => void }>)[
+        propsKey
+      ]?.onClick;
+      if (typeof handler !== "function") {
+        throw new Error("onClick handler not found on button");
+      }
+      handler();
+    };
+    // First entry — kicks off createSubmission and yields on await.
+    invokeOnClick(button);
+    // Let React flush the phase transition. The button is now
+    // rendered disabled — irrelevant, because our next entry goes
+    // through the fiber props directly.
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    // Second and third entries — must be rejected by the ref lock.
+    // Without operationLockRef, each of these would call
+    // createSubmission again.
+    invokeOnClick(button);
+    invokeOnClick(button);
+    // Give any re-entrant handler a chance to flush.
     await new Promise((r) => setTimeout(r, 20));
+    // The lock is the ONLY thing that could have stopped the second
+    // and third entries. If it were removed, createSubmission would
+    // have been called two more times.
     expect(createSubmissionMock).toHaveBeenCalledTimes(1);
     // Now resolve — flow completes normally.
     gate.resolve({ ok: true, id: "sub_locked" });
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
     expect(createSubmissionMock).toHaveBeenCalledTimes(1);
-    // A later retry (would happen if the user re-clicked after
-    // completion) must still not create a second submission.
+    // A later click after completion would be a retry — the stored
+    // submissionId routes it to the upload-only path and must not
+    // create a second submission.
     await user.click(
       screen.getAllByRole("button", { name: /Create submission/i })[0]
     );

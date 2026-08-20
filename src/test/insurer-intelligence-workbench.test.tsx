@@ -423,6 +423,14 @@ describe("Insurer intelligence workbench", () => {
     // The tab must NOT jump to Active or Guidelines.
     const stillProposed = await screen.findByRole("tab", { name: /Awaiting review/i });
     expect(stillProposed).toHaveAttribute("aria-selected", "true");
+    // Positive negative assertion — the Active tab must NOT have
+    // become selected as a fallback. Guidelines likewise.
+    expect(
+      screen.getByRole("tab", { name: /Active matrix/i })
+    ).toHaveAttribute("aria-selected", "false");
+    expect(
+      screen.getByRole("tab", { name: /Guidelines/i })
+    ).toHaveAttribute("aria-selected", "false");
     // The "no rules are awaiting review" empty state is now visible.
     expect(
       await screen.findByText(/No rules are awaiting review/i)
