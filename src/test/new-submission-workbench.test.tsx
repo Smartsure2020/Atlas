@@ -282,4 +282,73 @@ describe("New submission workbench", () => {
     await user.click(screen.getAllByRole("button", { name: /Create submission/i })[0]);
     expect(await screen.findByText(/Your session has expired/i)).toBeInTheDocument();
   });
+
+  it("guards against a second entry while createSubmission is still pending (in-flight lock)", async () => {
+    // Manually controlled promise: the mock stays unresolved so we can
+    // fire a second click while the first is still awaiting. Without
+    // the synchronous operation lock, the second click would reach
+    // createSubmission a second time and create a duplicate.
+    const gate = deferred<{ ok: true; id: string }>();
+    createSubmissionMock.mockReturnValueOnce(gate.promise);
+    uploadDocumentMock.mockResolvedValue({ ok: true, document_id: "doc" });
+    const { onCreated } = renderPage();
+    const user = userEvent.setup();
+    await fillClientName(user);
+    await chooseFiles([pdf("policy.pdf")]);
+    const button = screen.getAllByRole("button", { name: /Create submission/i })[0];
+    // Two rapid activations while the create promise is still pending.
+    await user.click(button);
+    await user.click(button);
+    // Give React a chance to flush any re-entrant handler.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(createSubmissionMock).toHaveBeenCalledTimes(1);
+    // Now resolve — flow completes normally.
+    gate.resolve({ ok: true, id: "sub_locked" });
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(createSubmissionMock).toHaveBeenCalledTimes(1);
+    // A later retry (would happen if the user re-clicked after
+    // completion) must still not create a second submission.
+    await user.click(
+      screen.getAllByRole("button", { name: /Create submission/i })[0]
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(createSubmissionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a deliberate retry after a genuine creation failure", async () => {
+    // First attempt fails before returning an id, so submissionIdRef
+    // must stay null. The user must be able to click Create a second
+    // time — this time it resolves, and no stale id from attempt one
+    // is reused.
+    createSubmissionMock
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce({ ok: true, id: "sub_retry_ok" });
+    uploadDocumentMock.mockResolvedValue({ ok: true, document_id: "doc" });
+    const { onCreated } = renderPage();
+    const user = userEvent.setup();
+    await fillClientName(user);
+    await chooseFiles([pdf("policy.pdf")]);
+    await user.click(
+      screen.getAllByRole("button", { name: /Create submission/i })[0]
+    );
+    await screen.findByText(/The submission could not be created/i);
+    expect(createSubmissionMock).toHaveBeenCalledTimes(1);
+    // Second, deliberate attempt.
+    await user.click(
+      screen.getAllByRole("button", { name: /Create submission/i })[0]
+    );
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(onCreated).toHaveBeenCalledWith("sub_retry_ok");
+    expect(createSubmissionMock).toHaveBeenCalledTimes(2);
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}

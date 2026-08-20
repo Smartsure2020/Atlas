@@ -17,7 +17,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const getInsurerMock = vi.fn();
@@ -389,5 +389,158 @@ describe("Insurer intelligence workbench", () => {
     expect(
       await screen.findByText(/skipped this document/i)
     ).toBeInTheDocument();
+  });
+
+  it("keeps the user on Awaiting review after confirming the last proposed rule", async () => {
+    // Initial hydration has one proposed rule and at least one other
+    // populated collection so the surface is not bare.
+    const initialRule = rule({ id: "r_one", is_active: false });
+    getInsurerMock.mockResolvedValueOnce({
+      ok: true,
+      insurer: insurer({ active_appetite_count: 1 }),
+      documents: [doc()],
+      appetite: [initialRule, rule({ id: "r_active", is_active: true })],
+    });
+    // After the confirm, the reload comes back with an empty proposed
+    // list — the tab must stay on Awaiting review.
+    getInsurerMock.mockResolvedValueOnce({
+      ok: true,
+      insurer: insurer({ active_appetite_count: 2 }),
+      documents: [doc()],
+      appetite: [
+        rule({ id: "r_active", is_active: true }),
+        rule({ id: "r_one", is_active: true }),
+      ],
+    });
+    confirmAppetiteMock.mockResolvedValue({ ok: true });
+    renderPage();
+    const proposedTab = await screen.findByRole("tab", { name: /Awaiting review/i });
+    expect(proposedTab).toHaveAttribute("aria-selected", "true");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Confirm and activate/i }));
+    await waitFor(() => expect(confirmAppetiteMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getInsurerMock).toHaveBeenCalledTimes(2));
+    // The tab must NOT jump to Active or Guidelines.
+    const stillProposed = await screen.findByRole("tab", { name: /Awaiting review/i });
+    expect(stillProposed).toHaveAttribute("aria-selected", "true");
+    // The "no rules are awaiting review" empty state is now visible.
+    expect(
+      await screen.findByText(/No rules are awaiting review/i)
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to Guidelines when the entire insurer intelligence surface is bare", async () => {
+    const initialRule = rule({ id: "r_last", is_active: true });
+    // Initial: one active rule, no documents, no proposals — user
+    // lands on the Active tab.
+    getInsurerMock.mockResolvedValueOnce({
+      ok: true,
+      insurer: insurer({ active_appetite_count: 1 }),
+      documents: [],
+      appetite: [initialRule],
+    });
+    // After deactivate: everything is empty. Only Guidelines makes
+    // sense as a landing tab.
+    getInsurerMock.mockResolvedValueOnce({
+      ok: true,
+      insurer: insurer({ active_appetite_count: 0 }),
+      documents: [],
+      appetite: [],
+    });
+    deactivateAppetiteMock.mockResolvedValue({ ok: true });
+    renderPage();
+    const activeTab = await screen.findByRole("tab", { name: /Active matrix/i });
+    expect(activeTab).toHaveAttribute("aria-selected", "true");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Deactivate/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /Deactivate rule/i }));
+    await waitFor(() => expect(deactivateAppetiteMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getInsurerMock).toHaveBeenCalledTimes(2));
+    const guidelinesTab = await screen.findByRole("tab", { name: /Guidelines/i });
+    await waitFor(() =>
+      expect(guidelinesTab).toHaveAttribute("aria-selected", "true")
+    );
+  });
+
+  it("queued: true wins over a stale proposed_count > 0", async () => {
+    getInsurerMock.mockResolvedValue({
+      ok: true,
+      insurer: insurer({ active_appetite_count: 0 }),
+      documents: [
+        doc({ id: "d1", processing_status: "failed", processing_error: "boom" }),
+      ],
+      appetite: [],
+    });
+    // Stale proposed_count on a queued response must NOT be reported
+    // as "N rules were proposed" — queued takes precedence.
+    processInsurerDocumentMock.mockResolvedValue({
+      ok: true,
+      queued: true,
+      job_id: "job_stale",
+      status: "queued",
+      insurer_summary: "",
+      proposed_count: 7,
+      document_notes: [],
+    });
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: /CIB/i });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("tab", { name: /Guidelines/i }));
+    await user.click(screen.getByRole("button", { name: /Read again/i }));
+    expect(await screen.findByText(/queued the document/i)).toBeInTheDocument();
+    // No completion / count wording.
+    expect(screen.queryByText(/7 rules were proposed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Guideline read\./i)).not.toBeInTheDocument();
+  });
+
+  it("resets init-tab guard and clears actionError when the insurer id changes", async () => {
+    // Insurer A — one active rule so initial tab is Active. First we
+    // simulate a mutation failure to leave an actionError behind.
+    getInsurerMock.mockImplementation((id: string) => {
+      if (id === "ins_A") {
+        return Promise.resolve({
+          ok: true,
+          insurer: insurer({ id: "ins_A", name: "Alpha", active_appetite_count: 1 }),
+          documents: [],
+          appetite: [rule({ id: "rA", is_active: true })],
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        insurer: insurer({ id: "ins_B", name: "Bravo", active_appetite_count: 0 }),
+        documents: [doc({ id: "d_B" })],
+        appetite: [rule({ id: "rB", is_active: false })],
+      });
+    });
+    deactivateAppetiteMock.mockRejectedValueOnce(new Error("boom"));
+    const onBack = vi.fn();
+    const { rerender } = render(
+      <ToastProvider>
+        <InsurerDetail insurerId="ins_A" role="manager" onBack={onBack} />
+      </ToastProvider>
+    );
+    await screen.findByRole("heading", { level: 1, name: /Alpha/i });
+    const user = userEvent.setup();
+    // Trigger a mutation failure so actionError is set on insurer A.
+    await user.click(screen.getByRole("button", { name: /Deactivate/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /Deactivate rule/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/That change did not save/i)).toBeInTheDocument()
+    );
+    // Now switch to insurer B.
+    rerender(
+      <ToastProvider>
+        <InsurerDetail insurerId="ins_B" role="manager" onBack={onBack} />
+      </ToastProvider>
+    );
+    await screen.findByRole("heading", { level: 1, name: /Bravo/i });
+    // The stale actionError from A must be gone on B.
+    expect(screen.queryByText(/That change did not save/i)).not.toBeInTheDocument();
+    // The init-tab priority runs again for B (has proposed, so lands
+    // on Awaiting review).
+    const proposedTab = await screen.findByRole("tab", { name: /Awaiting review/i });
+    expect(proposedTab).toHaveAttribute("aria-selected", "true");
   });
 });

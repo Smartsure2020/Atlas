@@ -87,6 +87,14 @@ export default function NewSubmission({
   // guard against re-entrant creates.
   const submissionIdRef = useRef<string | null>(null);
   const [, setSubmissionId] = useState<string | null>(null);
+  // Synchronous operation lock. Set BEFORE the first await inside
+  // onSubmit and cleared in finally. This closes the pre-resolution
+  // race a phase-state guard alone cannot: a second click that arrives
+  // while createSubmission is still pending never enters the create
+  // branch, so a duplicate submission is impossible even if the button
+  // disabled state is bypassed. The disabled UI remains as a visible
+  // secondary safeguard.
+  const operationLockRef = useRef(false);
   // Guard against re-entrant onCreated calls: the effect that transitions
   // the phase to "complete" would otherwise call onCreated on every render
   // after the last upload landed.
@@ -191,54 +199,64 @@ export default function NewSubmission({
   }
 
   async function onSubmit() {
-    setTouched(true);
-    if (!form.client_name.trim()) {
-      setError("Add the client name before creating the submission.");
-      return;
-    }
-    if (blockingFiles.length > 0) {
-      setError("Remove the documents flagged below before creating the submission.");
-      return;
-    }
-    setError(null);
-
-    // Entry guard: if the submission already exists, this is a retry —
-    // never re-hit createSubmission.
-    if (submissionIdRef.current !== null) {
-      await runUploads(submissionIdRef.current);
-      return;
-    }
-
-    setPhase({ kind: "creating" });
+    // Synchronous lock: a second entry while any intake operation is in
+    // flight returns immediately. This runs before any await, so it
+    // closes the pre-resolution race that would otherwise let a second
+    // click reach createSubmission a second time.
+    if (operationLockRef.current) return;
+    operationLockRef.current = true;
     try {
-      const { id } = await createSubmission(form);
-      submissionIdRef.current = id;
-      setSubmissionId(id);
-    } catch (cause) {
-      const message = (cause as Error).message;
-      setPhase({ kind: "idle" });
-      setError(
-        message === "not_authenticated"
-          ? "Your session has expired. Sign in again and re-enter the submission."
-          : "The submission could not be created. The Atlas API rejected the request."
-      );
-      return;
-    }
-
-    const id = submissionIdRef.current;
-    if (!id) return;
-
-    if (files.length === 0) {
-      // No attachments — the submission exists, so we're done.
-      setPhase({ kind: "complete", submissionId: id });
-      if (!notifiedRef.current) {
-        notifiedRef.current = true;
-        onCreated(id);
+      setTouched(true);
+      if (!form.client_name.trim()) {
+        setError("Add the client name before creating the submission.");
+        return;
       }
-      return;
-    }
+      if (blockingFiles.length > 0) {
+        setError("Remove the documents flagged below before creating the submission.");
+        return;
+      }
+      setError(null);
 
-    await runUploads(id);
+      // Entry guard: if the submission already exists, this is a retry —
+      // never re-hit createSubmission.
+      if (submissionIdRef.current !== null) {
+        await runUploads(submissionIdRef.current);
+        return;
+      }
+
+      setPhase({ kind: "creating" });
+      try {
+        const { id } = await createSubmission(form);
+        submissionIdRef.current = id;
+        setSubmissionId(id);
+      } catch (cause) {
+        const message = (cause as Error).message;
+        setPhase({ kind: "idle" });
+        setError(
+          message === "not_authenticated"
+            ? "Your session has expired. Sign in again and re-enter the submission."
+            : "The submission could not be created. The Atlas API rejected the request."
+        );
+        return;
+      }
+
+      const id = submissionIdRef.current;
+      if (!id) return;
+
+      if (files.length === 0) {
+        // No attachments — the submission exists, so we're done.
+        setPhase({ kind: "complete", submissionId: id });
+        if (!notifiedRef.current) {
+          notifiedRef.current = true;
+          onCreated(id);
+        }
+        return;
+      }
+
+      await runUploads(id);
+    } finally {
+      operationLockRef.current = false;
+    }
   }
 
   function requestCancel() {

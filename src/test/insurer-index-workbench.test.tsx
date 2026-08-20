@@ -209,4 +209,55 @@ describe("Insurer index workbench", () => {
     await waitFor(() => expect(createInsurerMock).toHaveBeenCalledTimes(1));
     expect(onOpen).toHaveBeenCalledWith("ins_new");
   });
+
+  it("drops an older listInsurers response that resolves after a newer one", async () => {
+    // Drive two sequential reloads via the ErrorState Try-again
+    // button. The first mount rejects → ErrorState. The next two
+    // clicks fire two consecutive listInsurers requests; we return
+    // manual promises so we can resolve them out of order. The
+    // sequence guard must drop the older response after the newer
+    // one has already painted.
+    const older = deferred<{ ok: true; insurers: InsurerListItem[] }>();
+    const newer = deferred<{ ok: true; insurers: InsurerListItem[] }>();
+    listInsurersMock
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    renderPage();
+    await screen.findByText(/The Atlas API did not respond/i);
+    const user = userEvent.setup();
+    // First retry — "older" request is now pending.
+    await user.click(screen.getByRole("button", { name: /Try again/i }));
+    await waitFor(() => expect(listInsurersMock).toHaveBeenCalledTimes(2));
+    // Second retry — "newer" request is now pending. The ErrorState
+    // is still up because nothing has hydrated yet.
+    await user.click(screen.getByRole("button", { name: /Try again/i }));
+    await waitFor(() => expect(listInsurersMock).toHaveBeenCalledTimes(3));
+    // Resolve the newer promise first — this should paint.
+    newer.resolve({
+      ok: true,
+      insurers: [insurer({ id: "new_id", name: "NEWER" })],
+    });
+    await screen.findByText("NEWER");
+    // Now resolve the older one AFTER the newer has painted. The
+    // sequence guard must drop it — the grid must still show NEWER
+    // and never show OLDER.
+    older.resolve({
+      ok: true,
+      insurers: [insurer({ id: "old_id", name: "OLDER" })],
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.getByText("NEWER")).toBeInTheDocument();
+    expect(screen.queryByText("OLDER")).not.toBeInTheDocument();
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}

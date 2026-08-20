@@ -140,11 +140,15 @@ export default function InsurerDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadToken, insurerId]);
 
-  // Reset the init-tab guard whenever the insurer changes.
+  // Reset the init-tab guard whenever the insurer changes. Also clear
+  // any action error left behind by a mutation on the previous insurer,
+  // so the "That change did not save" notice cannot bleed onto a
+  // different insurer's screen.
   useEffect(() => {
     if (initFor.current !== insurerId) {
       initFor.current = null;
     }
+    setActionError(null);
   }, [insurerId]);
 
   const proposed = useMemo(() => orderRules(appetite.filter((row) => !row.is_active)), [appetite]);
@@ -155,12 +159,21 @@ export default function InsurerDetail({
   );
 
   // Land the manager where the work is on first hydration: unreviewed
-  // proposals first, then the active matrix, then guidelines. After that
-  // the user's tab choice sticks — reloads and polling do not blow it
-  // away — unless the tab has become empty and impossible to render, in
-  // which case we fall back through the same priority order.
+  // proposals first, then the active matrix, then guidelines. After
+  // that the user's tab choice sticks — reloads, polling, mutation
+  // refreshes, and retry completion do not blow it away. An emptied
+  // Awaiting-review tab is a valid reading context ("no rules are
+  // awaiting review") and must not auto-redirect just because the last
+  // proposal was confirmed or rejected. The only fallback is when the
+  // whole insurer intelligence surface is bare — no proposals, no
+  // active rules, no documents — in which case Guidelines is the only
+  // meaningful place to land.
   useEffect(() => {
     if (loading || !hydrated) return;
+    // Do not decide the tab from data that still belongs to the
+    // previous insurer. The load for `insurerId` has not landed yet
+    // if the current record's id differs.
+    if (!insurer || insurer.id !== insurerId) return;
     if (initFor.current !== insurerId) {
       const next: Tab =
         proposed.length > 0 ? "proposed" : active.length > 0 ? "active" : "guidelines";
@@ -168,13 +181,24 @@ export default function InsurerDetail({
       setTab(next);
       return;
     }
-    if (tab === "proposed" && proposed.length === 0) {
-      const fallback: Tab = active.length > 0 ? "active" : "guidelines";
-      setTab(fallback);
-    } else if (tab === "active" && active.length === 0 && proposed.length === 0 && documents.length === 0) {
+    if (
+      (tab === "proposed" || tab === "active") &&
+      proposed.length === 0 &&
+      active.length === 0 &&
+      documents.length === 0
+    ) {
       setTab("guidelines");
     }
-  }, [loading, hydrated, insurerId, tab, proposed.length, active.length, documents.length]);
+  }, [
+    loading,
+    hydrated,
+    insurerId,
+    insurer,
+    tab,
+    proposed.length,
+    active.length,
+    documents.length,
+  ]);
 
   if (loading && !hydrated) {
     return (
