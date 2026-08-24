@@ -1970,12 +1970,20 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
 .atlas-draft-chooser {
   display: grid;
   gap: var(--atlas-space-4);
+  /* The chooser lives inside a card body that is itself a flex-column;
+     without `min-width: 0` the intrinsic min-content of long draft
+     labels forces the flex ancestors to grow past the viewport, which
+     is what caused the mobile Communications tab to overflow at 375 px. */
+  min-width: 0;
 }
 
 .atlas-draft-chooser__group {
   display: flex;
   flex-direction: column;
   gap: var(--atlas-space-2);
+  /* Same reason — the group must be allowed to shrink below the
+     min-content of its widest draft card. */
+  min-width: 0;
 }
 
 .atlas-draft-chooser__group-title {
@@ -2002,11 +2010,28 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
      awkwardly. */
   grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
   max-width: calc(2 * (var(--atlas-draft-card-max, 320px)) + var(--atlas-space-2));
+  /* `min(230px, 100%)` should have collapsed the min track on a narrow
+     viewport, but it does not resolve reliably inside the flex-column
+     ancestors that wrap the chooser: the 230px minimum then forces a
+     track wider than the parent card, spilling the document horizontally.
+     `min-width: 0` allows the grid itself to shrink; the mobile media
+     query below drops the min track outright. */
+  min-width: 0;
 }
 
 @media (min-width: 720px) {
   .atlas-draft-chooser__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  /* At the same breakpoint the rest of the Atlas surfaces use, drop the
+     min track to zero and let the single column own the row. This closes
+     the 87 px document-level overflow seen on the Communications tab at
+     375 px viewports without changing the desktop two-column cap. */
+  .atlas-draft-chooser__grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -2450,6 +2475,19 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
 
   .atlas-oversight__period {
     width: 100%;
+    /*
+     * Desktop uses `flex: 1 1 220px` so the Period field can grow to
+     * share the row with future siblings. When the row flips to
+     * flex-direction: column on mobile, flex-basis becomes a HEIGHT hint
+     * — 220 px, which the row happily honours because grow=1. That
+     * inflated the Period cell to a full 220 px tall, opening a ~137 px
+     * dead band between the hint text and the "Advanced filters"
+     * disclosure below. Collapsing the flex sizing to `auto` returns the
+     * cell to its content height (~64 px) and shrinks the gap to the
+     * normal Atlas vertical rhythm.
+     */
+    flex: 0 0 auto;
+    min-width: 0;
   }
 
   /*

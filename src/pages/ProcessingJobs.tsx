@@ -71,6 +71,7 @@ import {
   jobsNeedingIntervention,
   orderAlerts,
   processingExceptionMetrics,
+  readExpiredActiveDocumentCount,
   redactJobMetadata,
   summariseJob,
   type AlertPresentation,
@@ -103,6 +104,16 @@ export default function ProcessingJobs({
   const [actionError, setActionError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const requestSeq = useRef(0);
+  // Stable refs for the ConfirmDialog cancel-button focus targets. These
+  // live at the component top level so the trap installs against the same
+  // ref object across renders — the previous per-render pattern let the
+  // Cancel-job dialog open with focus outside the modal because the ref
+  // that arrived at useFocusTrap was `null` on first commit. Initial focus
+  // deliberately targets the safest control (Cancel, not the destructive
+  // Confirm) so a mistrigger cannot be double-tapped into a real
+  // cancellation. See NEW-3 in the correction pass report.
+  const jobActionCancelRef = useRef<HTMLButtonElement | null>(null);
+  const alertActionCancelRef = useRef<HTMLButtonElement | null>(null);
 
   const [statusFilter, setStatusFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -183,8 +194,15 @@ export default function ProcessingJobs({
             // do not classify it as a refresh failure.
             setSystemStatus(null);
           }
-          if (cleanupResult.status === "fulfilled" && cleanupResult.value) {
-            setExpiredDocuments(cleanupResult.value.expired_active_documents.length);
+          if (cleanupResult.status === "fulfilled") {
+            // A fulfilled cleanup can still carry a mis-shaped body — the
+            // parser distinguishes malformed/absent (null) from a
+            // well-shaped empty backlog (0). A naive `.length` here throws
+            // a TypeError when the wrapping object is missing, halting the
+            // rest of this handler before the stale-data warning can be
+            // set. See readExpiredActiveDocumentCount for the accepted
+            // shapes.
+            setExpiredDocuments(readExpiredActiveDocumentCount(cleanupResult.value));
           } else {
             setExpiredDocuments(null);
           }
@@ -208,6 +226,27 @@ export default function ProcessingJobs({
             );
           }
           setHydrated(true);
+        })
+        .catch(() => {
+          // Defence-in-depth: if the .then handler itself throws
+          // (unexpected shape from a supporting endpoint, a Response
+          // parser bug, etc.), the workbench must still tell the reader
+          // its supporting context could not be refreshed rather than
+          // silently keeping stale numbers on screen. `listJobs` outcome
+          // has already been classified above, so any throw here is a
+          // supporting-endpoint or presentation-layer problem — surface
+          // it as a refresh warning without escalating to a full error
+          // state.
+          if (requestSeq.current !== seq) return;
+          if (hydrated) {
+            setRefreshError(
+              "Atlas could not refresh the operational data. The information shown may be outdated."
+            );
+          } else {
+            setLoadError(
+              "You may not have permission, or the server may be temporarily unavailable — try again in a moment."
+            );
+          }
         })
         .finally(() => {
           if (requestSeq.current === seq) setLoading(false);
@@ -596,6 +635,7 @@ export default function ProcessingJobs({
       <ConfirmDialog
         open={pendingJobAction !== null}
         destructive={pendingJobAction?.action === "cancel"}
+        initialFocusRef={jobActionCancelRef}
         title={
           pendingJobAction?.action === "retry"
             ? `Retry this ${jobTypeLabel(pendingJobAction.job.job_type).toLowerCase()} job?`
@@ -629,6 +669,7 @@ export default function ProcessingJobs({
 
       <ConfirmDialog
         open={pendingAlertAction !== null}
+        initialFocusRef={alertActionCancelRef}
         title="Mark this alert as resolved?"
         confirmLabel="Mark as resolved"
         working={alertWorking !== null}

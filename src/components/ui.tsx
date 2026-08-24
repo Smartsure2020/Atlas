@@ -40,6 +40,11 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   icon?: IconName;
   iconAfter?: IconName;
   block?: boolean;
+  /** Escape hatch to attach a ref to the underlying <button> without
+   *  forwardRef; used by focus-management call sites (see ConfirmDialog).
+   *  Accepts a mutable ref (`useRef<HTMLButtonElement | null>()`) or a
+   *  callback ref. */
+  buttonRef?: React.Ref<HTMLButtonElement | null>;
 }
 
 const VARIANT_CLASS: Record<ButtonVariant, string> = {
@@ -62,6 +67,7 @@ export function Button({
   children,
   disabled,
   type = "button",
+  buttonRef,
   ...rest
 }: ButtonProps) {
   const classes = [
@@ -75,7 +81,13 @@ export function Button({
     .join(" ");
 
   return (
-    <button {...rest} type={type} className={classes} disabled={disabled || loading}>
+    <button
+      {...rest}
+      ref={buttonRef as React.LegacyRef<HTMLButtonElement>}
+      type={type}
+      className={classes}
+      disabled={disabled || loading}
+    >
       {loading ? (
         <span className="atlas-btn__spinner" aria-hidden="true" />
       ) : (
@@ -1049,9 +1061,9 @@ const FOCUSABLE =
 function useFocusTrap(
   containerRef: React.RefObject<HTMLElement>,
   onDismiss: () => void,
-  options: { dismissOnEscape?: boolean } = {}
+  options: { dismissOnEscape?: boolean; initialFocusRef?: React.RefObject<HTMLElement | null> } = {}
 ) {
-  const { dismissOnEscape = true } = options;
+  const { dismissOnEscape = true, initialFocusRef } = options;
   const previouslyFocused = useRef<HTMLElement | null>(null);
   // Hold the latest handler and option in refs so the trap installs exactly
   // once for the surface's open lifetime. Keying the effect on the handler
@@ -1063,13 +1075,25 @@ function useFocusTrap(
   onDismissRef.current = onDismiss;
   const dismissOnEscapeRef = useRef(dismissOnEscape);
   dismissOnEscapeRef.current = dismissOnEscape;
+  // Same treatment for the optional initial-focus target so a
+  // caller-supplied ref (typically a stable one created at the parent's
+  // top level) reaches the effect without re-running it.
+  const initialFocusRefRef = useRef(initialFocusRef);
+  initialFocusRefRef.current = initialFocusRef;
 
   useEffect(() => {
     previouslyFocused.current = document.activeElement as HTMLElement | null;
     const container = containerRef.current;
     if (container) {
+      // Prefer the caller-supplied initial focus target when it resolves —
+      // this lets a destructive-action dialog put focus on the safest
+      // control (typically Cancel) rather than the first tab-order match,
+      // which can differ per call site depending on the modal's contents.
+      const preferred = initialFocusRefRef.current?.current ?? null;
       const first = container.querySelector<HTMLElement>(FOCUSABLE);
-      (first ?? container).focus();
+      const target =
+        preferred && container.contains(preferred) ? preferred : (first ?? container);
+      target.focus();
     }
 
     function onKeyDown(event: KeyboardEvent) {
@@ -1259,6 +1283,7 @@ export function Modal({
   children,
   footer,
   size = "md",
+  initialFocusRef,
 }: {
   open: boolean;
   title: string;
@@ -1266,10 +1291,20 @@ export function Modal({
   children: ReactNode;
   footer?: ReactNode;
   size?: "md" | "lg";
+  /** Element to receive focus when the modal opens; overrides the
+   *  first-focusable default. Must be a stable ref created at the
+   *  caller's top level (a ref recreated per render tears the trap). */
+  initialFocusRef?: React.RefObject<HTMLElement | null>;
 }) {
   if (!open) return null;
   return (
-    <ModalBody title={title} onClose={onClose} footer={footer} size={size}>
+    <ModalBody
+      title={title}
+      onClose={onClose}
+      footer={footer}
+      size={size}
+      initialFocusRef={initialFocusRef}
+    >
       {children}
     </ModalBody>
   );
@@ -1281,16 +1316,18 @@ function ModalBody({
   children,
   footer,
   size,
+  initialFocusRef,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
   size: "md" | "lg";
+  initialFocusRef?: React.RefObject<HTMLElement | null>;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  useFocusTrap(panelRef, onClose);
+  useFocusTrap(panelRef, onClose, { initialFocusRef });
   return (
     <>
       <div className="atlas-overlay" onClick={onClose} aria-hidden="true" />
@@ -1331,6 +1368,7 @@ export function ConfirmDialog({
   working,
   onConfirm,
   onCancel,
+  initialFocusRef,
 }: {
   open: boolean;
   title: string;
@@ -1341,15 +1379,27 @@ export function ConfirmDialog({
   working?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Element to receive focus on open. Must be a stable ref (created
+   *  once at the caller's top level with useRef). ConfirmDialog attaches
+   *  it to the cancel button when supplied, so a destructive-action
+   *  dialog always lands on the safe choice rather than the confirm. */
+  initialFocusRef?: React.RefObject<HTMLButtonElement | null>;
 }) {
+  // A dialog-owned fallback ref keeps the "focus lands on Cancel" contract
+  // even when the caller does not supply its own — otherwise the first
+  // focusable would still be Cancel today, but the FOCUSABLE query is
+  // structural and can silently change if the Modal internals grow.
+  const internalCancelRef = useRef<HTMLButtonElement | null>(null);
+  const cancelRef = initialFocusRef ?? internalCancelRef;
   return (
     <Modal
       open={open}
       title={title}
       onClose={onCancel}
+      initialFocusRef={cancelRef}
       footer={
         <>
-          <Button onClick={onCancel} disabled={working}>
+          <Button buttonRef={cancelRef} onClick={onCancel} disabled={working}>
             {cancelLabel}
           </Button>
           <Button

@@ -283,6 +283,43 @@ export function jobsNeedingIntervention(
 }
 
 /* ===========================================================================
+   Cleanup preview — expired-active document count
+   =========================================================================== */
+
+/**
+ * The `/api/admin/cleanup/preview` endpoint documents a well-formed response
+ * shape that carries `expired_active_documents` as an array. In practice the
+ * page has to survive three failure modes without crashing:
+ *
+ *   1. A completely absent value (`null` / `undefined`) — treat as
+ *      "supporting context unavailable" (return `null`).
+ *   2. A resolved value whose shape is wrong (missing key, wrong type,
+ *      string, array-of-nothing, opaque object) — same as (1); the
+ *      workbench renders and the caller surfaces a stale-data warning.
+ *   3. A genuine, well-shaped array — return its length, including `0`
+ *      for a genuine empty backlog (distinct from "unavailable").
+ *
+ * A one-liner `?.length` conflates modes 1 and 2 with mode 3's empty-array
+ * case and — when the returned value is not an array at all — throws a
+ * TypeError inside the promise handler, silently halting whatever else that
+ * handler was going to do (including recording the stale-data warning). The
+ * discriminated return type below keeps those two states apart so callers
+ * can render `null` as "unavailable" and `0` as "zero backlog".
+ */
+export function readExpiredActiveDocumentCount(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object") return null;
+  // Arrays are objects — a caller that hands us the array directly is
+  // treated as malformed (the wire contract is a wrapping object). We
+  // still refuse rather than guess.
+  if (Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const list = record.expired_active_documents;
+  if (!Array.isArray(list)) return null;
+  return list.length;
+}
+
+/* ===========================================================================
    Exception summary — the "where operations need attention" strip
    =========================================================================== */
 
