@@ -44,6 +44,7 @@ export default function DocumentsTab({
   const summary = useMemo(() => documentsTrustSummary(rows), [rows]);
 
   const quarantined = groups.find((g) => g.key === "quarantined")?.documents ?? [];
+  const scanFailed = groups.find((g) => g.key === "scan_failed")?.documents ?? [];
   const pending = groups.find((g) => g.key === "scan_pending")?.documents ?? [];
   const active = groups.find((g) => g.key === "active")?.documents ?? [];
   const expired = groups.find((g) => g.key === "expired")?.documents ?? [];
@@ -87,6 +88,8 @@ export default function DocumentsTab({
             {quarantined.length > 0 && (
               <QuarantineGroup documents={quarantined} />
             )}
+
+            {scanFailed.length > 0 && <ScanFailedGroup documents={scanFailed} />}
 
             {pending.length > 0 && <ScanPendingGroup documents={pending} />}
 
@@ -161,6 +164,23 @@ function QuarantineGroup({ documents }: { documents: DocumentRow[] }) {
   );
 }
 
+function ScanFailedGroup({ documents }: { documents: DocumentRow[] }) {
+  const n = documents.length;
+  const noun = n === 1 ? "document" : "documents";
+  const pronoun = n === 1 ? "it" : "them";
+  return (
+    <section className="atlas-doc-groups__section" aria-label="Documents whose scan could not complete">
+      <h3 className="atlas-doc-groups__heading atlas-doc-groups__heading--danger">
+        Scan could not complete — Atlas cannot read these
+      </h3>
+      <p className="atlas-doc-groups__hint">
+        {`Atlas's malware scanner returned an error on ${n} ${noun}. Until the scan is rerun and clears ${pronoun}, extraction is not run against ${pronoun} — no assurance can be made about their contents. Ask an administrator to rerun the scan, or ask the broker to resend the file.`}
+      </p>
+      <DocumentList documents={documents} statusTone="scan_failed" />
+    </section>
+  );
+}
+
 function ScanPendingGroup({ documents }: { documents: DocumentRow[] }) {
   const n = documents.length;
   const noun = n === 1 ? "document" : "documents";
@@ -214,7 +234,7 @@ function ExpiredGroup({ documents }: { documents: DocumentRow[] }) {
    badge chosen from the semantic tone the group carries.
    =========================================================================== */
 
-type StatusTone = "active" | "pending" | "quarantined" | "expired";
+type StatusTone = "active" | "pending" | "quarantined" | "scan_failed" | "expired";
 
 function DocumentList({
   documents,
@@ -265,6 +285,9 @@ function addedLabel(document: DocumentRow, tone: StatusTone): string {
 function RowStatus({ document, tone }: { document: DocumentRow; tone: StatusTone }) {
   if (tone === "quarantined") {
     return <StatusBadge status={scanStatus("infected")} />;
+  }
+  if (tone === "scan_failed") {
+    return <StatusBadge status={scanStatus("failed")} />;
   }
   if (tone === "pending") {
     return <StatusBadge status={scanStatus("pending")} />;

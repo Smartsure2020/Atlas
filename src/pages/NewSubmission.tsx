@@ -28,6 +28,7 @@
  */
 
 import { useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { createSubmission, uploadDocument } from "../lib/atlas";
 import {
   Button,
@@ -150,6 +151,14 @@ export default function NewSubmission({
     const queue = remainingUploads(files);
     let index = 0;
     let sawFailure = false;
+    // Local snapshot of what happened this run, keyed by clientId. We
+    // never re-derive counts from React state inside the updater callback
+    // because that violates the "updaters must be pure" contract and
+    // makes the side effects (setPhase, onCreated) run twice under
+    // StrictMode. Instead the loop maintains the authoritative record
+    // itself, and setPhase / onCreated are called from the effect body
+    // after the loop.
+    const outcomes = new Map<string, "uploaded" | "failed">();
 
     for (const entry of queue) {
       index += 1;
@@ -157,17 +166,26 @@ export default function NewSubmission({
       updateFile(entry.clientId, (item) => ({ ...item, upload: { status: "uploading" } }));
       try {
         await uploadDocument(id, entry.file, entry.type);
-        updateFile(entry.clientId, (item) => ({ ...item, upload: { status: "uploaded" } }));
+        // flushSync so the row's "uploaded" badge appears before the
+        // next iteration's "uploading" transition — the UI has always
+        // looked committed step-by-step and we keep that behaviour.
+        flushSync(() => {
+          updateFile(entry.clientId, (item) => ({ ...item, upload: { status: "uploaded" } }));
+        });
+        outcomes.set(entry.clientId, "uploaded");
       } catch (cause) {
         sawFailure = true;
         const message =
           (cause as Error).message === "not_authenticated"
             ? "Your session expired mid-upload. Sign in again to retry."
             : "The upload failed. Try again.";
-        updateFile(entry.clientId, (item) => ({
-          ...item,
-          upload: { status: "failed", error: message },
-        }));
+        flushSync(() => {
+          updateFile(entry.clientId, (item) => ({
+            ...item,
+            upload: { status: "failed", error: message },
+          }));
+        });
+        outcomes.set(entry.clientId, "failed");
         // Halt the loop — leave remaining files as pending so the retry
         // button attempts them together with the failed one on the next
         // click. This keeps the behaviour predictable when the network is
@@ -176,26 +194,38 @@ export default function NewSubmission({
       }
     }
 
-    // Recompute status from the authoritative post-loop file list.
-    setFiles((current) => {
-      const failedCount = current.filter((f) => f.upload.status === "failed").length;
-      const pendingCount = current.filter((f) => f.upload.status === "pending").length;
-      if (sawFailure || pendingCount > 0) {
-        setPhase({
-          kind: "partial",
-          submissionId: id,
-          failedCount,
-          remainingCount: pendingCount,
-        });
-      } else {
-        setPhase({ kind: "complete", submissionId: id });
-        if (!notifiedRef.current) {
-          notifiedRef.current = true;
-          onCreated(id);
-        }
+    // Compute counts from the loop's authoritative record + the
+    // pre-loop file list. `files` may still reflect earlier state, but
+    // any file whose clientId is in `outcomes` has a known result;
+    // anything else keeps its prior status. Everything below runs in
+    // the effect body — no setState inside a setState updater.
+    let failedCount = 0;
+    let pendingCount = 0;
+    for (const entry of files) {
+      const outcome = outcomes.get(entry.clientId);
+      if (outcome === "failed") {
+        failedCount += 1;
+        continue;
       }
-      return current;
-    });
+      if (outcome === "uploaded") continue;
+      if (entry.upload.status === "failed") failedCount += 1;
+      else if (entry.upload.status === "pending") pendingCount += 1;
+    }
+
+    if (sawFailure || pendingCount > 0) {
+      setPhase({
+        kind: "partial",
+        submissionId: id,
+        failedCount,
+        remainingCount: pendingCount,
+      });
+    } else {
+      setPhase({ kind: "complete", submissionId: id });
+      if (!notifiedRef.current) {
+        notifiedRef.current = true;
+        onCreated(id);
+      }
+    }
   }
 
   async function onSubmit() {
@@ -278,24 +308,22 @@ export default function NewSubmission({
 
   return (
     <div>
+      {/*
+       * The bottom action row is the true contextual pair for this
+       * form. The header used to duplicate them ~120 px above the first
+       * field, which read as two identical primary buttons on the same
+       * page. Now the header only carries a back link so the origin
+       * queue is one click away — the create/cancel controls sit next
+       * to the form fields they belong to.
+       */}
       <PageHeader
         breadcrumbs={[{ label: "Work queue", onClick: requestCancel }, { label: "New submission" }]}
         title="New submission"
         description="Capture the broker request and attach the client documents. Atlas reads them during extraction."
         actions={
-          <>
-            <Button onClick={requestCancel} disabled={working}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              onClick={onSubmit}
-              loading={working}
-              loadingLabel={primaryLoadingLabel}
-            >
-              {primaryLabel}
-            </Button>
-          </>
+          <Button variant="link" icon="arrow-right" onClick={requestCancel} disabled={working}>
+            Back to work queue
+          </Button>
         }
       />
 

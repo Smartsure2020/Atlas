@@ -29,6 +29,15 @@ export interface StatusMeta {
 
 const NEUTRAL: StatusMeta = { label: "Unknown", tone: "neutral" };
 
+/**
+ * The single canonical Atlas safety statement. Two surfaces used to
+ * phrase it two different ways — the Communications panel said "on your
+ * behalf", the Manager overview said "itself". A governance-critical
+ * claim like this should read identically everywhere; both now use this
+ * constant. If a change ever needs to happen, it happens in one place.
+ */
+export const ATLAS_NEVER_SENDS_MESSAGE = "Atlas never sends anything itself";
+
 function pick(map: Record<string, StatusMeta>, value: string | null | undefined, fallbackLabel?: string): StatusMeta {
   if (!value) return fallbackLabel ? { ...NEUTRAL, label: fallbackLabel } : NEUTRAL;
   const hit = map[value];
@@ -432,6 +441,16 @@ export const CONFIDENCE_BAND: Record<ConfidenceBand, StatusMeta> = {
 /**
  * Derive a band from the extraction field's own status plus its confidence.
  * The stored `status` wins where it is decisive; confidence resolves the rest.
+ *
+ * `reviewed` is a submission-level flag — a reviewer clicked Save Review
+ * on the extraction as a whole. The pipeline does not yet emit per-field
+ * "was this field corrected" provenance, so we deliberately do NOT let
+ * submission-level review promote a field that Atlas itself marked as
+ * low-confidence, unclear, or conflicting. The safe reading is: the
+ * reviewer confirmed the shape of the record; individual fields Atlas
+ * flagged as uncertain remain uncertain until the field's own status
+ * changes. This keeps the "Uncertain risk fields" count honest — clicking
+ * Save Review never zeroes it out on its own.
  */
 export function confidenceBand(
   status: string | null | undefined,
@@ -442,8 +461,8 @@ export function confidenceBand(
     if (status === "not_found") return "missing";
     if (status === "conflicting") return "conflicting";
     if (status === "unclear") return "uncertain";
-    if (reviewed) return "confirmed";
     if (status === "low_confidence_extracted") return "uncertain";
+    if (reviewed) return "confirmed";
     const value = typeof confidence === "number" ? confidence : 0;
     if (value >= 0.85) return "confirmed";
     if (value > 0.5) return "likely";

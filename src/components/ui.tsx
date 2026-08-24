@@ -1143,25 +1143,58 @@ export function Drawer({
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  // Confirmation is a real ConfirmDialog now, not native window.confirm.
+  // The old browser prompt broke the focus trap contract — Chrome would
+  // return focus to <body> after the OK/Cancel choice instead of the
+  // Drawer panel, and the focus trap could never re-install itself
+  // correctly on the round trip. The ConfirmDialog is trap-native, so
+  // Escape and outside-click behave consistently, and focus returns to
+  // the Drawer close control when the user chooses to keep editing.
+  const [discardPending, setDiscardPending] = useState(false);
 
   const requestClose = useCallback(() => {
-    if (dirty && !window.confirm("Discard your unsaved changes?")) return;
+    if (dirty) {
+      setDiscardPending(true);
+      return;
+    }
     onClose();
   }, [dirty, onClose]);
 
   if (!open) return null;
-  return <DrawerBody
-    panelRef={panelRef}
-    titleId={titleId}
-    title={title}
-    description={description}
-    requestClose={requestClose}
-    footer={footer}
-    size={size}
-    flush={flush}
-  >
-    {children}
-  </DrawerBody>;
+  return (
+    <>
+      <DrawerBody
+        panelRef={panelRef}
+        titleId={titleId}
+        title={title}
+        description={description}
+        requestClose={requestClose}
+        footer={footer}
+        size={size}
+        flush={flush}
+      >
+        {children}
+      </DrawerBody>
+      <ConfirmDialog
+        open={discardPending}
+        title="Discard your unsaved changes?"
+        destructive
+        confirmLabel="Discard changes"
+        cancelLabel="Keep editing"
+        body={
+          <p>
+            You have unsaved edits in this panel. Discarding closes the panel
+            and loses them; keeping editing returns you to the form.
+          </p>
+        }
+        onCancel={() => setDiscardPending(false)}
+        onConfirm={() => {
+          setDiscardPending(false);
+          onClose();
+        }}
+      />
+    </>
+  );
 }
 
 function DrawerBody({
@@ -1433,8 +1466,20 @@ export const useToast = () => useContext(ToastContext);
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
+  // Track the auto-dismiss timers so we can (a) cancel one when the user
+  // clicks the close button, avoiding a redundant setState-after-dismiss,
+  // and (b) clear the whole map on unmount, so a full-page reload while
+  // a toast is queued does not leave a setState pending on a torn-down
+  // provider.
+  const timersRef = useRef<Map<number, number>>(new Map());
 
   const dismiss = useCallback((id: number) => {
+    const timers = timersRef.current;
+    const handle = timers.get(id);
+    if (handle !== undefined) {
+      window.clearTimeout(handle);
+      timers.delete(id);
+    }
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
 
@@ -1442,10 +1487,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (message, tone = "default") => {
       const id = nextId.current++;
       setToasts((current) => [...current, { id, message, tone }]);
-      window.setTimeout(() => dismiss(id), 5000);
+      const handle = window.setTimeout(() => dismiss(id), 5000);
+      timersRef.current.set(id, handle);
     },
     [dismiss]
   );
+
+  useEffect(() => {
+    // Clear every pending auto-dismiss when the provider tears down.
+    const timers = timersRef.current;
+    return () => {
+      timers.forEach((handle) => window.clearTimeout(handle));
+      timers.clear();
+    };
+  }, []);
 
   const api = useMemo(() => ({ notify }), [notify]);
 

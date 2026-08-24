@@ -153,7 +153,7 @@ describe("CommunicationsPanel — safety framing", () => {
   it("names the do-not-send boundary prominently", async () => {
     renderPanel();
     expect(
-      screen.getByText(/Atlas never sends anything on your behalf/i)
+      screen.getByText(/Atlas never sends anything itself/i)
     ).toBeInTheDocument();
     // Primary controls never say Send.
     expect(screen.queryByRole("button", { name: /^Send$/i })).toBeNull();

@@ -33,6 +33,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
 } from "react";
 import { getManagerStatsFiltered, type ManagerStats } from "../lib/phase4";
 import {
@@ -43,6 +44,7 @@ import {
   EmptyState,
   ErrorState,
   FilterChips,
+  Notice,
   PageHeader,
   StatusBadge,
   type ActiveFilter,
@@ -50,6 +52,7 @@ import {
 import { DataTable, type Column, type SortState } from "../components/DataTable";
 import type { QuoteReview } from "../lib/quote-reviews";
 import {
+  ATLAS_NEVER_SENDS_MESSAGE,
   LINE_OF_BUSINESS_OPTIONS,
   lineOfBusinessLabel,
   QUOTE_REVIEW_STATUS,
@@ -116,7 +119,12 @@ export default function ManagerDashboard({
   const [draft, setDraft] = useState<Filters>(EMPTY_FILTERS);
   const [stats, setStats] = useState<ManagerStats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+  // Split the error slot the same way ProcessingJobs / Insurers /
+  // InsurerDetail do. A silent refresh failure keeps the last-good stats
+  // visible under a stale-data warning instead of blanking the whole page.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const requestSeq = useRef(0);
 
@@ -146,15 +154,29 @@ export default function ManagerDashboard({
         .then((result) => {
           if (requestSeq.current !== seq) return;
           setStats(result.stats);
-          setError(null);
+          setLoadError(null);
+          setRefreshError(null);
+          setHydrated(true);
         })
         .catch((cause: Error) => {
           if (requestSeq.current !== seq) return;
-          setError(
+          const message =
             cause.message === "manager_only"
               ? "This overview is available to underwriting managers and administrators only."
-              : "The manager overview could not be loaded. The Atlas API did not respond."
-          );
+              : cause.message === "not_authenticated"
+                ? "Your session has expired. Sign in again to view the manager overview."
+                : "The manager overview could not be loaded. The Atlas API did not respond.";
+          if (hydrated) {
+            // Keep the last-good stats visible under a stale-data warning
+            // rather than blanking a filter change or a transient 500.
+            setRefreshError(
+              cause.message === "not_authenticated"
+                ? "Your session has expired, so Atlas could not refresh the manager overview. The information shown may be outdated. Sign in again to reload."
+                : "Atlas could not refresh the manager overview. The information shown may be outdated."
+            );
+          } else {
+            setLoadError(message);
+          }
         })
         .finally(() => {
           if (requestSeq.current === seq) setLoading(false);
@@ -249,7 +271,7 @@ export default function ManagerDashboard({
     return list;
   }, [applied]);
 
-  if (error) {
+  if (loadError && !hydrated) {
     return (
       <div>
         <PageHeader
@@ -259,7 +281,7 @@ export default function ManagerDashboard({
         />
         <ErrorState
           title="The manager overview could not be loaded"
-          message={error}
+          message={loadError}
           onRetry={() => setReloadToken((token) => token + 1)}
         />
       </div>
@@ -281,6 +303,28 @@ export default function ManagerDashboard({
         title="Manager overview"
         description="Where work is getting stuck, which decisions departed from the Atlas recommendation, and what the team is waiting on."
       />
+
+      {refreshError && (
+        <div style={{ marginBottom: "var(--atlas-space-4)" }}>
+          <Notice
+            tone="warning"
+            role="status"
+            title="Atlas could not refresh the manager overview"
+            actions={
+              <Button
+                size="sm"
+                icon="refresh"
+                onClick={() => setReloadToken((token) => token + 1)}
+                aria-busy={loading || undefined}
+              >
+                {loading ? "Refreshing…" : "Try again"}
+              </Button>
+            }
+          >
+            {refreshError}
+          </Notice>
+        </div>
+      )}
 
       <OversightFilterBar
         applied={applied}
@@ -454,9 +498,16 @@ function OversightFilterBar({
               id={insurerId}
               className="atlas-input"
               value={draft.insurerId}
-              placeholder="Optional"
-              onChange={(event) => onDraftChange({ ...draft, insurerId: event.target.value })}
+              placeholder="Insurer UUID"
+              maxLength={200}
+              aria-describedby={`${insurerId}-hint`}
+              onChange={(event) =>
+                onDraftChange({ ...draft, insurerId: event.target.value.slice(0, 200) })
+              }
             />
+            <p id={`${insurerId}-hint`} className="atlas-field__hint">
+              The insurer's UUID from the insurer list. Up to 200 characters.
+            </p>
           </div>
 
           <div className="atlas-toolbar__field">
@@ -465,9 +516,16 @@ function OversightFilterBar({
               id={consultantId}
               className="atlas-input"
               value={draft.consultantId}
-              placeholder="Optional"
-              onChange={(event) => onDraftChange({ ...draft, consultantId: event.target.value })}
+              placeholder="Consultant UUID or email"
+              maxLength={200}
+              aria-describedby={`${consultantId}-hint`}
+              onChange={(event) =>
+                onDraftChange({ ...draft, consultantId: event.target.value.slice(0, 200) })
+              }
             />
+            <p id={`${consultantId}-hint`} className="atlas-field__hint">
+              The consultant's Atlas identifier. Up to 200 characters.
+            </p>
           </div>
 
           <div className="atlas-oversight__apply">
@@ -549,7 +607,11 @@ function ExceptionSummary({
                 {tile.value}
               </span>
               <span className="atlas-oversight__tile-scope">
-                {tile.scope === "period" ? `In ${periodLabel.toLowerCase()}` : "Across recent activity"}
+                {tile.scope === "period"
+                  ? `In ${periodLabel.toLowerCase()}`
+                  : tile.scope === "period_capped"
+                    ? `Up to 10 in ${periodLabel.toLowerCase()}`
+                    : "Across recent activity"}
               </span>
               <span className="atlas-oversight__tile-hint">{tile.hint}</span>
             </div>
@@ -777,6 +839,34 @@ function RecurringPatterns({ stats }: { stats: ManagerStats }) {
   );
 }
 
+/**
+ * Turn raw pattern labels into a mixed-content span that renders long
+ * numeric identifiers (10+ digits — quote IDs, claim IDs, policy IDs)
+ * as a monospace pill instead of loose digits in the middle of a
+ * sentence. The label reads humanised as before; only the identifier
+ * segments get the distinct treatment so a reader can copy them or
+ * distinguish them from prose. Non-string / empty labels fall back to
+ * humanise() unchanged.
+ */
+function renderPatternLabel(raw: string): ReactNode {
+  const humanised = humanise(raw);
+  const parts = humanised.split(/(\b\d{10,}\b)/g);
+  if (parts.length === 1) return humanised;
+  return parts.map((part, index) =>
+    /^\d{10,}$/.test(part) ? (
+      <span
+        key={index}
+        className="atlas-badge atlas-badge--quiet atlas-mono"
+        style={{ marginInline: 4, verticalAlign: "baseline" }}
+      >
+        <span className="atlas-badge__label">{part}</span>
+      </span>
+    ) : (
+      <span key={index}>{part}</span>
+    )
+  );
+}
+
 function PatternCard({
   title,
   hint,
@@ -800,14 +890,19 @@ function PatternCard({
         <p className="atlas-oversight__pattern-hint">{hint}</p>
       </header>
       {items.length === 0 ? (
-        <p className="atlas-oversight__pattern-empty">{emptyLabel}</p>
+        // Unified with the other empty states on the page — the plain
+        // paragraph read as an unfinished section next to the
+        // EmptyState-bordered blocks used elsewhere on the overview.
+        <EmptyState inline title={emptyLabel} />
       ) : (
         <ul className="atlas-oversight__bar-list atlas-oversight__bar-list--compact">
           {items.map((item) => {
             const width = barWidth(item.count, max);
             return (
               <li className="atlas-oversight__bar-row" key={item.label}>
-                <span className="atlas-oversight__bar-label">{humanise(item.label)}</span>
+                <span className="atlas-oversight__bar-label">
+                  {renderPatternLabel(item.label)}
+                </span>
                 <span className="atlas-oversight__bar-count">{item.count}</span>
                 <span className="atlas-oversight__bar-track" aria-hidden="true">
                   <span
@@ -862,9 +957,7 @@ function CommunicationsFollowThrough({ stats }: { stats: ManagerStats }) {
           )}
         </div>
         <p className="atlas-oversight__comms-note">
-          Atlas never sends anything itself. A count difference does not prove a draft was not
-          sent — the team may have sent it outside Atlas — but it does mean the audit history is
-          incomplete for those items.
+          {`${ATLAS_NEVER_SENDS_MESSAGE}. A count difference does not prove a draft was not sent — the team may have sent it outside Atlas — but it does mean the audit history is incomplete for those items.`}
         </p>
       </div>
     </section>

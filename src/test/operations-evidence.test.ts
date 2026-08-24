@@ -426,9 +426,15 @@ describe("processingExceptionMetrics", () => {
 /* ---------- groupDocuments / documentsTrustSummary ------------------------ */
 
 describe("groupDocuments", () => {
-  it("returns four buckets in a fixed order even when empty", () => {
+  it("returns five buckets in a fixed order even when empty", () => {
     const groups = groupDocuments([]);
-    expect(groups.map((g) => g.key)).toEqual(["quarantined", "scan_pending", "active", "expired"]);
+    expect(groups.map((g) => g.key)).toEqual([
+      "quarantined",
+      "scan_failed",
+      "scan_pending",
+      "active",
+      "expired",
+    ]);
     for (const group of groups) expect(group.documents).toEqual([]);
   });
 
