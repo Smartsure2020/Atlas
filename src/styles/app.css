@@ -350,10 +350,19 @@
   border-radius: var(--atlas-radius-badge);
   font-size: var(--atlas-fs-label);
   color: var(--atlas-ink-muted);
+  white-space: nowrap;
 }
 
 .atlas-nav-toggle {
   display: inline-flex;
+}
+
+/* Compact-mode search: the icon-only trigger is hidden on desktop; the
+   full input is shown. At the mobile breakpoint the trigger takes over
+   and the input collapses to a hidden, keyboard-reachable state until
+   the trigger toggles it back on. */
+.atlas-topbar__search-trigger {
+  display: none;
 }
 
 /* ===========================================================================
@@ -1925,6 +1934,10 @@
     flex-basis: 140px;
   }
 
+  .atlas-topbar__env-label {
+    display: none;
+  }
+
   .atlas-page-header {
     gap: var(--atlas-space-3);
   }
@@ -1974,5 +1987,46 @@
 
   .atlas-table--responsive thead th:first-child {
     background: var(--atlas-surface-muted);
+  }
+}
+
+/*
+ * Phone-narrow: the top bar collapses to icon-only affordances so the
+ * search input placeholder no longer clips ("Sear…") and the
+ * decision-support role pill no longer wraps or pushes the sign-out
+ * icon to the edge. The search input is hidden until the trigger opens
+ * it; the env pill loses its label; the role identity is available
+ * through the sidebar (opened via the hamburger) and via the env pill's
+ * title attribute for hover / long-press.
+ */
+@media (max-width: 480px) {
+  .atlas-topbar {
+    gap: var(--atlas-space-2);
+    padding: 0 var(--atlas-space-3);
+  }
+
+  .atlas-topbar__search {
+    display: none;
+  }
+
+  .atlas-topbar__search.atlas-topbar__search--expanded {
+    display: block;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    padding: var(--atlas-space-2) var(--atlas-space-3);
+    background: var(--atlas-surface);
+    border-bottom: 1px solid var(--atlas-border);
+    z-index: var(--atlas-z-topbar);
+    max-width: none;
+  }
+
+  .atlas-topbar__search-trigger {
+    display: inline-flex;
+  }
+
+  .atlas-topbar {
+    position: relative;
   }
 }

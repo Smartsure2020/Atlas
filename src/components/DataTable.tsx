@@ -56,6 +56,14 @@ interface DataTableProps<T> {
   /** Footer content, e.g. a result count or pagination. */
   footer?: ReactNode;
   hiddenColumns?: string[];
+  /**
+   * At narrow viewports the leading column stays pinned to the left of
+   * the scroll container so the identifying label (Client, insurer name,
+   * job name) stays visible while the reader pages across the rest of
+   * the row. The rest of the columns scroll under it as usual — this
+   * is scoped to the mobile breakpoint via CSS.
+   */
+  stickyFirstColumn?: boolean;
 }
 
 export function DataTable<T>({
@@ -73,6 +81,7 @@ export function DataTable<T>({
   dense,
   footer,
   hiddenColumns = [],
+  stickyFirstColumn = false,
 }: DataTableProps<T>) {
   const visibleColumns = useMemo(
     () => columns.filter((column) => !hiddenColumns.includes(column.id)),
@@ -129,12 +138,43 @@ export function DataTable<T>({
 
   return (
     <div className="atlas-table-wrap">
-      <div className="atlas-table-scroll">
+      <div
+        className="atlas-table-scroll"
+        role="region"
+        aria-label={`${caption} — scroll horizontally to see more columns`}
+        // Focusable so screen-reader and keyboard users can horizontally
+        // scroll the wide operational tables the same way pointer users
+        // can. The role="region" + aria-label pair gives the scroll
+        // container an announceable name; tabIndex=0 makes it a tab stop
+        // only when the browser reports it as scrollable. The keydown
+        // handler translates ←/→/Home/End into horizontal scroll so the
+        // Client column stays visible while the reader pages across.
+        tabIndex={0}
+        onKeyDown={(event) => {
+          const el = event.currentTarget;
+          if (el.scrollWidth <= el.clientWidth) return;
+          const step = Math.max(80, el.clientWidth * 0.6);
+          if (event.key === "ArrowRight") {
+            event.preventDefault();
+            el.scrollBy({ left: step, behavior: "smooth" });
+          } else if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            el.scrollBy({ left: -step, behavior: "smooth" });
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            el.scrollTo({ left: 0, behavior: "smooth" });
+          } else if (event.key === "End") {
+            event.preventDefault();
+            el.scrollTo({ left: el.scrollWidth, behavior: "smooth" });
+          }
+        }}
+      >
         <table
           className={[
             "atlas-table",
             "atlas-table--responsive",
             dense ? "atlas-table--dense" : "",
+            stickyFirstColumn ? "atlas-table--sticky-first" : "",
           ]
             .filter(Boolean)
             .join(" ")}

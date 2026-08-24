@@ -103,6 +103,11 @@ export function AppShell({
     }
   });
   const [navOpen, setNavOpen] = useState(false);
+  // Compact-mode search: on narrow viewports the search input collapses
+  // to an icon-only trigger and the role pill hides behind the avatar,
+  // so the top bar no longer clips at 375 or 320 px. Expanding the
+  // trigger swaps it for the full field for one-off searches.
+  const [searchExpanded, setSearchExpanded] = useState(false);
   const active = routeSection(route);
 
   useEffect(() => {
@@ -199,7 +204,14 @@ export function AppShell({
             onClick={() => setCollapsed((value) => !value)}
           />
 
-          <div className="atlas-topbar__search">
+          <div
+            className={[
+              "atlas-topbar__search",
+              searchExpanded ? "atlas-topbar__search--expanded" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+          >
             <div className="atlas-search">
               <label className="atlas-sr-only" htmlFor="atlas-global-search">
                 Search submissions by client, broker or request type
@@ -212,16 +224,32 @@ export function AppShell({
                 placeholder="Search submissions…"
                 value={searchValue}
                 onChange={(event) => onSearch(event.target.value)}
+                onBlur={() => {
+                  // Collapse the compact trigger on blur if the user
+                  // did not enter a query, so the top bar returns to
+                  // its narrow layout.
+                  if (!searchValue) setSearchExpanded(false);
+                }}
               />
             </div>
           </div>
 
+          <IconButton
+            icon="search"
+            label={searchExpanded ? "Close search" : "Search submissions"}
+            className="atlas-topbar__search-trigger"
+            onClick={() => setSearchExpanded((value) => !value)}
+          />
+
           <div className="atlas-topbar__spacer" />
 
           <div className="atlas-topbar__actions">
-            <span className="atlas-topbar__env" title="Atlas is decision-support only">
+            <span
+              className="atlas-topbar__env"
+              title={`Atlas is decision-support only — signed in as ${ROLE_LABELS[role] ?? role}`}
+            >
               <Icon name="info" size={12} />
-              Decision-support
+              <span className="atlas-topbar__env-label">Decision-support</span>
             </span>
             <IconButton icon="sign-out" label="Sign out" onClick={onSignOut} />
           </div>

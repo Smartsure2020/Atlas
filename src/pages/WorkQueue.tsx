@@ -144,13 +144,37 @@ export default function WorkQueue({
   const hasActiveJobs = items.some((item) => item.active_job);
   useEffect(() => {
     if (!hasActiveJobs) return;
-    const timer = window.setInterval(() => setReloadToken((t) => t + 1), 5000);
-    return () => window.clearInterval(timer);
+    // Only poll while the tab is visible. A background tab quietly
+    // firing an authenticated queue-list fetch every 5s is wasted work
+    // and competes with foreground traffic.
+    let timer: number | null = null;
+    const start = () => {
+      if (timer !== null) return;
+      timer = window.setInterval(() => setReloadToken((t) => t + 1), 5000);
+    };
+    const stop = () => {
+      if (timer === null) return;
+      window.clearInterval(timer);
+      timer = null;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [hasActiveJobs]);
 
   useEffect(() => {
     let live = true;
-    // Debounce only the free-text search; dropdown changes should feel instant.
+    // Debounce free-text search AND the active-job poll. A typing user
+    // must never trigger a queue-list fetch every 5 s alongside their
+    // keystrokes; sharing the 220 ms tail keeps the search feel intact
+    // and coalesces a burst of poll + type into one request.
     const timer = window.setTimeout(
       () => {
         if (items.length === 0) setLoading(true);
@@ -179,7 +203,12 @@ export default function WorkQueue({
             if (live) setLoading(false);
           });
       },
-      search ? 220 : 0
+      // Debounce both the free-text search AND any poll-triggered
+      // reload. A dropdown change starts a fresh effect with the same
+      // 220 ms tail; a keystroke-driven change already had 0 ms, but the
+      // poll (which increments reloadToken) now shares this tail so a
+      // typing user's fetch and the 5 s poll coalesce into one request.
+      search || reloadToken > 0 ? 220 : 0
     );
     return () => {
       live = false;
@@ -662,6 +691,12 @@ export default function WorkQueue({
             onSortChange={setSort}
             onRowActivate={(row) => onOpen(row.id)}
             rowAttention={needsAttention}
+            // Pin Client to the left of the horizontal scroll on
+            // narrow viewports. Without this the queue's home screen
+            // clips every column after Broker at 375 with no obvious
+            // scroll hint; with it, Client stays on-screen while the
+            // reader pages the rest of the row into view.
+            stickyFirstColumn
             empty={
               activeFilters.length > 0 ? (
                 <EmptyState
