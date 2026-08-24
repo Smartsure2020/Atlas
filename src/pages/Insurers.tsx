@@ -38,7 +38,33 @@ import {
   useToast,
 } from "../components/ui";
 import { canManage as roleCanManage, type AtlasUiRole } from "../components/AppShell";
-import { humanise, pluralise } from "../lib/format";
+import { pluralise } from "../lib/format";
+
+/**
+ * Format a raw quote-channel string into a single consistent label. Every
+ * variant of email submission collapses to "Email submission" so the
+ * insurer index shows one label per action across the grid rather than
+ * three ("Email", "Email submission", none) as it did before.
+ */
+function formatQuoteChannel(raw: string): string {
+  const trimmed = raw.trim().toLowerCase();
+  if (
+    trimmed === "email" ||
+    trimmed === "email_submission" ||
+    trimmed === "email submission" ||
+    trimmed === "email-submission"
+  ) {
+    return "Email submission";
+  }
+  // Anything else — dedicated portal names, "own_portal", "cardinal" —
+  // renders humanised so we do not paper over legitimately different
+  // channel labels.
+  return raw
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 import {
   filterInsurersByCoverage,
   type CoverageMode,
@@ -287,9 +313,9 @@ export default function Insurers({
             <li key={insurer.id}>
               <button type="button" className="atlas-insurer-card" onClick={() => onOpen(insurer.id)}>
                 <span className="atlas-insurer-card__name">{insurer.name}</span>
-                <span className="atlas-text-dense atlas-text-muted">
-                  {insurer.notes || "No notes recorded."}
-                </span>
+                {insurer.notes && (
+                  <span className="atlas-text-dense atlas-text-muted">{insurer.notes}</span>
+                )}
                 <span className="atlas-insurer-card__meta">
                   {insurer.active_appetite_count > 0 ? (
                     <StatusBadge
@@ -308,9 +334,26 @@ export default function Insurers({
                       }}
                     />
                   )}
-                  {insurer.quote_channel && (
+                  {/*
+                   * Channel pill: always rendered, either as the
+                   * insurer's actual quote channel or as an explicit
+                   * "No email channel on file" absence pill. Every card
+                   * carries exactly one channel state so the grid never
+                   * shows three different action-completeness stories
+                   * for the same object type.
+                   */}
+                  {insurer.quote_channel ? (
                     <span className="atlas-badge atlas-badge--quiet">
-                      <span className="atlas-badge__label">{humanise(insurer.quote_channel)}</span>
+                      <span className="atlas-badge__label">
+                        {formatQuoteChannel(insurer.quote_channel)}
+                      </span>
+                    </span>
+                  ) : (
+                    <span
+                      className="atlas-badge atlas-badge--quiet"
+                      title="Add a submission channel on the insurer detail screen."
+                    >
+                      <span className="atlas-badge__label">No submission channel on file</span>
                     </span>
                   )}
                 </span>
