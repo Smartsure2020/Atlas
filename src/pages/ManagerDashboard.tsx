@@ -65,6 +65,7 @@ import {
   communicationsSummary,
   dateRangeLabel,
   exceptionMetrics,
+  exceptionScopeSuffix,
   maxCount,
   orderReviewOutcomes,
   OVERSIGHT_DATE_RANGES,
@@ -127,6 +128,12 @@ export default function ManagerDashboard({
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const requestSeq = useRef(0);
+  // A raced older request that resolves after a newer one succeeds could
+  // read a stale `hydrated=false` from its closure and drive the fetch
+  // handler down the "no trustworthy data" branch — blanking freshly
+  // hydrated stats. `hydratedRef` mirrors the state through the same
+  // setState path so every handler reads the live value.
+  const hydratedRef = useRef(false);
 
   useEffect(() => {
     // Two guards work together here.
@@ -156,6 +163,7 @@ export default function ManagerDashboard({
           setStats(result.stats);
           setLoadError(null);
           setRefreshError(null);
+          hydratedRef.current = true;
           setHydrated(true);
         })
         .catch((cause: Error) => {
@@ -166,7 +174,7 @@ export default function ManagerDashboard({
               : cause.message === "not_authenticated"
                 ? "Your session has expired. Sign in again to view the manager overview."
                 : "The manager overview could not be loaded. The Atlas API did not respond.";
-          if (hydrated) {
+          if (hydratedRef.current) {
             // Keep the last-good stats visible under a stale-data warning
             // rather than blanking a filter change or a transient 500.
             setRefreshError(
@@ -994,7 +1002,7 @@ function SupportingWorkload({
             <span className="atlas-oversight__workload-label">{item.label}</span>
             <span className="atlas-oversight__workload-value">{item.value}</span>
             <span className="atlas-oversight__workload-scope">
-              {item.scope === "period" ? `In ${periodLabel.toLowerCase()}` : "Across recent activity"}
+              {exceptionScopeSuffix(item.scope, periodLabel)}
             </span>
             <span className="atlas-oversight__workload-hint">{item.hint}</span>
           </li>

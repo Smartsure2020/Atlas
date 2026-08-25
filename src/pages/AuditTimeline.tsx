@@ -23,7 +23,7 @@
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { getAuditTimeline, type AuditEvent } from "../lib/decisions";
-import { Card, EmptyState, ErrorState, Skeleton } from "../components/ui";
+import { Card, EmptyState, ErrorState, Skeleton, useHorizontalFade } from "../components/ui";
 import { Icon, type IconName } from "../components/Icon";
 import { formatDateTime } from "../lib/format";
 import {
@@ -166,6 +166,8 @@ function FilterToggleGroup({
   onChange: (next: FilterId) => void;
 }) {
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const filterbarRef = useRef<HTMLDivElement | null>(null);
+  useHorizontalFade(filterbarRef);
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const index = FILTERS.findIndex((f) => f.id === filter);
@@ -185,6 +187,7 @@ function FilterToggleGroup({
   return (
     <nav aria-label="Filter activity by category">
       <div
+        ref={filterbarRef}
         className="atlas-timeline__filterbar"
         role="group"
         aria-label="Activity filters"

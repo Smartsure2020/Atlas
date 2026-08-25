@@ -1853,7 +1853,7 @@ function PilotRailCard({
               style={{
                 padding: "var(--atlas-space-2)",
                 marginBottom: "var(--atlas-space-2)",
-                borderRadius: "var(--atlas-radius)",
+                borderRadius: "var(--atlas-radius-card)",
                 border: "1px solid var(--atlas-border)",
                 fontSize: 13,
               }}

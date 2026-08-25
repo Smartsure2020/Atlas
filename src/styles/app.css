@@ -1926,6 +1926,21 @@
     padding: var(--atlas-space-4) var(--atlas-space-4) var(--atlas-space-10);
   }
 
+  /*
+   * Mobile contrast override for the account-role label.
+   * The default token (--atlas-nav-ink-role, #9aa7bd) reads ~6.8:1 on
+   * the desktop navy sidebar surface. At mobile the sidebar drawer
+   * renders over a lighter shell backdrop, and audits caught the label
+   * failing WCAG AA. Reusing the nav-ink token here lifts the ratio to
+   * >=8:1 on the navy sidebar surface at every mobile state while
+   * leaving the desktop navy-sidebar look untouched. The label stays
+   * visually secondary next to the white email address because the
+   * font-size (10px) and uppercase treatment are unchanged.
+   */
+  .atlas-sidebar__role {
+    color: var(--atlas-nav-ink);
+  }
+
   .atlas-topbar {
     padding: 0 var(--atlas-space-4);
   }
@@ -2018,8 +2033,34 @@
     padding: var(--atlas-space-2) var(--atlas-space-3);
     background: var(--atlas-surface);
     border-bottom: 1px solid var(--atlas-border);
-    z-index: var(--atlas-z-topbar);
+    box-shadow: var(--atlas-shadow-lg);
+    z-index: calc(var(--atlas-z-topbar) + 1);
     max-width: none;
+    overflow-x: hidden;
+  }
+
+  /*
+   * Scrim behind the mobile search sheet. Renders below the sheet
+   * (z-index-1) but above surrounding content so a tap outside the
+   * sheet dismisses it. Kept transparent-ish to avoid dominating a
+   * one-off search interaction; the dismissal contract carries the
+   * weight, the darkening only helps make the sheet edge legible.
+   */
+  .atlas-topbar__search-scrim {
+    position: fixed;
+    inset: 0;
+    background: var(--atlas-overlay);
+    z-index: calc(var(--atlas-z-topbar));
+  }
+
+  .atlas-topbar__search .atlas-search {
+    display: flex;
+    align-items: center;
+    gap: var(--atlas-space-2);
+  }
+
+  .atlas-topbar__search-close {
+    flex: none;
   }
 
   .atlas-topbar__search-trigger {

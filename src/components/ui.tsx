@@ -8,6 +8,7 @@
 
 import {
   createContext,
+  forwardRef,
   useCallback,
   useContext,
   useEffect,
@@ -107,30 +108,34 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: "sm" | "md";
 }
 
-export function IconButton({
-  icon,
-  label,
-  variant = "ghost",
-  size = "md",
-  className,
-  type = "button",
-  ...rest
-}: IconButtonProps) {
-  const classes = [
-    "atlas-btn",
-    "atlas-btn--icon",
-    VARIANT_CLASS[variant],
-    size === "sm" ? "atlas-btn--sm" : "",
-    className ?? "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <button {...rest} type={type} className={classes} aria-label={label} title={label}>
-      <Icon name={icon} />
-    </button>
-  );
-}
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
+  function IconButton(
+    { icon, label, variant = "ghost", size = "md", className, type = "button", ...rest },
+    ref
+  ) {
+    const classes = [
+      "atlas-btn",
+      "atlas-btn--icon",
+      VARIANT_CLASS[variant],
+      size === "sm" ? "atlas-btn--sm" : "",
+      className ?? "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      <button
+        ref={ref}
+        {...rest}
+        type={type}
+        className={classes}
+        aria-label={label}
+        title={label}
+      >
+        <Icon name={icon} />
+      </button>
+    );
+  }
+);
 
 /* ===========================================================================
    Status badge — the single badge system for the whole product
@@ -964,6 +969,47 @@ export function ProgressStages({
 }
 
 /* ===========================================================================
+   Horizontal fade hook
+   ---------------------------------------------------------------------------
+   Toggles a `--fade-right` custom property on a horizontally scrollable
+   strip. The static CSS mask always faded the right edge, which left a
+   permanent shadow over the last tab/filter even when the reader had
+   scrolled to the end. Consumers apply the mask conditionally on the
+   custom property, so the fade only renders while there is more content
+   to reach.
+   =========================================================================== */
+
+export function useHorizontalFade(ref: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const overflowing = el.scrollWidth > el.clientWidth + 1;
+      const atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+      el.style.setProperty("--fade-right", overflowing && !atEnd ? "1" : "0");
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    let observer: ResizeObserver | undefined;
+    const RO: typeof ResizeObserver | undefined =
+      typeof globalThis !== "undefined"
+        ? (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
+        : undefined;
+    if (RO) {
+      observer = new RO(update);
+      observer.observe(el);
+    } else {
+      window.addEventListener("resize", update);
+    }
+    return () => {
+      el.removeEventListener("scroll", update);
+      if (observer) observer.disconnect();
+      else window.removeEventListener("resize", update);
+    };
+  }, [ref]);
+}
+
+/* ===========================================================================
    Tabs
    =========================================================================== */
 
@@ -987,6 +1033,8 @@ export function Tabs({
   label: string;
 }) {
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  useHorizontalFade(scrollRef);
 
   function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     const index = tabs.findIndex((tab) => tab.id === active);
@@ -1004,7 +1052,13 @@ export function Tabs({
   }
 
   return (
-    <div className="atlas-tabs" role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+    <div
+      ref={scrollRef}
+      className="atlas-tabs"
+      role="tablist"
+      aria-label={label}
+      onKeyDown={onKeyDown}
+    >
       {tabs.map((tab) => (
         <button
           key={tab.id}
@@ -1183,6 +1237,14 @@ export function Drawer({
     }
     onClose();
   }, [dirty, onClose]);
+
+  // If the drawer is externally closed while a discard confirmation is
+  // pending, the leftover `discardPending=true` flashes the confirmation
+  // dialog on the next reopen. Clear it whenever the drawer transitions
+  // to closed so a reopened panel always starts in a clean state.
+  useEffect(() => {
+    if (!open) setDiscardPending(false);
+  }, [open]);
 
   if (!open) return null;
   return (

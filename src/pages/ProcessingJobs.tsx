@@ -104,6 +104,10 @@ export default function ProcessingJobs({
   const [actionError, setActionError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const requestSeq = useRef(0);
+  // See ManagerDashboard: mirror `hydrated` in a ref so a slow older
+  // request that resolves after a newer success cannot read a stale
+  // `hydrated=false` from its closure and blank the freshly loaded data.
+  const hydratedRef = useRef(false);
   // Stable refs for the ConfirmDialog cancel-button focus targets. These
   // live at the component top level so the trap installs against the same
   // ref object across renders — the previous per-render pattern let the
@@ -165,7 +169,7 @@ export default function ProcessingJobs({
                 : cause?.message === "manager_only" || cause?.message === "forbidden"
                   ? "This screen requires an administrator or manager account. You may not have permission to view it."
                   : "You may not have permission, or the server may be temporarily unavailable — try again in a moment.";
-            if (hydrated) {
+            if (hydratedRef.current) {
               setRefreshError(
                 cause?.message === "not_authenticated"
                   ? "Your session has expired, so Atlas could not refresh the operational data. The information shown may be outdated. Sign in again to reload."
@@ -225,6 +229,7 @@ export default function ProcessingJobs({
               `The processing job list loaded, but Atlas could not refresh ${supportingFailures.join(", ")}. Those sections may be missing or outdated.`
             );
           }
+          hydratedRef.current = true;
           setHydrated(true);
         })
         .catch(() => {
@@ -238,7 +243,7 @@ export default function ProcessingJobs({
           // it as a refresh warning without escalating to a full error
           // state.
           if (requestSeq.current !== seq) return;
-          if (hydrated) {
+          if (hydratedRef.current) {
             setRefreshError(
               "Atlas could not refresh the operational data. The information shown may be outdated."
             );

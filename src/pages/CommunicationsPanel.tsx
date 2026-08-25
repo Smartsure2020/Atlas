@@ -504,6 +504,16 @@ export default function CommunicationsPanel({
         title="Record this communication as sent manually?"
         confirmLabel="Record manual send"
         working={recording}
+        // Recording a manual send also flips every linked missing-info
+        // item to "requested" — irreversibly changing the workflow state
+        // of items outside the record on screen. When that fan-out is
+        // non-zero the dialog adopts the destructive treatment so the
+        // consequence-count copy is backed by a matching visual tone,
+        // and a mistrigger cannot be dismissed as a low-consequence
+        // confirmation.
+        destructive={
+          confirmSent !== null && countLinkedMissing(confirmSent, openMissingIds) > 0
+        }
         onCancel={() => {
           if (recording) return;
           setConfirmSent(null);
@@ -576,7 +586,7 @@ function CommunicationRow({
               margin: 0,
               padding: "var(--atlas-space-3)",
               background: "var(--atlas-surface-muted)",
-              borderRadius: "var(--atlas-radius)",
+              borderRadius: "var(--atlas-radius-card)",
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
               fontFamily: "var(--atlas-font-mono)",

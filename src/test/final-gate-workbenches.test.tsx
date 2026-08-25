@@ -367,7 +367,7 @@ describe("Insurers — index card channel affordance", () => {
     };
   }
 
-  it("renders 'No submission channel on file' when quote_channel is null", async () => {
+  it("renders the outlined 'Add submission channel' invitation when quote_channel is null", async () => {
     listInsurersMock.mockResolvedValue({
       insurers: [insurerListItem({ id: "a", quote_channel: null, name: "Empty Insurer" })],
     });
@@ -376,7 +376,14 @@ describe("Insurers — index card channel affordance", () => {
         <Insurers role="manager" onOpen={vi.fn()} />
       </ToastProvider>
     );
-    expect(await screen.findByText(/No submission channel on file/i)).toBeInTheDocument();
+    // Absence now renders with a distinct dashed-outline pill and an
+    // explicit "Add submission channel" invitation, so the presence and
+    // absence states differ in class, text, and visual tone rather than
+    // sharing the same --quiet pill.
+    const label = await screen.findByText(/Add submission channel/i);
+    expect(label).toBeInTheDocument();
+    const badge = label.closest(".atlas-badge") as HTMLElement;
+    expect(badge?.classList.contains("atlas-badge--outline")).toBe(true);
   });
 
   it("collapses every email variant to the same 'Email submission' label", async () => {
@@ -614,21 +621,61 @@ describe("DataTable — stickyFirstColumn class", () => {
     const table = screen.getByRole("table");
     expect(table.className).not.toMatch(/atlas-table--sticky-first/);
   });
-  it("marks the scroll wrapper as a focusable region for keyboard scroll", () => {
-    render(
-      <DataTable<Row>
-        caption="Queue"
-        columns={columns}
-        rows={[{ id: "1", name: "Row 1" }]}
-        rowKey={(r) => r.id}
-        stickyFirstColumn
-      />
+  it("marks the scroll wrapper as a focusable region when it overflows", () => {
+    // The wrapper is only exposed as a region + tab stop when it actually
+    // overflows horizontally — otherwise it adds a landmark and a Tab
+    // stop that consumers never asked for. Force overflow at the
+    // prototype level so the mount effect sees it and toggles the
+    // attributes on.
+    const originalScrollWidth = Object.getOwnPropertyDescriptor(
+      HTMLDivElement.prototype,
+      "scrollWidth"
     );
-    // The region role wraps the table so keyboard/screen-reader users
-    // can page horizontally.
-    const region = screen.getByRole("region", { name: /scroll horizontally/i });
-    expect(region).toBeInTheDocument();
-    expect(region).toHaveAttribute("tabindex", "0");
+    const originalClientWidth = Object.getOwnPropertyDescriptor(
+      HTMLDivElement.prototype,
+      "clientWidth"
+    );
+    Object.defineProperty(HTMLDivElement.prototype, "scrollWidth", {
+      configurable: true,
+      value: 2000,
+    });
+    Object.defineProperty(HTMLDivElement.prototype, "clientWidth", {
+      configurable: true,
+      value: 300,
+    });
+    try {
+      render(
+        <DataTable<Row>
+          caption="Queue"
+          columns={columns}
+          rows={[{ id: "1", name: "Row 1" }]}
+          rowKey={(r) => r.id}
+          stickyFirstColumn
+        />
+      );
+      const region = screen.getByRole("region", { name: /scroll horizontally/i });
+      expect(region).toBeInTheDocument();
+      expect(region).toHaveAttribute("tabindex", "0");
+    } finally {
+      if (originalScrollWidth) {
+        Object.defineProperty(HTMLDivElement.prototype, "scrollWidth", originalScrollWidth);
+      } else {
+        // Reset to a benign default so subsequent tests do not inherit
+        // the forced overflow.
+        Object.defineProperty(HTMLDivElement.prototype, "scrollWidth", {
+          configurable: true,
+          value: 0,
+        });
+      }
+      if (originalClientWidth) {
+        Object.defineProperty(HTMLDivElement.prototype, "clientWidth", originalClientWidth);
+      } else {
+        Object.defineProperty(HTMLDivElement.prototype, "clientWidth", {
+          configurable: true,
+          value: 0,
+        });
+      }
+    }
   });
 });
 

@@ -75,6 +75,28 @@ export function barWidth(count: number, max: number, floor = 4): number {
 
 export type ExceptionScope = "period" | "recent" | "period_capped";
 
+/**
+ * Turn an ExceptionScope into the short suffix rendered next to a metric
+ * value. Exhaustive by construction — TypeScript will refuse the exit path
+ * if a new scope member is added to the union without adding a case here,
+ * which is what stopped the previous silent "In (empty)" render on the
+ * newly added `period_capped` value from slipping through unnoticed.
+ */
+export function exceptionScopeSuffix(scope: ExceptionScope, periodLabel: string): string {
+  switch (scope) {
+    case "period":
+      return `In ${periodLabel.toLowerCase()}`;
+    case "period_capped":
+      return `In ${periodLabel.toLowerCase()} — capped list`;
+    case "recent":
+      return "Across recent activity";
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
+}
+
 export interface ExceptionMetric {
   key: string;
   label: string;

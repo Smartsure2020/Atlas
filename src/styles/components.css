@@ -249,6 +249,20 @@
   color: var(--atlas-ink-secondary);
 }
 
+/*
+ * Distinct absence treatment — for pills that represent a missing value the
+ * reader can act to add. Dashed outline plus an invitation glyph keep the
+ * absence visually separate from any real value pill (which uses the solid
+ * --quiet variant) without borrowing the danger tone that would misread as
+ * an error.
+ */
+.atlas-badge--outline {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--atlas-border-stronger);
+  color: var(--atlas-ink-secondary);
+}
+
 .atlas-badge--strong {
   font-weight: var(--atlas-fw-semibold);
 }
@@ -1063,12 +1077,22 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   .atlas-tabs {
     padding-bottom: 3px;
     scrollbar-width: thin;
-    /* Fade the right edge to hint at more content when it overflows. The
-       mask is left-anchored, so the last 24 px of the container fades
-       even if the user has scrolled fully to the end — a tiny, honest
-       cost against a big affordance win the rest of the time. */
-    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
-    -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+    /* Right-edge fade hint. --fade-right is toggled by useHorizontalFade
+       between 0 and 1 based on the live scroll position — the mask only
+       applies while there is content still to reveal, so the last tab
+       is not permanently shadowed when the reader has already scrolled
+       to the end. */
+    --fade-right: 0;
+    mask-image: linear-gradient(
+      to right,
+      black calc(100% - 24px * var(--fade-right)),
+      rgba(0, 0, 0, calc(1 - var(--fade-right)))
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      black calc(100% - 24px * var(--fade-right)),
+      rgba(0, 0, 0, calc(1 - var(--fade-right)))
+    );
   }
   .atlas-tabs::-webkit-scrollbar {
     display: block;
@@ -1901,7 +1925,7 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   flex-direction: column;
   gap: 2px;
   padding: var(--atlas-space-3);
-  border-radius: var(--atlas-radius);
+  border-radius: var(--atlas-radius-card);
   background: var(--atlas-surface-muted);
   border: 1px solid var(--atlas-border);
 }
@@ -2041,7 +2065,7 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   gap: 4px;
   padding: var(--atlas-space-3) var(--atlas-space-3);
   border: 1px solid var(--atlas-border);
-  border-radius: var(--atlas-radius);
+  border-radius: var(--atlas-radius-card);
   background: var(--atlas-surface);
   text-align: left;
   cursor: pointer;
@@ -2506,6 +2530,19 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
     margin-bottom: 0;
   }
 
+  /*
+   * Mobile grouping cue. Without a visual tie the Period select and the
+   * Advanced-filters disclosure read as two separate concerns stacked in
+   * a single card. A subtle top border on the disclosure summary and the
+   * shared space-2 gap group both controls into one visible filter
+   * block at <=760px without reintroducing the previous 55-145px dead
+   * band the flex-height fix already removed.
+   */
+  .atlas-oversight__filters > .atlas-disclosure > summary {
+    border-top: 1px solid var(--atlas-border);
+    padding-top: var(--atlas-space-2);
+  }
+
   .atlas-oversight__advanced {
     padding-top: 0;
   }
@@ -2627,10 +2664,20 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
     padding-bottom: var(--atlas-space-1);
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
-    /* Same right-edge fade the workspace tab strip uses, so a mobile
-       reader can see there are more filters beyond the viewport. */
-    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
-    -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+    /* Right-edge fade hint driven by useHorizontalFade — the mask only
+       renders while --fade-right=1, so the last filter is not
+       permanently shadowed when scrolled to the end. */
+    --fade-right: 0;
+    mask-image: linear-gradient(
+      to right,
+      black calc(100% - 24px * var(--fade-right)),
+      rgba(0, 0, 0, calc(1 - var(--fade-right)))
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      black calc(100% - 24px * var(--fade-right)),
+      rgba(0, 0, 0, calc(1 - var(--fade-right)))
+    );
   }
 
   .atlas-timeline__filterbar > * {
