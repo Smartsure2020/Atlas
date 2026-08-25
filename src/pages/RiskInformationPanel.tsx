@@ -178,20 +178,30 @@ export default function RiskInformationPanel({
   // mistrigger loses no work. See the discard flow further down for the
   // full contract.
   const [discardPending, setDiscardPending] = useState(false);
-  // Stable refs at the component top level so useFocusTrap installs against
+  // Stable ref at the component top level so useFocusTrap installs against
   // the same ref object across renders (a per-render ref lands as null on
-  // first commit and defeats the trap). The trigger ref is here for
-  // symmetry with the ProcessingJobs pattern; Modal's own focus trap
-  // handles the trigger-restore contract automatically via previouslyFocused.
-  const discardTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // first commit and defeats the trap). Modal's own focus trap handles the
+  // trigger-restore contract automatically via previouslyFocused, so no
+  // trigger ref is needed here.
   const keepEditingRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     setDraft(source);
     setFieldErrors({});
-    // A fresh extraction result replaces any in-progress edit.
+    // A fresh extraction result replaces any in-progress edit. A pending
+    // discard confirmation is torn down alongside it so the dialog can't
+    // linger with untruthful body copy against the new source, and its
+    // Confirm action can't fire against a draft that no longer exists.
+    setDiscardPending(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [extraction?.id, extraction?.reviewed_json, extraction?.extracted_json]);
+
+  // Belt-and-braces: whenever correction mode ends through any path
+  // (successful save, external reset, extraction cleared), a pending
+  // confirmation must not survive to resurface on the next reopen.
+  useEffect(() => {
+    if (!editing) setDiscardPending(false);
+  }, [editing]);
 
   // Dirty predicate: identity-compare draft against source. Once the user
   // types into a RiskField, setFieldValue's structuredClone gives draft a
@@ -278,6 +288,16 @@ export default function RiskInformationPanel({
     }
   }
 
+  // Fail-closed guard: the confirmation dialog is stale/untruthful unless
+  // every precondition still holds. Deriving the open state here (rather
+  // than reading `discardPending` alone) means the dialog cannot render
+  // for even one commit against a null extraction, a clean draft, or a
+  // panel that has already left correction mode. The effects above
+  // reset `discardPending` on the same signals; this guard closes the
+  // race where the effect fires one render later than the prop change.
+  const discardDialogOpen =
+    discardPending && editing && dirty && extraction !== null;
+
   if (!extraction) {
     return (
       <Card>
@@ -323,11 +343,7 @@ export default function RiskInformationPanel({
         actions={
           editing ? (
             <>
-              <Button
-                buttonRef={discardTriggerRef}
-                onClick={requestDiscard}
-                disabled={saving}
-              >
+              <Button onClick={requestDiscard} disabled={saving}>
                 Discard changes
               </Button>
               <Button variant="primary" onClick={commit} loading={saving} loadingLabel="Saving…">
@@ -436,7 +452,7 @@ export default function RiskInformationPanel({
        * cancel or Escape, edits are preserved verbatim.
        */}
       <ConfirmDialog
-        open={discardPending}
+        open={discardDialogOpen}
         title="Discard risk corrections?"
         destructive
         confirmLabel="Discard changes"

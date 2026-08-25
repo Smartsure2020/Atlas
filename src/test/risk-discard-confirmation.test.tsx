@@ -21,7 +21,7 @@
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 // The above vi import is used for onSave spies inside individual tests.
-import { render, screen, act, within } from "@testing-library/react";
+import { render, screen, act, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { axe } from "vitest-axe";
 import type { ExtractionRecord } from "../lib/atlas";
@@ -51,22 +51,26 @@ function renderPanel(
     canWrite?: boolean;
     canManage?: boolean;
     onSave?: ReturnType<typeof vi.fn>;
-    extraction?: ExtractionRecord;
+    extraction?: ExtractionRecord | null;
   } = {}
 ) {
   const onSave = over.onSave ?? vi.fn().mockResolvedValue(undefined);
+  const initialExtraction =
+    over.extraction === undefined ? extractionRecord() : over.extraction;
+  const props = {
+    submissionId: "sub_risk_discard",
+    canWrite: over.canWrite ?? true,
+    canManage: over.canManage ?? true,
+    extracting: false,
+    onExtract: () => {},
+    onSave,
+  };
   const result = render(
-    <RiskInformationPanel
-      submissionId="sub_risk_discard"
-      extraction={over.extraction ?? extractionRecord()}
-      canWrite={over.canWrite ?? true}
-      canManage={over.canManage ?? true}
-      extracting={false}
-      onExtract={() => {}}
-      onSave={onSave}
-    />
+    <RiskInformationPanel {...props} extraction={initialExtraction} />
   );
-  return { ...result, onSave };
+  const rerenderWith = (next: ExtractionRecord | null) =>
+    result.rerender(<RiskInformationPanel {...props} extraction={next} />);
+  return { ...result, onSave, rerenderWith };
 }
 
 /**
@@ -293,5 +297,311 @@ describe("RiskInformationPanel — discard confirmation", () => {
       await Promise.resolve();
     });
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // ------------------------------------------------------------------
+  // Clean-bypass contract: an untouched correction session must exit
+  // without prompting. Locking this contract prevents a regression that
+  // set discardPending unconditionally from silently passing every
+  // pre-existing assertion.
+  // ------------------------------------------------------------------
+  it("does not open the confirmation when the correction session has no edits (clean bypass)", async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderPanel();
+    // Enter correction mode but change nothing.
+    await user.click(screen.getByRole("button", { name: /Correct values/i }));
+    expect(screen.getByRole("button", { name: /Save corrections/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+
+    // No confirmation surface appears.
+    expect(screen.queryByRole("heading", { name: /Discard risk corrections\?/i })).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // Correction mode exits directly.
+    expect(screen.getByRole("button", { name: /Correct values/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Save corrections/i })).toBeNull();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  // ------------------------------------------------------------------
+  // saveError lifecycle: opening the dialog, Escape, and Keep editing
+  // must all preserve the surfaced save-error banner. Only the
+  // confirmed destructive discard is allowed to clear it. This locks
+  // the "no error clears before confirmed discard" contract.
+  // ------------------------------------------------------------------
+  it("preserves saveError across open + Escape + Keep editing, and clears it only on confirmed discard", async () => {
+    const user = userEvent.setup();
+    // onSave rejects to produce a real saveError message on the panel.
+    const onSave = vi.fn().mockRejectedValue(new Error("network down"));
+    renderPanel({ onSave });
+
+    await enterCorrectionModeAndEdit(user);
+    // Trigger a failed save.
+    await user.click(screen.getByRole("button", { name: /Save corrections/i }));
+    const saveErrorMessage =
+      "Your corrections could not be saved. Try again, or copy them somewhere safe first.";
+    expect(await screen.findByText(saveErrorMessage)).toBeInTheDocument();
+
+    // Open dialog — error banner must remain visible behind it.
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByText(saveErrorMessage)).toBeInTheDocument();
+
+    // Escape — dialog closes, banner still visible.
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText(saveErrorMessage)).toBeInTheDocument();
+
+    // Reopen, Keep editing — banner still visible.
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByText(saveErrorMessage)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Keep editing/i }));
+    expect(screen.getByText(saveErrorMessage)).toBeInTheDocument();
+
+    // Reopen and confirm destructive — banner clears, correction exits.
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: /Discard changes/i })
+    );
+    expect(screen.queryByText(saveErrorMessage)).toBeNull();
+    expect(screen.getByRole("button", { name: /Correct values/i })).toBeInTheDocument();
+  });
+
+  // ------------------------------------------------------------------
+  // fieldErrors lifecycle: an invalid JSON edit on an array field
+  // surfaces a per-field error. Opening the dialog and cancelling must
+  // preserve it; only confirmed discard clears it.
+  // ------------------------------------------------------------------
+  it("preserves fieldErrors across open + Keep editing, and clears them only on confirmed discard", async () => {
+    const user = userEvent.setup();
+    // Extraction with a JSON-array field so an invalid edit triggers a parse error.
+    const extraction: ExtractionRecord = extractionRecord({
+      reviewed_json: {
+        extracted_client: {
+          name: { value: "Acme Holdings (Pty) Ltd", confidence: 0.92, status: "high" },
+        },
+        current_cover: {
+          cover_sections: { value: ["Fire", "Theft"], confidence: 0.8, status: "medium" },
+        },
+      },
+    });
+    renderPanel({ extraction });
+
+    await user.click(screen.getByRole("button", { name: /Correct values/i }));
+    // Make a valid name edit so the draft is dirty enough to open the dialog.
+    const nameInput = screen.getByLabelText("Insured name") as HTMLInputElement;
+    await user.clear(nameInput);
+    await user.type(nameInput, "Acme Holdings Limited");
+    // Now fire an invalid-JSON change against the array field. Using
+    // fireEvent.change dispatches one atomic change event, which mirrors a
+    // real paste and avoids userEvent's per-keystroke re-render pathway
+    // that would clash with the field's controlled-input reset effect.
+    const arrayField = screen.getByLabelText("Cover sections") as
+      | HTMLInputElement
+      | HTMLTextAreaElement;
+    fireEvent.change(arrayField, { target: { value: "not json" } });
+    // The field-error alert renders through role=alert next to the invalid field.
+    expect(screen.getByRole("alert")).toHaveTextContent(/invalid json array/i);
+
+    // Open dialog — field error alert still on screen.
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/invalid json array/i);
+
+    // Keep editing — field error still on screen.
+    await user.click(screen.getByRole("button", { name: /Keep editing/i }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/invalid json array/i);
+
+    // Reopen and confirm destructive — field error is gone with the draft.
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: /Discard changes/i })
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  // ------------------------------------------------------------------
+  // Stale-context guard: the extraction identity changes while the
+  // dialog is open. Without the reset+fail-closed guard, the dialog
+  // stays mounted with untruthful body copy and a Confirm action that
+  // would reset the NEW extraction's draft — a silent destructive
+  // action against unrelated data.
+  // ------------------------------------------------------------------
+  it("closes the dialog and displays the new saved value when the extraction id changes mid-confirmation", async () => {
+    const user = userEvent.setup();
+    const { onSave, rerenderWith } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Prop change: a completely different extraction now arrives.
+    rerenderWith(
+      extractionRecord({
+        id: "ext_risk_discard_v2",
+        reviewed_json: {
+          extracted_client: {
+            name: { value: "Beta Underwriting Ltd", confidence: 0.95, status: "high" },
+          },
+        },
+      })
+    );
+
+    // Dialog is gone; the new saved value is displayed (editing state
+    // persists across the prop change per existing semantics, so the
+    // value surfaces on the Insured name field's input); no stale
+    // Confirm is reachable; the old draft did not carry over.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("heading", { name: /Discard risk corrections\?/i })).toBeNull();
+    const nameInputAfter = screen.getByLabelText("Insured name") as HTMLInputElement;
+    expect(nameInputAfter.value).toBe("Beta Underwriting Ltd");
+    expect(screen.queryByDisplayValue("Acme Holdings Limited")).toBeNull();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("closes the dialog and refreshes the saved value when reviewed_json changes on the same extraction id", async () => {
+    const user = userEvent.setup();
+    const { onSave, rerenderWith } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    rerenderWith(
+      extractionRecord({
+        reviewed_json: {
+          extracted_client: {
+            name: { value: "Acme Holdings refreshed", confidence: 0.99, status: "high" },
+          },
+        },
+      })
+    );
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    const nameInputAfter = screen.getByLabelText("Insured name") as HTMLInputElement;
+    expect(nameInputAfter.value).toBe("Acme Holdings refreshed");
+    expect(screen.queryByDisplayValue("Acme Holdings Limited")).toBeNull();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("closes the dialog and refreshes the saved value when extracted_json changes on the same extraction id", async () => {
+    const user = userEvent.setup();
+    // Start from an unreviewed extraction so extracted_json is the source.
+    const initial: ExtractionRecord = {
+      id: "ext_risk_discard",
+      extracted_json: {
+        extracted_client: {
+          name: { value: "Acme Holdings (Pty) Ltd", confidence: 0.92, status: "high" },
+        },
+      },
+      reviewed_json: null,
+      extraction_confidence: null,
+    };
+    const { onSave, rerenderWith } = renderPanel({ extraction: initial });
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    rerenderWith({
+      ...initial,
+      extracted_json: {
+        extracted_client: {
+          name: { value: "Acme Holdings rerun", confidence: 0.94, status: "high" },
+        },
+      },
+    });
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    const nameInputAfter = screen.getByLabelText("Insured name") as HTMLInputElement;
+    expect(nameInputAfter.value).toBe("Acme Holdings rerun");
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("unmounts the dialog when the extraction becomes null while the confirmation is open", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onSave } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Extraction is cleared upstream (e.g. reset after a rerun kick-off).
+    rerenderWith(null);
+
+    // The empty-state card renders; dialog is gone.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      screen.getByText(/Atlas has not read the documents yet/i)
+    ).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("does not resurrect the dialog after extraction goes null and later returns", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onSave } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    rerenderWith(null);
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // A new extraction arrives. The panel must not restore the stale
+    // pending confirmation without a fresh explicit user request.
+    rerenderWith(extractionRecord());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("heading", { name: /Discard risk corrections\?/i })).toBeNull();
+    // The fresh source displays cleanly: draft was reset on the null→valid
+    // sweep, so the panel is not dirty and cannot open the dialog again
+    // without a new edit.
+    const nameInputAfterReturn = screen.getByLabelText("Insured name") as HTMLInputElement;
+    expect(nameInputAfterReturn.value).toBe("Acme Holdings (Pty) Ltd");
+
+    // A fresh edit followed by a fresh trigger opens the dialog cleanly —
+    // proving the confirmation still works, it just does not resurrect
+    // by itself.
+    await user.clear(nameInputAfterReturn);
+    await user.type(nameInputAfterReturn, "Acme Holdings v2");
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("clears discardPending when correction mode ends through a successful save", async () => {
+    const user = userEvent.setup();
+    // Edit, open the dialog, cancel it, then save successfully. On a fresh
+    // re-entry into correction mode with an untouched draft, no dialog may
+    // linger — proving discardPending was reset by the editing→false transition.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { rerenderWith } = renderPanel({ onSave });
+
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    await user.click(screen.getByRole("button", { name: /Keep editing/i }));
+
+    await user.click(screen.getByRole("button", { name: /Save corrections/i }));
+    // Panel exits correction mode after successful save.
+    expect(await screen.findByRole("button", { name: /Correct values/i })).toBeInTheDocument();
+
+    // Upstream refreshes the extraction with the saved value.
+    rerenderWith(
+      extractionRecord({
+        reviewed_json: {
+          extracted_client: {
+            name: { value: "Acme Holdings Limited", confidence: 0.92, status: "high" },
+          },
+        },
+      })
+    );
+    // Re-enter correction. No dialog is present — discardPending was cleared.
+    await user.click(screen.getByRole("button", { name: /Correct values/i }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("heading", { name: /Discard risk corrections\?/i })).toBeNull();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    // The save is the only non-GET write we intentionally allowed; it did not
+    // happen through the discard path (this test's exit path).
+    // The panel's onSave prop is a spy, not a network call, so observedWriteMethods
+    // must still be empty.
+    expect(observedWriteMethods).toEqual([]);
   });
 });
