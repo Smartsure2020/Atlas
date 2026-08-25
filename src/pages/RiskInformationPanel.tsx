@@ -17,7 +17,7 @@
  * personal motor risk is not padded out with empty commercial fields.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ExtractionRecord } from "../lib/atlas";
 import type { ExtractionConfidenceState } from "../lib/extraction-confidence";
 import { parseReviewFieldValue, reviewValueToEditorText } from "../lib/review-edit";
@@ -25,6 +25,7 @@ import {
   Block,
   Button,
   Card,
+  ConfirmDialog,
   EmptyState,
   Notice,
   SourceReference,
@@ -171,6 +172,19 @@ export default function RiskInformationPanel({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Discard-confirmation state: when the user has typed corrections, the
+  // "Discard changes" trigger no longer wipes them silently. It opens a
+  // ConfirmDialog whose default focus lands on "Keep editing", so a
+  // mistrigger loses no work. See the discard flow further down for the
+  // full contract.
+  const [discardPending, setDiscardPending] = useState(false);
+  // Stable refs at the component top level so useFocusTrap installs against
+  // the same ref object across renders (a per-render ref lands as null on
+  // first commit and defeats the trap). The trigger ref is here for
+  // symmetry with the ProcessingJobs pattern; Modal's own focus trap
+  // handles the trigger-restore contract automatically via previouslyFocused.
+  const discardTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const keepEditingRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     setDraft(source);
@@ -178,6 +192,28 @@ export default function RiskInformationPanel({
     // A fresh extraction result replaces any in-progress edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [extraction?.id, extraction?.reviewed_json, extraction?.extracted_json]);
+
+  // Dirty predicate: identity-compare draft against source. Once the user
+  // types into a RiskField, setFieldValue's structuredClone gives draft a
+  // fresh identity; before then, useEffect keeps draft === source.
+  const dirty = draft !== null && draft !== source;
+
+  const applyDiscard = useCallback(() => {
+    setEditing(false);
+    setDraft(source);
+    setFieldErrors({});
+    setSaveError(null);
+  }, [source]);
+
+  const requestDiscard = useCallback(() => {
+    if (dirty) {
+      setDiscardPending(true);
+      return;
+    }
+    // No unsaved corrections — preserve the prior direct-close behaviour so
+    // an untouched correction session exits without an unnecessary prompt.
+    applyDiscard();
+  }, [dirty, applyDiscard]);
 
   const summary = (editing ? draft : source) as Record<string, unknown> | null;
 
@@ -288,12 +324,8 @@ export default function RiskInformationPanel({
           editing ? (
             <>
               <Button
-                onClick={() => {
-                  setEditing(false);
-                  setDraft(source);
-                  setFieldErrors({});
-                  setSaveError(null);
-                }}
+                buttonRef={discardTriggerRef}
+                onClick={requestDiscard}
                 disabled={saving}
               >
                 Discard changes
@@ -393,6 +425,34 @@ export default function RiskInformationPanel({
           </ul>
         </Card>
       )}
+
+      {/*
+       * Discard-confirmation dialog. Only rendered when the user has typed
+       * unsaved corrections and clicked "Discard changes". Initial focus
+       * lands on "Keep editing" (the safe choice) so a mistrigger cannot be
+       * doubled into an actual discard. On confirm, applyDiscard runs
+       * exactly once — purely local state, no network — and Modal's focus
+       * trap restores focus to whichever control opened the dialog. On
+       * cancel or Escape, edits are preserved verbatim.
+       */}
+      <ConfirmDialog
+        open={discardPending}
+        title="Discard risk corrections?"
+        destructive
+        confirmLabel="Discard changes"
+        cancelLabel="Keep editing"
+        initialFocusRef={keepEditingRef}
+        onCancel={() => setDiscardPending(false)}
+        onConfirm={() => {
+          // Close the dialog before applying the local revert so a
+          // second Confirm press cannot fire against the closing modal.
+          setDiscardPending(false);
+          applyDiscard();
+        }}
+        body={
+          <p>Unsaved risk corrections will be lost. Previously saved values remain unchanged.</p>
+        }
+      />
     </div>
   );
 }
