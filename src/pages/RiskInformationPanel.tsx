@@ -175,9 +175,22 @@ export default function RiskInformationPanel({
   // Discard-confirmation state: when the user has typed corrections, the
   // "Discard changes" trigger no longer wipes them silently. It opens a
   // ConfirmDialog whose default focus lands on "Keep editing", so a
-  // mistrigger loses no work. See the discard flow further down for the
-  // full contract.
-  const [discardPending, setDiscardPending] = useState(false);
+  // mistrigger loses no work.
+  //
+  // The pending state is a CONTEXT SNAPSHOT — the exact extraction id and
+  // source object identity the confirmation was opened against — rather
+  // than a boolean flag. The render-time dialog guard requires the
+  // current extraction and source to be identity-equal to that snapshot,
+  // so a mid-flight extraction swap (id change, reviewed_json refresh,
+  // extracted_json refresh) closes the dialog on the very same render
+  // that receives the new prop, before any effect fires. Boolean +
+  // effect-based cleanup left a one-render window during which the old
+  // dialog rendered against the new source; the context snapshot closes
+  // that window at the render boundary. Lifecycle-cleanup effects still
+  // clear the snapshot below as a belt-and-braces measure.
+  const [discardContext, setDiscardContext] = useState<
+    { extractionId: string; source: Record<string, unknown> } | null
+  >(null);
   // Stable ref at the component top level so useFocusTrap installs against
   // the same ref object across renders (a per-render ref lands as null on
   // first commit and defeats the trap). Modal's own focus trap handles the
@@ -188,19 +201,20 @@ export default function RiskInformationPanel({
   useEffect(() => {
     setDraft(source);
     setFieldErrors({});
-    // A fresh extraction result replaces any in-progress edit. A pending
-    // discard confirmation is torn down alongside it so the dialog can't
-    // linger with untruthful body copy against the new source, and its
-    // Confirm action can't fire against a draft that no longer exists.
-    setDiscardPending(false);
+    // A fresh extraction result replaces any in-progress edit. Belt-and-
+    // braces cleanup of the pending discard context — the render-time
+    // guard has already closed the dialog on this same commit; this
+    // effect just prevents the stale snapshot from sitting on the panel
+    // in case anything later re-references it.
+    setDiscardContext(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [extraction?.id, extraction?.reviewed_json, extraction?.extracted_json]);
 
-  // Belt-and-braces: whenever correction mode ends through any path
-  // (successful save, external reset, extraction cleared), a pending
-  // confirmation must not survive to resurface on the next reopen.
+  // Whenever correction mode ends through any path (successful save,
+  // external reset, extraction cleared), the pending snapshot must not
+  // survive to resurface on the next reopen.
   useEffect(() => {
-    if (!editing) setDiscardPending(false);
+    if (!editing) setDiscardContext(null);
   }, [editing]);
 
   // Dirty predicate: identity-compare draft against source. Once the user
@@ -216,14 +230,19 @@ export default function RiskInformationPanel({
   }, [source]);
 
   const requestDiscard = useCallback(() => {
-    if (dirty) {
-      setDiscardPending(true);
+    if (dirty && source && extraction) {
+      // Capture the exact correction context this confirmation was
+      // opened against — extraction id and source reference. The
+      // render-time guard below checks both by identity, so a
+      // replacement extraction cannot satisfy the pending snapshot.
+      setDiscardContext({ extractionId: extraction.id, source });
       return;
     }
     // No unsaved corrections — preserve the prior direct-close behaviour so
     // an untouched correction session exits without an unnecessary prompt.
+    // Clean bypass does not create a pending context.
     applyDiscard();
-  }, [dirty, applyDiscard]);
+  }, [dirty, applyDiscard, source, extraction]);
 
   const summary = (editing ? draft : source) as Record<string, unknown> | null;
 
@@ -288,15 +307,27 @@ export default function RiskInformationPanel({
     }
   }
 
-  // Fail-closed guard: the confirmation dialog is stale/untruthful unless
-  // every precondition still holds. Deriving the open state here (rather
-  // than reading `discardPending` alone) means the dialog cannot render
-  // for even one commit against a null extraction, a clean draft, or a
-  // panel that has already left correction mode. The effects above
-  // reset `discardPending` on the same signals; this guard closes the
-  // race where the effect fires one render later than the prop change.
+  // Render-time fail-closed guard bound to the correction context that
+  // opened the confirmation. The dialog renders only when every one of
+  // these holds at commit time:
+  //   • a pending snapshot exists;
+  //   • the panel is still in correction mode;
+  //   • the draft is still dirty;
+  //   • an extraction is still attached;
+  //   • the current extraction id is IDENTITY-equal to the snapshot's;
+  //   • the current source object is IDENTITY-equal to the snapshot's.
+  // Reference equality on source (rather than JSON.stringify) means a
+  // reviewed_json/extracted_json swap always changes the source's object
+  // identity — the guard falls closed on the very same render that
+  // receives the new prop, without waiting for the passive cleanup
+  // effect to fire in a later commit.
   const discardDialogOpen =
-    discardPending && editing && dirty && extraction !== null;
+    discardContext !== null &&
+    editing &&
+    dirty &&
+    extraction !== null &&
+    discardContext.extractionId === extraction.id &&
+    discardContext.source === source;
 
   if (!extraction) {
     return (
@@ -458,11 +489,13 @@ export default function RiskInformationPanel({
         confirmLabel="Discard changes"
         cancelLabel="Keep editing"
         initialFocusRef={keepEditingRef}
-        onCancel={() => setDiscardPending(false)}
+        onCancel={() => setDiscardContext(null)}
         onConfirm={() => {
-          // Close the dialog before applying the local revert so a
-          // second Confirm press cannot fire against the closing modal.
-          setDiscardPending(false);
+          // Clear the captured snapshot BEFORE applying the local revert
+          // so a second Confirm press cannot fire against the closing
+          // modal, and a stale callback cannot re-open against a
+          // replacement source.
+          setDiscardContext(null);
           applyDiscard();
         }}
         body={

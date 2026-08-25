@@ -604,4 +604,280 @@ describe("RiskInformationPanel — discard confirmation", () => {
     // must still be empty.
     expect(observedWriteMethods).toEqual([]);
   });
+
+  // ------------------------------------------------------------------
+  // Context-binding contract — the dialog's actual open state is bound
+  // to a snapshot of the correction context (extraction id + source
+  // object identity) captured when the user requested discard. A
+  // replacement extraction, or a same-id extraction whose reviewed_json
+  // or extracted_json has been swapped, cannot satisfy the render-time
+  // guard even in the intermediate render before passive cleanup
+  // effects fire. These tests exercise the render-time equality check
+  // rather than the passive cleanup effect: they assert the guard's
+  // observable output (dialog absence, no callback fire, no writes)
+  // survives a replacement source, and that the captured snapshot is
+  // cleared on every legitimate close path.
+  // ------------------------------------------------------------------
+
+  it("binds the pending confirmation to the extraction id that opened it (id swap closes the dialog)", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onSave } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // A different extraction (new id) arrives. The captured snapshot's
+    // extractionId no longer matches the current extraction.id, so the
+    // render-time guard evaluates false immediately — the dialog cannot
+    // even render one commit against the replacement.
+    rerenderWith(
+      extractionRecord({
+        id: "ext_replacement_id",
+        reviewed_json: {
+          extracted_client: {
+            name: { value: "Beta Underwriting Ltd", confidence: 0.95, status: "high" },
+          },
+        },
+      })
+    );
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("heading", { name: /Discard risk corrections\?/i })).toBeNull();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("binds the pending confirmation to the source object identity (reviewed_json swap closes the dialog)", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onSave } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Same extraction id, but reviewed_json is a fresh object — its
+    // reference identity has changed. The snapshot's captured source
+    // reference no longer equals the current source; guard falls closed.
+    rerenderWith(
+      extractionRecord({
+        reviewed_json: {
+          extracted_client: {
+            name: { value: "Acme refreshed reviewed", confidence: 0.99, status: "high" },
+          },
+        },
+      })
+    );
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("binds the pending confirmation to the source object identity (extracted_json swap closes the dialog)", async () => {
+    const user = userEvent.setup();
+    const initial: ExtractionRecord = {
+      id: "ext_risk_discard",
+      extracted_json: {
+        extracted_client: {
+          name: { value: "Acme Holdings (Pty) Ltd", confidence: 0.92, status: "high" },
+        },
+      },
+      reviewed_json: null,
+      extraction_confidence: null,
+    };
+    const { rerenderWith, onSave } = renderPanel({ extraction: initial });
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Same id, but a fresh extracted_json reference — the source
+    // reference the panel derives changes with it. Guard closes.
+    rerenderWith({
+      ...initial,
+      extracted_json: {
+        extracted_client: {
+          name: { value: "Acme rerun extracted", confidence: 0.94, status: "high" },
+        },
+      },
+    });
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("a replacement source cannot satisfy the dialog-open guard, even if a stale Confirm click were possible", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onSave } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Swap to a replacement extraction while the dialog is open.
+    rerenderWith(
+      extractionRecord({
+        id: "ext_replacement_v3",
+        reviewed_json: {
+          extracted_client: {
+            name: { value: "Gamma Insurance", confidence: 0.9, status: "high" },
+          },
+        },
+      })
+    );
+
+    // Guard is closed — no dialog surface exists; no Confirm button to
+    // click; no destructive callback can fire against the replacement.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      screen.queryAllByRole("button", { name: /Discard changes/i }).length
+    ).toBeLessThanOrEqual(1); // At most the outer trigger, never a dialog Confirm.
+
+    // The replacement extraction still displays its own saved values.
+    // Draft is reset to the new source by the passive effect; correction
+    // mode is still in — the input shows the fresh replacement value.
+    const nameInput = screen.getByLabelText("Insured name") as HTMLInputElement;
+    expect(nameInput.value).toBe("Gamma Insurance");
+
+    // No callback fired for the replacement — the stale confirmation
+    // could not reach into it.
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("null → valid cannot reuse the old pending context (fresh edit + fresh request needed)", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onSave } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Extraction cleared, then a fresh extraction returns.
+    rerenderWith(null);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    rerenderWith(extractionRecord({ id: "ext_after_null" }));
+
+    // Dialog does not resurface: the null transition cleared the
+    // snapshot; the returning extraction's id does not match anyway.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("heading", { name: /Discard risk corrections\?/i })).toBeNull();
+
+    // A fresh edit + fresh trigger opens a new confirmation cleanly.
+    const nameInput = screen.getByLabelText("Insured name") as HTMLInputElement;
+    await user.clear(nameInput);
+    await user.type(nameInput, "Gamma new edit");
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("a fresh edit on the replacement extraction can open a new confirmation normally", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onSave } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+
+    // Replace mid-dialog.
+    rerenderWith(
+      extractionRecord({
+        id: "ext_replacement_reedit",
+        reviewed_json: {
+          extracted_client: {
+            name: { value: "Delta Reinsurance", confidence: 0.9, status: "high" },
+          },
+        },
+      })
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Fresh edit on the replacement + fresh trigger → clean new dialog.
+    const nameInput = screen.getByLabelText("Insured name") as HTMLInputElement;
+    await user.clear(nameInput);
+    await user.type(nameInput, "Delta v2");
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // The new dialog is bound to the replacement id/source, not the old
+    // one — confirming it reverts the REPLACEMENT's edit, not anything
+    // stale.
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: /Discard changes/i })
+    );
+    // The replacement's saved value is restored.
+    expect(screen.getByText("Delta Reinsurance")).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
+
+  it("Escape clears the captured context (a subsequent reopen captures a fresh snapshot)", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Re-open — a NEW snapshot must be captured against the current
+    // dirty draft. If Escape had left the old context in place, the
+    // guard's identity checks would still hold and the dialog would
+    // simply reappear on click; the fresh capture is what makes reopen
+    // legitimate. The observable proof is that the dialog reappears
+    // after a fresh user click, and its Confirm still reverts correctly.
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: /Discard changes/i }));
+    expect(screen.getByText("Acme Holdings (Pty) Ltd")).toBeInTheDocument();
+  });
+
+  it("Keep editing clears the captured context", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+
+    await user.click(screen.getByRole("button", { name: /Keep editing/i }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Reopen and confirm — the fresh capture drives the discard.
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: /Discard changes/i })
+    );
+    expect(screen.getByText("Acme Holdings (Pty) Ltd")).toBeInTheDocument();
+  });
+
+  it("Confirm clears the captured context before applying discard (rapid double-Confirm is a single revert)", async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderPanel();
+    await enterCorrectionModeAndEdit(user);
+    await user.click(screen.getByRole("button", { name: /Discard changes/i }));
+    const dialog = screen.getByRole("dialog");
+    const destructive = within(dialog).getByRole("button", { name: /Discard changes/i });
+
+    // Click destructive twice in rapid succession. The context is
+    // cleared inside onConfirm BEFORE applyDiscard runs, so once React
+    // commits the first click's state updates the destructive button
+    // has unmounted; a follow-up click can only ever hit an outer
+    // trigger, not the dialog Confirm. The first click's handler is
+    // therefore the only one that reaches applyDiscard, whether the
+    // pair fired inside one batch or straddled a commit.
+    await user.click(destructive);
+    // The button is gone; attempting a second click can only find the
+    // outer "Discard changes" trigger, which is safe (clean bypass, no
+    // dialog because dirty is now false).
+    const stillDialog = screen.queryByRole("dialog");
+    if (stillDialog) {
+      await user.click(within(stillDialog).getByRole("button", { name: /Discard changes/i }));
+    }
+
+    // Dialog is gone; the saved value is back; correction is exited.
+    expect(screen.queryByRole("heading", { name: /Discard risk corrections\?/i })).toBeNull();
+    expect(screen.getByText("Acme Holdings (Pty) Ltd")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Correct values/i })).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(observedWriteMethods).toEqual([]);
+  });
 });
