@@ -416,8 +416,11 @@ describe("Insurer intelligence workbench", () => {
     });
     confirmAppetiteMock.mockResolvedValue({ ok: true });
     renderPage();
-    const proposedTab = await screen.findByRole("tab", { name: /Awaiting review/i });
-    expect(proposedTab).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: /Awaiting review/i })
+      ).toHaveAttribute("aria-selected", "true");
+    });
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Confirm and activate/i }));
     await waitFor(() => expect(confirmAppetiteMock).toHaveBeenCalledTimes(1));
@@ -583,6 +586,11 @@ describe("Insurer intelligence workbench", () => {
     renderPage();
     // Initial priority tab is "Awaiting review".
     await screen.findByRole("heading", { level: 1, name: /CIB/i });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: /Awaiting review/i })
+      ).toHaveAttribute("aria-selected", "true");
+    });
     const user = userEvent.setup();
 
     // Assert valid hierarchy on the Awaiting review tab.
@@ -653,6 +661,11 @@ describe("Insurer intelligence workbench", () => {
       </ToastProvider>
     );
     await screen.findByRole("heading", { level: 1, name: /Alpha/i });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: /Active matrix/i })
+      ).toHaveAttribute("aria-selected", "true");
+    });
     const user = userEvent.setup();
     // Trigger a mutation failure so actionError is set on insurer A.
     await user.click(screen.getByRole("button", { name: /Deactivate/i }));
