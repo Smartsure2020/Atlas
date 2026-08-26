@@ -70,6 +70,10 @@ import {
   handleUpdateAssignment,
 } from "./phase7-endpoints";
 import {
+  handleAutoAssignSubmission,
+  handleGetAssignmentHistory,
+} from "./assignment-endpoints";
+import {
   handleCanary,
   handleCancelJob,
   handleConfirmCleanupCandidate,
@@ -285,6 +289,13 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         if (sub === "/assignment" && request.method === "PATCH") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot update assignments.");
           return handleUpdateAssignment(id, request, env, user);
+        }
+        if (sub === "/assignment/auto" && request.method === "POST") {
+          if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot auto-assign.");
+          return handleAutoAssignSubmission(id, request, env, user);
+        }
+        if (sub === "/assignment-history" && request.method === "GET") {
+          return handleGetAssignmentHistory(id, env, user);
         }
         if (sub === "/recommend" && request.method === "POST") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot run recommendations.");

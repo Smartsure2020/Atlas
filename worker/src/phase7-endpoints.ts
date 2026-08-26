@@ -1,8 +1,8 @@
 import { adminClient, audit, json, type AtlasUser } from "./auth";
 import type { Env } from "./config";
 import { roleCanViewManagerDashboard } from "./phase6-hardening";
-import { auditAssignmentChange } from "./phase7-jobs";
 import { buildHealthBody, summarizeJobs } from "./phase7-core";
+import { handleUpdateAssignment as canonicalHandleUpdateAssignment } from "./assignment-endpoints";
 
 const CLIENT_DOCS_BUCKET = "atlas-client-docs";
 const INSURER_DOCS_BUCKET = "atlas-insurer-docs";
@@ -132,41 +132,16 @@ export async function handleCleanupPreview(env: Env, user: AtlasUser): Promise<R
   });
 }
 
+// The Phase 7 export is preserved so existing importers keep working; Phase 2
+// migrates the implementation into worker/src/assignment-endpoints.ts, where
+// assigned_to changes go through the canonical SECURITY DEFINER function
+// (public.atlas_set_submission_assignment) and queue_status keeps its
+// pre-existing behaviour.
 export async function handleUpdateAssignment(
   submissionId: string,
   request: Request,
   env: Env,
   user: AtlasUser
 ): Promise<Response> {
-  const body = (await request.json().catch(() => null)) as {
-    assigned_to?: string | null;
-    queue_status?: "new" | "in_review" | "waiting_info" | "referred" | "completed" | "archived" | null;
-  } | null;
-  if (!body) return json({ error: "bad_request" }, 400);
-
-  const update: Record<string, unknown> = {};
-  if ("assigned_to" in body) {
-    update.assigned_to = body.assigned_to ?? null;
-    update.assigned_underwriter = body.assigned_to ?? null;
-    update.assigned_at = body.assigned_to ? new Date().toISOString() : null;
-    update.assigned_by = body.assigned_to ? user.id : null;
-  }
-  if (body.queue_status) update.queue_status = body.queue_status;
-  if (Object.keys(update).length === 0) return json({ error: "no_editable_fields" }, 400);
-
-  const admin = adminClient(env);
-  const { error } = await admin
-    .from("atlas_submissions")
-    .update(update)
-    .eq("id", submissionId);
-  if (error) return json({ error: "assignment_update_failed" }, 500);
-
-  await auditAssignmentChange(env, {
-    submissionId,
-    actor: user,
-    assignedTo: "assigned_to" in update ? (update.assigned_to as string | null) : null,
-    queueStatus: (update.queue_status as string | undefined) ?? null,
-  });
-
-  return json({ ok: true });
+  return canonicalHandleUpdateAssignment(submissionId, request, env, user);
 }
