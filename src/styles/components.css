@@ -249,6 +249,20 @@
   color: var(--atlas-ink-secondary);
 }
 
+/*
+ * Distinct absence treatment — for pills that represent a missing value the
+ * reader can act to add. Dashed outline plus an invitation glyph keep the
+ * absence visually separate from any real value pill (which uses the solid
+ * --quiet variant) without borrowing the danger tone that would misread as
+ * an error.
+ */
+.atlas-badge--outline {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--atlas-border-stronger);
+  color: var(--atlas-ink-secondary);
+}
+
 .atlas-badge--strong {
   font-weight: var(--atlas-fw-semibold);
 }
@@ -840,6 +854,17 @@ button.atlas-metric[aria-pressed="true"] {
 .atlas-table-scroll {
   overflow-x: auto;
   overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+.atlas-table-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+
+.atlas-table-scroll::-webkit-scrollbar-thumb {
+  background: var(--atlas-border-strong);
+  border-radius: 4px;
 }
 
 .atlas-table {
@@ -894,6 +919,43 @@ button.atlas-metric[aria-pressed="true"] {
 
 .atlas-table--dense tbody td {
   padding: 7px var(--atlas-space-3);
+}
+
+/*
+ * Sticky first column, scoped to the narrow viewport where the queue
+ * would otherwise clip Client + Broker off the right edge. On desktop
+ * the table has room for every column and the sticky styles are a
+ * no-op; at ≤ 760 px the leading cell stays pinned to the left of the
+ * scroll container so a mobile reader always sees which client each
+ * row belongs to while paging horizontally through Stage, Priority,
+ * Owner, Next action, and the rest.
+ *
+ * The z-order stacks header > pinned body cell > regular body cell so
+ * the pinned first column can slide under the sticky header without a
+ * visible seam. A right-edge box-shadow gives the column a subtle
+ * elevation so it reads as pinned, not just "text touching text".
+ */
+@media (max-width: 760px) {
+  .atlas-table--sticky-first thead th:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 3;
+    background: var(--atlas-surface-muted);
+    box-shadow: 4px 0 6px -4px rgba(15, 23, 42, 0.18);
+  }
+  .atlas-table--sticky-first tbody td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--atlas-surface);
+    box-shadow: 4px 0 6px -4px rgba(15, 23, 42, 0.18);
+  }
+  .atlas-table--sticky-first tbody tr:hover td:first-child {
+    background: var(--atlas-surface-hover);
+  }
+  .atlas-table--sticky-first tbody tr[data-selected="true"] td:first-child {
+    background: var(--atlas-primary-surface);
+  }
 }
 
 .atlas-table__sort {
@@ -991,10 +1053,55 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   border-bottom: 1px solid var(--atlas-border-strong);
   overflow-x: auto;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x proximity;
 }
 
 .atlas-tabs::-webkit-scrollbar {
   display: none;
+}
+
+.atlas-tab {
+  scroll-snap-align: start;
+}
+
+/*
+ * Scroll affordance on narrow viewports. When the tabs cannot all fit on
+ * screen (common on 375 px and every submission-workspace tab bar), the
+ * container gains a right-edge fade + a subtle scrollbar so a user can
+ * see that more tabs exist to the right. `mask-image` is a progressive
+ * enhancement — browsers that ignore it just show a plain scrollable
+ * container.
+ */
+@media (max-width: 760px) {
+  .atlas-tabs {
+    padding-bottom: 3px;
+    scrollbar-width: thin;
+    /* Right-edge fade hint. --fade-right is toggled by useHorizontalFade
+       between 0 and 1 based on the live scroll position — the mask only
+       applies while there is content still to reveal, so the last tab
+       is not permanently shadowed when the reader has already scrolled
+       to the end. */
+    --fade-right: 0;
+    mask-image: linear-gradient(
+      to right,
+      black calc(100% - 24px * var(--fade-right)),
+      rgba(0, 0, 0, calc(1 - var(--fade-right)))
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      black calc(100% - 24px * var(--fade-right)),
+      rgba(0, 0, 0, calc(1 - var(--fade-right)))
+    );
+  }
+  .atlas-tabs::-webkit-scrollbar {
+    display: block;
+    height: 3px;
+  }
+  .atlas-tabs::-webkit-scrollbar-thumb {
+    background: var(--atlas-border-strong);
+    border-radius: 3px;
+  }
 }
 
 .atlas-tab {
@@ -1818,7 +1925,7 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   flex-direction: column;
   gap: 2px;
   padding: var(--atlas-space-3);
-  border-radius: var(--atlas-radius);
+  border-radius: var(--atlas-radius-card);
   background: var(--atlas-surface-muted);
   border: 1px solid var(--atlas-border);
 }
@@ -1887,12 +1994,20 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
 .atlas-draft-chooser {
   display: grid;
   gap: var(--atlas-space-4);
+  /* The chooser lives inside a card body that is itself a flex-column;
+     without `min-width: 0` the intrinsic min-content of long draft
+     labels forces the flex ancestors to grow past the viewport, which
+     is what caused the mobile Communications tab to overflow at 375 px. */
+  min-width: 0;
 }
 
 .atlas-draft-chooser__group {
   display: flex;
   flex-direction: column;
   gap: var(--atlas-space-2);
+  /* Same reason — the group must be allowed to shrink below the
+     min-content of its widest draft card. */
+  min-width: 0;
 }
 
 .atlas-draft-chooser__group-title {
@@ -1913,7 +2028,35 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
 .atlas-draft-chooser__grid {
   display: grid;
   gap: var(--atlas-space-2);
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  /* Two columns at desktop widths so four cards fill the row without an
+     orphan; auto-fit still collapses to a single column on narrow
+     viewports. Cards remain at least 230px so long labels do not wrap
+     awkwardly. */
+  grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
+  max-width: calc(2 * (var(--atlas-draft-card-max, 320px)) + var(--atlas-space-2));
+  /* `min(230px, 100%)` should have collapsed the min track on a narrow
+     viewport, but it does not resolve reliably inside the flex-column
+     ancestors that wrap the chooser: the 230px minimum then forces a
+     track wider than the parent card, spilling the document horizontally.
+     `min-width: 0` allows the grid itself to shrink; the mobile media
+     query below drops the min track outright. */
+  min-width: 0;
+}
+
+@media (min-width: 720px) {
+  .atlas-draft-chooser__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  /* At the same breakpoint the rest of the Atlas surfaces use, drop the
+     min track to zero and let the single column own the row. This closes
+     the 87 px document-level overflow seen on the Communications tab at
+     375 px viewports without changing the desktop two-column cap. */
+  .atlas-draft-chooser__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .atlas-draft-card {
@@ -1922,7 +2065,7 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
   gap: 4px;
   padding: var(--atlas-space-3) var(--atlas-space-3);
   border: 1px solid var(--atlas-border);
-  border-radius: var(--atlas-radius);
+  border-radius: var(--atlas-radius-card);
   background: var(--atlas-surface);
   text-align: left;
   cursor: pointer;
@@ -2356,6 +2499,52 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
 
   .atlas-oversight__period {
     width: 100%;
+    /*
+     * Desktop uses `flex: 1 1 220px` so the Period field can grow to
+     * share the row with future siblings. When the row flips to
+     * flex-direction: column on mobile, flex-basis becomes a HEIGHT hint
+     * — 220 px, which the row happily honours because grow=1. That
+     * inflated the Period cell to a full 220 px tall, opening a ~137 px
+     * dead band between the hint text and the "Advanced filters"
+     * disclosure below. Collapsing the flex sizing to `auto` returns the
+     * cell to its content height (~64 px) and shrinks the gap to the
+     * normal Atlas vertical rhythm.
+     */
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+
+  /*
+   * Mobile: the filter card previously stacked Period → gap → filters-row → gap → Disclosure
+   * with two full space-3 gaps below the dropdown, leaving a dropdown-sized empty band under
+   * the hint text on 375-px screens. Collapse the outer gap and remove the extra padding-top
+   * inside the advanced-filters grid so the disclosure sits directly under the hint.
+   */
+  .atlas-oversight__filters {
+    gap: var(--atlas-space-2);
+    padding: var(--atlas-space-3);
+  }
+
+  .atlas-oversight__filters-row {
+    gap: var(--atlas-space-2);
+    margin-bottom: 0;
+  }
+
+  /*
+   * Mobile grouping cue. Without a visual tie the Period select and the
+   * Advanced-filters disclosure read as two separate concerns stacked in
+   * a single card. A subtle top border on the disclosure summary and the
+   * shared space-2 gap group both controls into one visible filter
+   * block at <=760px without reintroducing the previous 55-145px dead
+   * band the flex-height fix already removed.
+   */
+  .atlas-oversight__filters > .atlas-disclosure > summary {
+    border-top: 1px solid var(--atlas-border);
+    padding-top: var(--atlas-space-2);
+  }
+
+  .atlas-oversight__advanced {
+    padding-top: 0;
   }
 }
 
@@ -2473,6 +2662,36 @@ th[aria-sort]:not([aria-sort="none"]) .atlas-table__sort-mark {
     flex-wrap: nowrap;
     overflow-x: auto;
     padding-bottom: var(--atlas-space-1);
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    /* Right-edge fade hint driven by useHorizontalFade — the mask only
+       renders while --fade-right=1, so the last filter is not
+       permanently shadowed when scrolled to the end. */
+    --fade-right: 0;
+    mask-image: linear-gradient(
+      to right,
+      black calc(100% - 24px * var(--fade-right)),
+      rgba(0, 0, 0, calc(1 - var(--fade-right)))
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      black calc(100% - 24px * var(--fade-right)),
+      rgba(0, 0, 0, calc(1 - var(--fade-right)))
+    );
+  }
+
+  .atlas-timeline__filterbar > * {
+    flex: none;
+    white-space: nowrap;
+  }
+
+  .atlas-timeline__filterbar::-webkit-scrollbar {
+    height: 3px;
+  }
+
+  .atlas-timeline__filterbar::-webkit-scrollbar-thumb {
+    background: var(--atlas-border-strong);
+    border-radius: 3px;
   }
 
   /* Timestamp + timezone suffix would otherwise pin the auto grid column

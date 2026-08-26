@@ -166,37 +166,59 @@ export default function MissingInfoPanel({
         description="What Atlas still needs, why it needs it, and who owes it. Draft the request itself on the Communications tab."
         actions={
           canWrite ? (
-            <>
-              <Button
-                size="sm"
-                icon="refresh"
-                loading={generating}
-                loadingLabel="Deriving…"
-                onClick={onGenerate}
-                title="Derive items from the extraction and quote review findings."
-              >
-                Derive from analysis
-              </Button>
-              <Button size="sm" variant="primary" icon="plus" onClick={() => setAddOpen(true)}>
-                Add item
-              </Button>
-            </>
+            // While there are no items on file, "Derive from analysis"
+            // is the primary — write-by-hand should not be the visual
+            // default before Atlas has been asked to derive anything.
+            // Once there is at least one item, "Add item" resumes its
+            // usual primary role because the reader is now curating an
+            // existing list rather than starting from empty.
+            items.length === 0 ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon="refresh"
+                  loading={generating}
+                  loadingLabel="Deriving…"
+                  onClick={onGenerate}
+                  title="Derive items from the extraction and quote review findings."
+                >
+                  Derive from analysis
+                </Button>
+                <Button size="sm" icon="plus" onClick={() => setAddOpen(true)}>
+                  Add item
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  size="sm"
+                  icon="refresh"
+                  loading={generating}
+                  loadingLabel="Deriving…"
+                  onClick={onGenerate}
+                  title="Derive items from the extraction and quote review findings."
+                >
+                  Derive from analysis
+                </Button>
+                <Button size="sm" variant="primary" icon="plus" onClick={() => setAddOpen(true)}>
+                  Add item
+                </Button>
+              </>
+            )
           ) : undefined
         }
         flush={items.length > 0}
       >
         {items.length === 0 ? (
+          // Empty state stays as a pure explainer — the header action
+          // group already carries the primary "Derive from analysis"
+          // affordance, so a duplicate button inside the card would
+          // just be repetition.
           <EmptyState
             inline
             title="Nothing is outstanding"
-            body="Atlas has not identified any gaps, and nobody has added one manually. Derive items from the analysis once the extraction and quote review have run."
-            actions={
-              canWrite ? (
-                <Button loading={generating} loadingLabel="Deriving…" onClick={onGenerate}>
-                  Derive from analysis
-                </Button>
-              ) : undefined
-            }
+            body="Atlas has not identified any gaps, and nobody has added one manually. Use “Derive from analysis” above once the extraction and quote review have run."
           />
         ) : (
           <div style={{ padding: "var(--atlas-space-5)" }}>

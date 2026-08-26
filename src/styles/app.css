@@ -350,10 +350,19 @@
   border-radius: var(--atlas-radius-badge);
   font-size: var(--atlas-fs-label);
   color: var(--atlas-ink-muted);
+  white-space: nowrap;
 }
 
 .atlas-nav-toggle {
   display: inline-flex;
+}
+
+/* Compact-mode search: the icon-only trigger is hidden on desktop; the
+   full input is shown. At the mobile breakpoint the trigger takes over
+   and the input collapses to a hidden, keyboard-reachable state until
+   the trigger toggles it back on. */
+.atlas-topbar__search-trigger {
+  display: none;
 }
 
 /* ===========================================================================
@@ -1917,12 +1926,31 @@
     padding: var(--atlas-space-4) var(--atlas-space-4) var(--atlas-space-10);
   }
 
+  /*
+   * Mobile contrast override for the account-role label.
+   * The default token (--atlas-nav-ink-role, #9aa7bd) reads ~6.8:1 on
+   * the desktop navy sidebar surface. At mobile the sidebar drawer
+   * renders over a lighter shell backdrop, and audits caught the label
+   * failing WCAG AA. Reusing the nav-ink token here lifts the ratio to
+   * >=8:1 on the navy sidebar surface at every mobile state while
+   * leaving the desktop navy-sidebar look untouched. The label stays
+   * visually secondary next to the white email address because the
+   * font-size (10px) and uppercase treatment are unchanged.
+   */
+  .atlas-sidebar__role {
+    color: var(--atlas-nav-ink);
+  }
+
   .atlas-topbar {
     padding: 0 var(--atlas-space-4);
   }
 
   .atlas-topbar__search {
     flex-basis: 140px;
+  }
+
+  .atlas-topbar__env-label {
+    display: none;
   }
 
   .atlas-page-header {
@@ -1974,5 +2002,72 @@
 
   .atlas-table--responsive thead th:first-child {
     background: var(--atlas-surface-muted);
+  }
+}
+
+/*
+ * Phone-narrow: the top bar collapses to icon-only affordances so the
+ * search input placeholder no longer clips ("Sear…") and the
+ * decision-support role pill no longer wraps or pushes the sign-out
+ * icon to the edge. The search input is hidden until the trigger opens
+ * it; the env pill loses its label; the role identity is available
+ * through the sidebar (opened via the hamburger) and via the env pill's
+ * title attribute for hover / long-press.
+ */
+@media (max-width: 480px) {
+  .atlas-topbar {
+    gap: var(--atlas-space-2);
+    padding: 0 var(--atlas-space-3);
+  }
+
+  .atlas-topbar__search {
+    display: none;
+  }
+
+  .atlas-topbar__search.atlas-topbar__search--expanded {
+    display: block;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    padding: var(--atlas-space-2) var(--atlas-space-3);
+    background: var(--atlas-surface);
+    border-bottom: 1px solid var(--atlas-border);
+    box-shadow: var(--atlas-shadow-lg);
+    z-index: calc(var(--atlas-z-topbar) + 1);
+    max-width: none;
+    overflow-x: hidden;
+  }
+
+  /*
+   * Scrim behind the mobile search sheet. Renders below the sheet
+   * (z-index-1) but above surrounding content so a tap outside the
+   * sheet dismisses it. Kept transparent-ish to avoid dominating a
+   * one-off search interaction; the dismissal contract carries the
+   * weight, the darkening only helps make the sheet edge legible.
+   */
+  .atlas-topbar__search-scrim {
+    position: fixed;
+    inset: 0;
+    background: var(--atlas-overlay);
+    z-index: calc(var(--atlas-z-topbar));
+  }
+
+  .atlas-topbar__search .atlas-search {
+    display: flex;
+    align-items: center;
+    gap: var(--atlas-space-2);
+  }
+
+  .atlas-topbar__search-close {
+    flex: none;
+  }
+
+  .atlas-topbar__search-trigger {
+    display: inline-flex;
+  }
+
+  .atlas-topbar {
+    position: relative;
   }
 }

@@ -283,6 +283,43 @@ export function jobsNeedingIntervention(
 }
 
 /* ===========================================================================
+   Cleanup preview — expired-active document count
+   =========================================================================== */
+
+/**
+ * The `/api/admin/cleanup/preview` endpoint documents a well-formed response
+ * shape that carries `expired_active_documents` as an array. In practice the
+ * page has to survive three failure modes without crashing:
+ *
+ *   1. A completely absent value (`null` / `undefined`) — treat as
+ *      "supporting context unavailable" (return `null`).
+ *   2. A resolved value whose shape is wrong (missing key, wrong type,
+ *      string, array-of-nothing, opaque object) — same as (1); the
+ *      workbench renders and the caller surfaces a stale-data warning.
+ *   3. A genuine, well-shaped array — return its length, including `0`
+ *      for a genuine empty backlog (distinct from "unavailable").
+ *
+ * A one-liner `?.length` conflates modes 1 and 2 with mode 3's empty-array
+ * case and — when the returned value is not an array at all — throws a
+ * TypeError inside the promise handler, silently halting whatever else that
+ * handler was going to do (including recording the stale-data warning). The
+ * discriminated return type below keeps those two states apart so callers
+ * can render `null` as "unavailable" and `0` as "zero backlog".
+ */
+export function readExpiredActiveDocumentCount(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object") return null;
+  // Arrays are objects — a caller that hands us the array directly is
+  // treated as malformed (the wire contract is a wrapping object). We
+  // still refuse rather than guess.
+  if (Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const list = record.expired_active_documents;
+  if (!Array.isArray(list)) return null;
+  return list.length;
+}
+
+/* ===========================================================================
    Exception summary — the "where operations need attention" strip
    =========================================================================== */
 
@@ -377,7 +414,12 @@ export function processingExceptionMetrics({
    Submission documents — trust grouping
    =========================================================================== */
 
-export type DocumentGroupKey = "quarantined" | "scan_pending" | "active" | "expired";
+export type DocumentGroupKey =
+  | "quarantined"
+  | "scan_failed"
+  | "scan_pending"
+  | "active"
+  | "expired";
 
 export interface DocumentRow {
   id?: string;
@@ -399,16 +441,19 @@ export interface DocumentGroup {
 
 /**
  * Split every document into exactly one bucket. Quarantine wins over
- * expiry — a document that was quarantined and then had its retention
- * date pass is still a quarantine problem, not an expiry problem.
- * Scan-in-progress wins over active so a document Atlas has not yet
- * scanned is never presented as "on file". Order of returned groups is
- * fixed (quarantined → scan_pending → active → expired) so the caller can
- * loop without a secondary sort.
+ * every other consideration; a scan that returned `failed` (Atlas could not
+ * decide whether the file is safe) gets its own bucket rather than being
+ * treated as active, because "Atlas reads active documents" would be a
+ * lie for something the scanner never cleared. Scan-in-progress wins over
+ * active so a document Atlas has not yet scanned is never presented as
+ * "on file". Order of returned groups is fixed
+ * (quarantined → scan_failed → scan_pending → active → expired) so the
+ * caller can loop without a secondary sort.
  */
 export function groupDocuments(documents: readonly DocumentRow[]): DocumentGroup[] {
   const groups: Record<DocumentGroupKey, DocumentRow[]> = {
     quarantined: [],
+    scan_failed: [],
     scan_pending: [],
     active: [],
     expired: [],
@@ -416,6 +461,10 @@ export function groupDocuments(documents: readonly DocumentRow[]): DocumentGroup
   for (const document of documents) {
     if (document.scan_status === "infected") {
       groups.quarantined.push(document);
+      continue;
+    }
+    if (document.scan_status === "failed" && document.status !== "expired") {
+      groups.scan_failed.push(document);
       continue;
     }
     if (document.scan_status === "pending" && document.status !== "expired") {
@@ -430,10 +479,140 @@ export function groupDocuments(documents: readonly DocumentRow[]): DocumentGroup
   }
   return [
     { key: "quarantined", documents: groups.quarantined },
+    { key: "scan_failed", documents: groups.scan_failed },
     { key: "scan_pending", documents: groups.scan_pending },
     { key: "active", documents: groups.active },
     { key: "expired", documents: groups.expired },
   ];
+}
+
+/* ===========================================================================
+   Job metadata redaction
+   ---------------------------------------------------------------------------
+   The failed-job "Technical detail" disclosure in the processing workbench
+   is the one place a manager reads a raw payload the Worker attached to a
+   job. Whatever the Worker writes into `metadata` can — accidentally or on
+   the way to being cleaned up — carry a bearer token, an API key, a JWT, a
+   signed storage URL, or a raw prompt / document excerpt. The UI treats
+   metadata as untrusted: only the keys on the allow-list survive, each
+   value is scrubbed of common secret shapes, and the rendered JSON is
+   capped so a runaway payload never fills the drawer.
+   =========================================================================== */
+
+const SAFE_METADATA_KEYS: ReadonlySet<string> = new Set([
+  "step",
+  "current_step",
+  "stage",
+  "phase",
+  "document_id",
+  "documents_read",
+  "document_count",
+  "documents_processed",
+  "retry_count",
+  "max_retries",
+  "attempt",
+  "attempts",
+  "duration_ms",
+  "elapsed_ms",
+  "started_at",
+  "finished_at",
+  "completed_at",
+  "queued_at",
+  "insurer_id",
+  "submission_id",
+  "quote_review_id",
+  "job_type",
+  "job_id",
+  "error_code",
+  "http_status",
+  "status",
+  "progress_percent",
+  "reason",
+  "reason_code",
+  "cancellation_reason",
+]);
+
+const REDACTED = "[redacted]";
+const MAX_METADATA_STRING = 4000;
+
+// Anything remotely token-shaped is dropped. Missing a real secret here
+// leaks something; a false positive just says "[redacted]".
+const SECRET_SHAPES: RegExp[] = [
+  // JWT ("eyJ..." three base64 segments)
+  /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/,
+  // Bearer / Basic auth headers
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/i,
+  /\bBasic\s+[A-Za-z0-9+/=]{16,}/i,
+  // AWS-style keys
+  /\bAKIA[0-9A-Z]{12,}/,
+  /\bASIA[0-9A-Z]{12,}/,
+  // Long hex strings (>= 32 chars) — API keys, session tokens
+  /\b[a-f0-9]{32,}\b/i,
+  // Long base64ish tokens (>= 32 chars) — generic secret shape
+  /\b[A-Za-z0-9_-]{32,}\b/,
+  // URLs carrying auth material
+  /https?:\/\/[^\s"']*(token|key|signature|sig|access[_-]?token|auth)=/i,
+];
+
+function containsSecretShape(value: string): boolean {
+  return SECRET_SHAPES.some((pattern) => pattern.test(value));
+}
+
+function scrubValue(value: unknown, depth = 0): unknown {
+  if (depth > 3) return REDACTED;
+  if (value === null || value === undefined) return value;
+  if (typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") {
+    if (containsSecretShape(value)) return REDACTED;
+    if (value.length > 200) return `${value.slice(0, 200)}…`;
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => scrubValue(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      // Keys that name themselves as sensitive get dropped outright.
+      if (/token|secret|api[_-]?key|password|authorization|bearer|signature|jwt/i.test(k)) {
+        out[k] = REDACTED;
+        continue;
+      }
+      out[k] = scrubValue(v, depth + 1);
+    }
+    return out;
+  }
+  return REDACTED;
+}
+
+/**
+ * Turn raw `job.metadata` into a bounded, allow-listed, secret-scrubbed
+ * JSON string suitable for rendering. Returns `null` when nothing survives
+ * the filter so the caller can hide the disclosure entirely instead of
+ * showing an empty `{}`.
+ */
+export function redactJobMetadata(
+  metadata: Record<string, unknown> | null | undefined
+): string | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const filtered: Record<string, unknown> = {};
+  let kept = 0;
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!SAFE_METADATA_KEYS.has(key)) continue;
+    filtered[key] = scrubValue(value);
+    kept += 1;
+  }
+  if (kept === 0) return null;
+  let rendered: string;
+  try {
+    rendered = JSON.stringify(filtered, null, 2);
+  } catch {
+    return null;
+  }
+  if (rendered.length > MAX_METADATA_STRING) {
+    rendered = rendered.slice(0, MAX_METADATA_STRING) + "\n… (truncated)";
+  }
+  return rendered;
 }
 
 export interface DocumentsTrustSummary {

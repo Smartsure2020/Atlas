@@ -38,11 +38,37 @@ import {
   useToast,
 } from "../components/ui";
 import { canManage as roleCanManage, type AtlasUiRole } from "../components/AppShell";
-import { humanise, pluralise } from "../lib/format";
+import { pluralise } from "../lib/format";
 import {
   filterInsurersByCoverage,
   type CoverageMode,
 } from "../lib/intake-intelligence";
+
+/**
+ * Format a raw quote-channel string into a single consistent label. Every
+ * variant of email submission collapses to "Email submission" so the
+ * insurer index shows one label per action across the grid rather than
+ * three ("Email", "Email submission", none) as it did before.
+ */
+function formatQuoteChannel(raw: string): string {
+  const trimmed = raw.trim().toLowerCase();
+  if (
+    trimmed === "email" ||
+    trimmed === "email_submission" ||
+    trimmed === "email submission" ||
+    trimmed === "email-submission"
+  ) {
+    return "Email submission";
+  }
+  // Anything else — dedicated portal names, "own_portal", "cardinal" —
+  // renders humanised so we do not paper over legitimately different
+  // channel labels.
+  return raw
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 export default function Insurers({
   role,
@@ -63,6 +89,10 @@ export default function Insurers({
   const [addOpen, setAddOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const requestSeq = useRef(0);
+  // See ManagerDashboard: mirror `hydrated` in a ref so a slow older
+  // request that resolves after a newer success cannot read a stale
+  // `hydrated=false` from its closure and blank the freshly loaded list.
+  const hydratedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +106,7 @@ export default function Insurers({
           setItems(result.insurers);
           setLoadError(null);
           setRefreshError(null);
+          hydratedRef.current = true;
           setHydrated(true);
         })
         .catch((cause: Error) => {
@@ -84,7 +115,7 @@ export default function Insurers({
             cause.message === "not_authenticated"
               ? "Your session has expired. Sign in again to view the insurer list."
               : "The insurer list could not be loaded. The Atlas API did not respond.";
-          if (hydrated) {
+          if (hydratedRef.current) {
             setRefreshError(
               cause.message === "not_authenticated"
                 ? "Your session has expired, so Atlas could not refresh the insurer list. The information shown may be outdated. Sign in again to reload."
@@ -101,11 +132,12 @@ export default function Insurers({
     return () => {
       cancelled = true;
     };
-    // `hydrated` is deliberately not in the dep list — the effect only
-    // re-runs on an explicit refresh (reloadToken), and the closure
-    // captured on that re-render already reflects the latest hydrated
-    // value. Listing hydrated here would fire a second fetch the moment
-    // the first successful load flipped it from false to true.
+    // `hydrated` is deliberately not in the dep list — listing it would
+    // fire a second fetch the moment the first successful load flipped
+    // it from false to true. Callers that need to inspect the live
+    // hydration state read `hydratedRef.current` inside the resolved
+    // handlers, which the setState path keeps in lock-step with the
+    // state itself.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadToken]);
 
@@ -287,9 +319,9 @@ export default function Insurers({
             <li key={insurer.id}>
               <button type="button" className="atlas-insurer-card" onClick={() => onOpen(insurer.id)}>
                 <span className="atlas-insurer-card__name">{insurer.name}</span>
-                <span className="atlas-text-dense atlas-text-muted">
-                  {insurer.notes || "No notes recorded."}
-                </span>
+                {insurer.notes && (
+                  <span className="atlas-text-dense atlas-text-muted">{insurer.notes}</span>
+                )}
                 <span className="atlas-insurer-card__meta">
                   {insurer.active_appetite_count > 0 ? (
                     <StatusBadge
@@ -308,9 +340,35 @@ export default function Insurers({
                       }}
                     />
                   )}
-                  {insurer.quote_channel && (
+                  {/*
+                   * Channel pill: always rendered, either as the
+                   * insurer's actual quote channel or as an explicit
+                   * "No email channel on file" absence pill. Every card
+                   * carries exactly one channel state so the grid never
+                   * shows three different action-completeness stories
+                   * for the same object type.
+                   */}
+                  {insurer.quote_channel ? (
                     <span className="atlas-badge atlas-badge--quiet">
-                      <span className="atlas-badge__label">{humanise(insurer.quote_channel)}</span>
+                      <span className="atlas-badge__label">
+                        {formatQuoteChannel(insurer.quote_channel)}
+                      </span>
+                    </span>
+                  ) : (
+                    /*
+                     * Absence is not an error state — the insurer may just
+                     * not have a channel recorded yet — but it must not
+                     * read the same as a real channel value. The pill uses
+                     * the dashed outline treatment plus an explicit "Add"
+                     * prefix so it distinguishes itself in both colour
+                     * tone and text, and adds the invitation to act.
+                     */
+                    <span
+                      className="atlas-badge atlas-badge--outline"
+                      title="Add a submission channel on the insurer detail screen."
+                    >
+                      <span aria-hidden="true">+ </span>
+                      <span className="atlas-badge__label">Add submission channel</span>
                     </span>
                   )}
                 </span>

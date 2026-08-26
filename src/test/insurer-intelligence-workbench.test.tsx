@@ -42,7 +42,9 @@ vi.mock("../lib/insurers", () => ({
 
 // Prevent the real atlas API client from loading (Insurers/DocumentsPanel
 // do not use it, but AddRuleForm might transitively).
-vi.mock("../lib/atlas", () => ({}));
+vi.mock("../lib/atlas", () => ({
+  api: vi.fn(async () => ({ ok: true })),
+}));
 
 import InsurerDetail from "../pages/InsurerDetail";
 import { ToastProvider } from "../components/ui";
@@ -669,5 +671,60 @@ describe("Insurer intelligence workbench", () => {
     // on Awaiting review).
     const proposedTab = await screen.findByRole("tab", { name: /Awaiting review/i });
     expect(proposedTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("keeps the user on Active matrix across a same-insurer refresh when documents change", async () => {
+    // Manager lands on Active (only active rules present, no proposals).
+    // A real load() call — driven by EditRuleDrawer.onSaved after saving
+    // an edit on the active rule — must not re-run the initial-tab
+    // priority and reroute the manager to Guidelines just because the
+    // refreshed payload now carries a document.
+    const activeRule = rule({ id: "r1", is_active: true });
+    getInsurerMock
+      .mockResolvedValueOnce({
+        ok: true,
+        insurer: insurer({ active_appetite_count: 1 }),
+        documents: [],
+        appetite: [activeRule],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        insurer: insurer({ active_appetite_count: 1 }),
+        documents: [doc({ id: "doc_new", file_name: "new-guideline.pdf" })],
+        appetite: [activeRule],
+      });
+    editAppetiteMock.mockResolvedValue({ ok: true });
+
+    const user = userEvent.setup();
+    renderPage();
+
+    const activeTab = await screen.findByRole("tab", { name: /Active matrix/i });
+    await waitFor(() => {
+      expect(activeTab).toHaveAttribute("aria-selected", "true");
+    });
+
+    await user.click(screen.getByRole("button", { name: /Edit rule/i }));
+    await user.click(await screen.findByRole("button", { name: /Save rule/i }));
+
+    await waitFor(() => {
+      expect(editAppetiteMock).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(getInsurerMock).toHaveBeenCalledTimes(2);
+    });
+
+    // The refresh landed — Active matrix is still the selected tab, not
+    // silently rerouted to Guidelines by the initial-tab priority.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: /Active matrix/i })
+      ).toHaveAttribute("aria-selected", "true");
+    });
+
+    // The refreshed document payload was actually accepted: switching to
+    // Guidelines shows the document from the second getInsurer response,
+    // proving a genuine reload occurred rather than a parent-only rerender.
+    await user.click(screen.getByRole("tab", { name: /Guidelines/i }));
+    expect(await screen.findByText("new-guideline.pdf")).toBeInTheDocument();
   });
 });

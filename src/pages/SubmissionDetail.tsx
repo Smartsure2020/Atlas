@@ -15,7 +15,7 @@
  * and every decision still goes through the same audited endpoint.
  */
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   getSubmission,
   runExtraction,
@@ -125,6 +125,91 @@ interface SubmissionPayload {
   jobs?: Partial<Record<ExpensiveJob, JobRecord>>;
 }
 
+/**
+ * Narrow parser for the submission record the Worker sends back. Replaces
+ * the previous `payloadRaw.submission as unknown as SubmissionRecord`
+ * double cast, which silently disabled the type check on the shape the
+ * render layer relies on. Only `id` and `status` are required; the rest
+ * of the fields are read through nullable accessors on the same shape,
+ * so a missing optional never throws — but a missing id/status means
+ * the payload is not actually a submission and we throw a targeted error
+ * instead of silently rendering an unusable workspace.
+ */
+export function toSubmissionRecord(raw: unknown): SubmissionRecord {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("Submission payload is not an object");
+  }
+  const source = raw as Record<string, unknown>;
+  if (typeof source.id !== "string" || source.id.length === 0) {
+    throw new Error("Submission payload is missing id");
+  }
+  if (typeof source.status !== "string") {
+    throw new Error("Submission payload is missing status");
+  }
+  const asStringOrNull = (key: string): string | null => {
+    const value = source[key];
+    return typeof value === "string" ? value : null;
+  };
+  const asBoolOrNull = (key: string): boolean | null => {
+    const value = source[key];
+    return typeof value === "boolean" ? value : null;
+  };
+  return {
+    id: source.id,
+    client_name: asStringOrNull("client_name"),
+    broker_name: asStringOrNull("broker_name"),
+    broker_email: asStringOrNull("broker_email"),
+    request_type: asStringOrNull("request_type"),
+    status: source.status,
+    queue_status: asStringOrNull("queue_status"),
+    line_of_business: asStringOrNull("line_of_business"),
+    priority: asStringOrNull("priority"),
+    next_action: asStringOrNull("next_action"),
+    due_at: asStringOrNull("due_at"),
+    assigned_to: asStringOrNull("assigned_to"),
+    assigned_underwriter: asStringOrNull("assigned_underwriter"),
+    pilot_flag: asBoolOrNull("pilot_flag"),
+    pilot_notes: asStringOrNull("pilot_notes"),
+    assigned_to_email: asStringOrNull("assigned_to_email"),
+    created_at: typeof source.created_at === "string" ? source.created_at : "",
+    updated_at: typeof source.updated_at === "string" ? source.updated_at : "",
+  };
+}
+
+/**
+ * Narrow parser for the optional `jobs` map. Keeps only the three
+ * expensive-job keys we know how to render, and re-shapes each entry
+ * into a plain JobRecord. Anything unrecognised is dropped rather than
+ * cast blindly.
+ */
+export function toJobsMap(
+  raw: unknown
+): Partial<Record<ExpensiveJob, JobRecord>> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const source = raw as Record<string, unknown>;
+  const out: Partial<Record<ExpensiveJob, JobRecord>> = {};
+  for (const key of EXPENSIVE_JOBS) {
+    const value = source[key];
+    if (!value || typeof value !== "object") continue;
+    const entry = value as Record<string, unknown>;
+    out[key] = {
+      id: typeof entry.id === "string" ? entry.id : undefined,
+      status: typeof entry.status === "string" ? entry.status : undefined,
+      progress_percent:
+        typeof entry.progress_percent === "number" ? entry.progress_percent : undefined,
+      current_step: typeof entry.current_step === "string" ? entry.current_step : null,
+      created_at: typeof entry.created_at === "string" ? entry.created_at : undefined,
+      completed_at: typeof entry.completed_at === "string" ? entry.completed_at : undefined,
+      error_message: typeof entry.error_message === "string" ? entry.error_message : null,
+      cancellation_requested:
+        typeof entry.cancellation_requested === "boolean"
+          ? entry.cancellation_requested
+          : undefined,
+    };
+  }
+  return out;
+}
+
 export interface WorkspaceData {
   payload: SubmissionPayload;
   recommendation: Recommendation | null;
@@ -159,32 +244,62 @@ export default function SubmissionDetail({
   const [forceRetry, setForceRetry] = useState(false);
   const [assignmentOpen, setAssignmentOpen] = useState(false);
 
+  // The five dependent GETs are addressed by their result identifier so a
+  // poll knows whether the recommendation / quote review / decision on the
+  // workspace has actually changed. When only the submission's job
+  // heartbeat updates, none of these need re-fetching.
+  const dependentSignatureRef = useRef<string>("");
+
   const load = useCallback(
-    async (options: { silent?: boolean } = {}) => {
+    async (options: { silent?: boolean; dependents?: boolean } = {}) => {
+      const dependents = options.dependents !== false;
       if (!options.silent) setLoading(true);
       try {
         // One round of parallel reads for the whole workspace. Failures on the
         // optional pieces must not blank the record.
-        const [payloadRaw, recommendation, quote, decision, missing] = await Promise.all([
+        const results = await Promise.all([
           getSubmission(submissionId),
-          getRecommendation(submissionId).catch(() => ({ recommendation: null })),
-          getQuoteReview(submissionId).catch(() => ({ quote_review: null, sections: [] })),
-          getDecision(submissionId).catch(() => ({ decision: null })),
-          listMissingInfo(submissionId).catch(() => ({ items: [] })),
+          dependents
+            ? getRecommendation(submissionId).catch(() => ({ recommendation: null }))
+            : Promise.resolve(null),
+          dependents
+            ? getQuoteReview(submissionId).catch(() => ({ quote_review: null, sections: [] }))
+            : Promise.resolve(null),
+          dependents
+            ? getDecision(submissionId).catch(() => ({ decision: null }))
+            : Promise.resolve(null),
+          dependents ? listMissingInfo(submissionId).catch(() => ({ items: [] })) : Promise.resolve(null),
         ]);
+        const payloadRaw = results[0];
+        // Narrow parser instead of a double `as unknown as SubmissionRecord`
+        // cast: keep the wider Worker-typed submission shape available,
+        // and hand-verify the fields the render layer actually reads.
+        // If a field is missing/wrong-shaped we throw a targeted error
+        // rather than pretending we have a valid record.
         const payload: SubmissionPayload = {
-          submission: payloadRaw.submission as unknown as SubmissionRecord,
+          submission: toSubmissionRecord(payloadRaw.submission),
           documents: payloadRaw.documents,
           extraction: payloadRaw.extraction,
-          jobs: payloadRaw.jobs as Partial<Record<ExpensiveJob, JobRecord>> | undefined,
+          jobs: toJobsMap(payloadRaw.jobs),
         };
-        setData({
-          payload,
-          recommendation: recommendation.recommendation,
-          quoteReview: quote.quote_review,
-          quoteSections: quote.sections,
-          decision: decision.decision,
-          missingInfo: missing.items,
+        setData((prev) => {
+          if (!dependents && prev) {
+            // Poll path — only the submission was re-fetched; keep the
+            // last-known dependent slices in place.
+            return { ...prev, payload };
+          }
+          const recommendation = results[1] as Awaited<ReturnType<typeof getRecommendation>> | null;
+          const quote = results[2] as Awaited<ReturnType<typeof getQuoteReview>> | null;
+          const decision = results[3] as Awaited<ReturnType<typeof getDecision>> | null;
+          const missing = results[4] as Awaited<ReturnType<typeof listMissingInfo>> | null;
+          return {
+            payload,
+            recommendation: recommendation?.recommendation ?? null,
+            quoteReview: quote?.quote_review ?? null,
+            quoteSections: quote?.sections ?? [],
+            decision: decision?.decision ?? null,
+            missingInfo: missing?.items ?? [],
+          };
         });
         setLoadError(null);
       } catch (cause) {
@@ -202,23 +317,98 @@ export default function SubmissionDetail({
   );
 
   useEffect(() => {
-    void load();
+    // Cancellation gate closes the StrictMode-remount duplicate: the
+    // discarded mount's fetch is scheduled behind a microtask, and the
+    // cleanup flips `cancelled` before that microtask drains — so no
+    // duplicate GET reaches the network for /submission, /recommendation,
+    // /quote-review, /decision, or /missing-info.
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) void load();
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [load]);
 
   const jobs = data?.payload.jobs;
+
+  // Poll only while expensive work is genuinely in flight. The poll
+  // fetches only the submission (so we pick up job progress / job
+  // completion + the new payload). When the completion changes any of
+  // the dependent identifiers below (recommendation, quote review,
+  // decision, missing information), a follow-up read refreshes just
+  // those slices. This replaces the previous 5-endpoint every-3s poll,
+  // which under load ran 50–200 authenticated requests per active
+  // submission per 30–120s window.
+  const workInFlight = EXPENSIVE_JOBS.some((key) =>
+    ["queued", "running"].includes(jobs?.[key]?.status ?? "")
+  );
   const jobSignature = EXPENSIVE_JOBS.map(
     (key) => `${key}:${jobs?.[key]?.status ?? "none"}:${jobs?.[key]?.progress_percent ?? 0}`
   ).join("|");
 
-  // Poll only while expensive work is genuinely in flight.
-  const workInFlight = EXPENSIVE_JOBS.some((key) =>
-    ["queued", "running"].includes(jobs?.[key]?.status ?? "")
-  );
+  // Dependent-result identifiers. When the extraction / recommendation /
+  // quote-review completes and its result identifier changes, refresh
+  // the dependent slices in one follow-up read. This runs regardless of
+  // whether the workInFlight poll is active, so a manual refresh that
+  // lands a fresh recommendation also picks up the follow-through.
+  const dependentSignature = [
+    data?.payload.extraction?.id ?? "none",
+    data?.payload.extraction?.reviewed_json ? "reviewed" : "raw",
+    data?.recommendation?.id ?? "none",
+    data?.quoteReview?.id ?? "none",
+    data?.decision?.id ?? "none",
+    data?.payload.jobs?.extraction?.status ?? "none",
+    data?.payload.jobs?.recommendation?.status ?? "none",
+    data?.payload.jobs?.quote_review?.status ?? "none",
+  ].join("|");
+
+  useEffect(() => {
+    if (!data) return;
+    if (dependentSignatureRef.current === dependentSignature) return;
+    // The first time we settle the signature we record it and skip the
+    // follow-up read — the initial load already fetched everything.
+    const first = dependentSignatureRef.current === "";
+    dependentSignatureRef.current = dependentSignature;
+    if (first) return;
+    void load({ silent: true });
+    // dependentSignature is deliberately the only trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dependentSignature]);
 
   useEffect(() => {
     if (!workInFlight) return;
-    const timer = window.setInterval(() => void load({ silent: true }), 3000);
-    return () => window.clearInterval(timer);
+    let timer: number | null = null;
+    const tick = () => {
+      if (document.visibilityState !== "visible") return;
+      void load({ silent: true, dependents: false });
+    };
+    const start = () => {
+      if (timer !== null) return;
+      timer = window.setInterval(tick, 3000);
+    };
+    const stop = () => {
+      if (timer === null) return;
+      window.clearInterval(timer);
+      timer = null;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        // Immediately pick up whatever changed while the tab was hidden,
+        // then resume polling.
+        void load({ silent: true, dependents: false });
+        start();
+      } else {
+        stop();
+      }
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
     // jobSignature drives restart when a stage advances.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workInFlight, jobSignature, load]);
@@ -276,6 +466,9 @@ export default function SubmissionDetail({
     decision: data.decision,
     openMissingInfo: openMissingInfo.length,
     canManage,
+    activeJob: EXPENSIVE_JOBS.find((key) =>
+      ["queued", "running"].includes(data.payload.jobs?.[key]?.status ?? "")
+    ),
   });
 
   const tabs: TabDefinition[] = [
@@ -723,7 +916,15 @@ interface NextAction {
   label: string;
   why: string;
   /** The control the primary button should be. */
-  kind: "extract" | "review-risk" | "run-recommendation" | "review-recommendation" | "chase-info" | "record-decision" | "none";
+  kind:
+    | "extract"
+    | "review-risk"
+    | "run-recommendation"
+    | "review-recommendation"
+    | "chase-info"
+    | "record-decision"
+    | "in-flight"
+    | "none";
   tab: SubmissionTab;
   attention: boolean;
 }
@@ -737,8 +938,42 @@ function deriveNextAction(input: {
   decision: Decision | null;
   openMissingInfo: number;
   canManage: boolean;
+  activeJob?: ExpensiveJob;
 }): NextAction {
-  const { hasExtraction, reviewed, recommendation, quoteReview, decision, openMissingInfo, canManage } = input;
+  const { hasExtraction, reviewed, recommendation, quoteReview, decision, openMissingInfo, canManage, activeJob } =
+    input;
+
+  // A job in flight overrides every other next-action call — the header
+  // primary button and the Next-action callout both reflect that the
+  // expensive step is already running rather than inviting the user to
+  // kick another one off.
+  if (activeJob === "extraction") {
+    return {
+      label: "Extraction in progress",
+      why: "Atlas is currently reading the documents. The recommendation and quote review become available once this finishes.",
+      kind: "in-flight",
+      tab: "overview",
+      attention: false,
+    };
+  }
+  if (activeJob === "recommendation") {
+    return {
+      label: "Recommendation in progress",
+      why: "Atlas is scoring insurers against the reviewed risk information.",
+      kind: "in-flight",
+      tab: "recommendation",
+      attention: false,
+    };
+  }
+  if (activeJob === "quote_review") {
+    return {
+      label: "Quote review in progress",
+      why: "Atlas is comparing the quoted terms against the reviewed risk information.",
+      kind: "in-flight",
+      tab: "quote-review",
+      attention: false,
+    };
+  }
 
   if (!hasExtraction) {
     return {
@@ -829,6 +1064,23 @@ function NextActionButton({
   if (action.kind === "none") {
     return (
       <Button iconAfter="arrow-right" onClick={() => onGoToTab(action.tab)}>
+        {action.label}
+      </Button>
+    );
+  }
+  if (action.kind === "in-flight") {
+    // While a job is running the primary is disabled — a second "Run
+    // extraction" click on top of the running one would either be
+    // rejected by the API or (worse) queue a duplicate. The button
+    // still routes to the tab the job belongs to for context.
+    return (
+      <Button
+        variant="primary"
+        loading
+        loadingLabel={action.label}
+        disabled
+        onClick={() => onGoToTab(action.tab)}
+      >
         {action.label}
       </Button>
     );
@@ -1093,9 +1345,15 @@ function ExtractionStepTracker({ job }: { job: JobRecord | undefined }) {
   const done = job?.status === "completed";
   const failed = job?.status === "failed";
   const running = job?.status === "queued" || job?.status === "running";
+  // No extraction job at all: render every dot as outlined and the
+  // status label as "Not started". Nothing about the widget should imply
+  // Atlas is currently reading anything.
+  const notStarted = !job;
   const current = done
     ? EXTRACTION_STEPS.length - 1
-    : stepIndex(job?.current_step, job?.progress_percent ?? 0);
+    : notStarted
+      ? -1
+      : stepIndex(job?.current_step, job?.progress_percent ?? 0);
 
   return (
     <div style={{ padding: "4px 0" }}>
@@ -1248,6 +1506,7 @@ function ProcessingRail({ jobs, onCancel }: { jobs: Partial<Record<ExpensiveJob,
   const extractionJob = jobs.extraction;
   const extractionRunning = extractionJob?.status === "queued" || extractionJob?.status === "running";
   const extractionCancelling = extractionRunning && extractionJob?.cancellation_requested;
+  const extractionNotStarted = !extractionJob;
 
   return (
     <div className="atlas-workspace__rail-card">
@@ -1258,6 +1517,17 @@ function ProcessingRail({ jobs, onCancel }: { jobs: Partial<Record<ExpensiveJob,
           {JOB_LABELS.extraction}
         </span>
         <ExtractionStepTracker job={extractionJob} />
+        {extractionNotStarted && (
+          <p className="atlas-text-muted" style={{ fontSize: 12, marginTop: 4 }}>
+            Not started
+          </p>
+        )}
+        {/*
+         * Cancel is only rendered while a job is genuinely queued or
+         * running. On a fresh submission with no extraction requested
+         * the button is hidden entirely — never a red action next to
+         * dots that claim nothing is in flight.
+         */}
         {extractionRunning && extractionJob?.id && onCancel && (
           <button
             type="button"
@@ -1269,7 +1539,7 @@ function ProcessingRail({ jobs, onCancel }: { jobs: Partial<Record<ExpensiveJob,
             {extractionCancelling ? "Cancelling…" : "Cancel extraction"}
           </button>
         )}
-        {!extractionRunning && extractionJob?.status !== "completed" && (extractionJob?.completed_at || extractionJob?.created_at) && (
+        {!extractionRunning && extractionJob && extractionJob.status !== "completed" && (extractionJob.completed_at || extractionJob.created_at) && (
           <p className="atlas-text-muted" style={{ fontSize: 12, marginTop: 4 }}>
             {formatRelative(extractionJob.completed_at ?? extractionJob.created_at)}
           </p>
@@ -1583,7 +1853,7 @@ function PilotRailCard({
               style={{
                 padding: "var(--atlas-space-2)",
                 marginBottom: "var(--atlas-space-2)",
-                borderRadius: "var(--atlas-radius)",
+                borderRadius: "var(--atlas-radius-card)",
                 border: "1px solid var(--atlas-border)",
                 fontSize: 13,
               }}

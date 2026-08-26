@@ -3,7 +3,7 @@
  * ----------------------------------------------------------------------------
  * A strict three-part hierarchy:
  *
- *   1. Safety boundary — Atlas never sends anything on your behalf.
+ *   1. Safety boundary — Atlas never sends anything itself.
  *   2. Draft workspace — pick a draft type, generate, review, copy, save.
  *   3. Communication record — history of what has been drafted, copied and
  *      recorded as sent manually.
@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { generateEmail, type EmailDraft } from "../lib/decisions";
+import { generateEmail } from "../lib/decisions";
 import {
   generateDraft,
   listCommunications,
@@ -37,7 +37,11 @@ import {
   useToast,
 } from "../components/ui";
 import { Icon } from "../components/Icon";
-import { COMMUNICATION_TYPE_LABELS, communicationStatus } from "../lib/status";
+import {
+  ATLAS_NEVER_SENDS_MESSAGE,
+  COMMUNICATION_TYPE_LABELS,
+  communicationStatus,
+} from "../lib/status";
 import { formatDateTime } from "../lib/format";
 import type { WorkspaceData } from "./SubmissionDetail";
 import {
@@ -93,6 +97,12 @@ export default function CommunicationsPanel({
   const [warning, setWarning] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmSent, setConfirmSent] = useState<CommunicationRecord | null>(null);
+  // Guards the manual-send confirmation from double-submitting. A second
+  // click on the primary must never dispatch a second updateCommunication
+  // request — that endpoint carries `mark_related_missing_requested:true`
+  // as a side effect, so a duplicate call re-flips linked missing-info
+  // rows and doubles the audit event.
+  const [recording, setRecording] = useState(false);
   // Email drafts are always persisted server-side on generation (the endpoint
   // inserts into atlas_communications before returning). When Supabase insert
   // fails the response carries draft_persisted:false; recovery is to
@@ -141,8 +151,10 @@ export default function CommunicationsPanel({
     setError(null);
     setWarning(null);
     try {
-      const result: EmailDraft & { draft_persisted?: boolean; based_on?: string } =
-        (await generateEmail(submissionId, type)) as never;
+      // The endpoint already types both draft_persisted and based_on on
+      // the EmailDraft response; no cast is needed and `as never` would
+      // silently disable type checking on the intermediate value.
+      const result = await generateEmail(submissionId, type);
       setActive({ source: "email", type });
       setDraft({ subject: result.subject, body: result.body });
       setEmailPersistedByServer(result.draft_persisted !== false);
@@ -218,6 +230,11 @@ export default function CommunicationsPanel({
   }
 
   async function recordManualSend(record: CommunicationRecord) {
+    // Synchronous re-entry guard. A rapid second click on the confirm
+    // button (or a keyboard Enter double-tap while the request is in
+    // flight) must never dispatch a second updateCommunication call.
+    if (recording) return;
+    setRecording(true);
     try {
       await updateCommunication(record.id, {
         status: "sent_manually",
@@ -229,6 +246,7 @@ export default function CommunicationsPanel({
     } catch {
       setError("The communication record could not be updated.");
     } finally {
+      setRecording(false);
       setConfirmSent(null);
     }
   }
@@ -261,7 +279,7 @@ export default function CommunicationsPanel({
 
   return (
     <div className="atlas-stack">
-      <Notice tone="info" title="Atlas never sends anything on your behalf">
+      <Notice tone="info" title={ATLAS_NEVER_SENDS_MESSAGE}>
         Every draft below is copyable text. Review and edit it, paste it into your mail client, then
         record the manual send here so the audit history stays accurate.
       </Notice>
@@ -485,7 +503,21 @@ export default function CommunicationsPanel({
         open={confirmSent !== null}
         title="Record this communication as sent manually?"
         confirmLabel="Record manual send"
-        onCancel={() => setConfirmSent(null)}
+        working={recording}
+        // Recording a manual send also flips every linked missing-info
+        // item to "requested" — irreversibly changing the workflow state
+        // of items outside the record on screen. When that fan-out is
+        // non-zero the dialog adopts the destructive treatment so the
+        // consequence-count copy is backed by a matching visual tone,
+        // and a mistrigger cannot be dismissed as a low-consequence
+        // confirmation.
+        destructive={
+          confirmSent !== null && countLinkedMissing(confirmSent, openMissingIds) > 0
+        }
+        onCancel={() => {
+          if (recording) return;
+          setConfirmSent(null);
+        }}
         onConfirm={() => confirmSent && recordManualSend(confirmSent)}
         body={
           <>
@@ -554,7 +586,7 @@ function CommunicationRow({
               margin: 0,
               padding: "var(--atlas-space-3)",
               background: "var(--atlas-surface-muted)",
-              borderRadius: "var(--atlas-radius)",
+              borderRadius: "var(--atlas-radius-card)",
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
               fontFamily: "var(--atlas-font-mono)",

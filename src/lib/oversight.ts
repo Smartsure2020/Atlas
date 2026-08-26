@@ -73,7 +73,29 @@ export function barWidth(count: number, max: number, floor = 4): number {
   return Math.min(100, Math.max(floor, Math.round(raw)));
 }
 
-export type ExceptionScope = "period" | "recent";
+export type ExceptionScope = "period" | "recent" | "period_capped";
+
+/**
+ * Turn an ExceptionScope into the short suffix rendered next to a metric
+ * value. Exhaustive by construction — TypeScript will refuse the exit path
+ * if a new scope member is added to the union without adding a case here,
+ * which is what stopped the previous silent "In (empty)" render on the
+ * newly added `period_capped` value from slipping through unnoticed.
+ */
+export function exceptionScopeSuffix(scope: ExceptionScope, periodLabel: string): string {
+  switch (scope) {
+    case "period":
+      return `In ${periodLabel.toLowerCase()}`;
+    case "period_capped":
+      return `In ${periodLabel.toLowerCase()} — capped list`;
+    case "recent":
+      return "Across recent activity";
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
+}
 
 export interface ExceptionMetric {
   key: string;
@@ -126,9 +148,15 @@ export function exceptionMetrics(stats: ManagerStats): ExceptionMetric[] {
     },
     {
       key: "attention",
-      label: "Recent reviews shown",
+      // Renamed from "Recent reviews shown" — the tile value is a
+      // capped count (worker caps at ten), not a genuine period total.
+      // Reading only the tile value + scope previously suggested "10
+      // reviews needed attention in this period" which is not real.
+      // "shown below" + the period_capped scope make the cap explicit
+      // in both the label and the tag.
+      label: "Recent reviews shown below",
       value: stats.recent_reviews_needing_attention.length,
-      scope: "period",
+      scope: "period_capped",
       hint: "Referred, declined, information-required or manual-review reviews shown below. Capped at the ten most recent in the selected period.",
       attention: stats.recent_reviews_needing_attention.length > 0,
     },

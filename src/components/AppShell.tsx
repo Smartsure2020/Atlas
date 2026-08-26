@@ -14,7 +14,7 @@
  * never the security boundary — the Worker enforces every one of these.
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon, type IconName } from "./Icon";
 import { IconButton } from "./ui";
 import { initialsOf } from "../lib/format";
@@ -103,7 +103,47 @@ export function AppShell({
     }
   });
   const [navOpen, setNavOpen] = useState(false);
+  // Compact-mode search: on narrow viewports the search input collapses
+  // to an icon-only trigger and the role pill hides behind the avatar,
+  // so the top bar no longer clips at 375 or 320 px. Expanding the
+  // trigger swaps it for the full field for one-off searches.
+  const [searchExpanded, setSearchExpanded] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const active = routeSection(route);
+
+  // Focus/dismissal management for the mobile expand-search sheet.
+  // Opening moves focus into the search input; closing restores focus to
+  // the trigger; Escape dismisses irrespective of whether the field is
+  // empty. Dismissal never issues a write — the query itself is
+  // preserved so the reader can reopen and continue where they left off.
+  useEffect(() => {
+    if (searchExpanded) {
+      searchInputRef.current?.focus();
+    } else {
+      // Only restore focus to the trigger when the trigger is currently
+      // rendered (the mobile-only breakpoint); otherwise let native
+      // focus flow continue.
+      const trigger = searchTriggerRef.current;
+      if (trigger && document.activeElement === searchInputRef.current) {
+        trigger.focus();
+      }
+    }
+  }, [searchExpanded]);
+
+  useEffect(() => {
+    if (!searchExpanded) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setSearchExpanded(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [searchExpanded]);
+
+  const closeSearch = useCallback(() => setSearchExpanded(false), []);
 
   useEffect(() => {
     try {
@@ -199,7 +239,25 @@ export function AppShell({
             onClick={() => setCollapsed((value) => !value)}
           />
 
-          <div className="atlas-topbar__search">
+          {searchExpanded && (
+            <div
+              className="atlas-topbar__search-scrim"
+              onClick={closeSearch}
+              aria-hidden="true"
+            />
+          )}
+
+          <div
+            className={[
+              "atlas-topbar__search",
+              searchExpanded ? "atlas-topbar__search--expanded" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            role={searchExpanded ? "dialog" : undefined}
+            aria-label={searchExpanded ? "Search submissions" : undefined}
+            aria-modal={searchExpanded ? true : undefined}
+          >
             <div className="atlas-search">
               <label className="atlas-sr-only" htmlFor="atlas-global-search">
                 Search submissions by client, broker or request type
@@ -207,21 +265,41 @@ export function AppShell({
               <Icon name="search" size={15} className="atlas-search__icon" />
               <input
                 id="atlas-global-search"
+                ref={searchInputRef}
                 type="search"
                 className="atlas-input"
                 placeholder="Search submissions…"
                 value={searchValue}
                 onChange={(event) => onSearch(event.target.value)}
               />
+              {searchExpanded && (
+                <IconButton
+                  icon="close"
+                  label="Close search"
+                  className="atlas-topbar__search-close"
+                  onClick={closeSearch}
+                />
+              )}
             </div>
           </div>
+
+          <IconButton
+            icon="search"
+            label={searchExpanded ? "Close search" : "Search submissions"}
+            className="atlas-topbar__search-trigger"
+            ref={searchTriggerRef}
+            onClick={() => setSearchExpanded((value) => !value)}
+          />
 
           <div className="atlas-topbar__spacer" />
 
           <div className="atlas-topbar__actions">
-            <span className="atlas-topbar__env" title="Atlas is decision-support only">
+            <span
+              className="atlas-topbar__env"
+              title={`Atlas is decision-support only — signed in as ${ROLE_LABELS[role] ?? role}`}
+            >
               <Icon name="info" size={12} />
-              Decision-support
+              <span className="atlas-topbar__env-label">Decision-support</span>
             </span>
             <IconButton icon="sign-out" label="Sign out" onClick={onSignOut} />
           </div>

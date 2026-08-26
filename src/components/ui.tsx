@@ -8,6 +8,7 @@
 
 import {
   createContext,
+  forwardRef,
   useCallback,
   useContext,
   useEffect,
@@ -40,6 +41,11 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   icon?: IconName;
   iconAfter?: IconName;
   block?: boolean;
+  /** Escape hatch to attach a ref to the underlying <button> without
+   *  forwardRef; used by focus-management call sites (see ConfirmDialog).
+   *  Accepts a mutable ref (`useRef<HTMLButtonElement | null>()`) or a
+   *  callback ref. */
+  buttonRef?: React.Ref<HTMLButtonElement | null>;
 }
 
 const VARIANT_CLASS: Record<ButtonVariant, string> = {
@@ -62,6 +68,7 @@ export function Button({
   children,
   disabled,
   type = "button",
+  buttonRef,
   ...rest
 }: ButtonProps) {
   const classes = [
@@ -75,7 +82,13 @@ export function Button({
     .join(" ");
 
   return (
-    <button {...rest} type={type} className={classes} disabled={disabled || loading}>
+    <button
+      {...rest}
+      ref={buttonRef as React.LegacyRef<HTMLButtonElement>}
+      type={type}
+      className={classes}
+      disabled={disabled || loading}
+    >
       {loading ? (
         <span className="atlas-btn__spinner" aria-hidden="true" />
       ) : (
@@ -95,30 +108,34 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: "sm" | "md";
 }
 
-export function IconButton({
-  icon,
-  label,
-  variant = "ghost",
-  size = "md",
-  className,
-  type = "button",
-  ...rest
-}: IconButtonProps) {
-  const classes = [
-    "atlas-btn",
-    "atlas-btn--icon",
-    VARIANT_CLASS[variant],
-    size === "sm" ? "atlas-btn--sm" : "",
-    className ?? "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <button {...rest} type={type} className={classes} aria-label={label} title={label}>
-      <Icon name={icon} />
-    </button>
-  );
-}
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
+  function IconButton(
+    { icon, label, variant = "ghost", size = "md", className, type = "button", ...rest },
+    ref
+  ) {
+    const classes = [
+      "atlas-btn",
+      "atlas-btn--icon",
+      VARIANT_CLASS[variant],
+      size === "sm" ? "atlas-btn--sm" : "",
+      className ?? "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      <button
+        ref={ref}
+        {...rest}
+        type={type}
+        className={classes}
+        aria-label={label}
+        title={label}
+      >
+        <Icon name={icon} />
+      </button>
+    );
+  }
+);
 
 /* ===========================================================================
    Status badge — the single badge system for the whole product
@@ -952,6 +969,47 @@ export function ProgressStages({
 }
 
 /* ===========================================================================
+   Horizontal fade hook
+   ---------------------------------------------------------------------------
+   Toggles a `--fade-right` custom property on a horizontally scrollable
+   strip. The static CSS mask always faded the right edge, which left a
+   permanent shadow over the last tab/filter even when the reader had
+   scrolled to the end. Consumers apply the mask conditionally on the
+   custom property, so the fade only renders while there is more content
+   to reach.
+   =========================================================================== */
+
+export function useHorizontalFade(ref: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const overflowing = el.scrollWidth > el.clientWidth + 1;
+      const atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+      el.style.setProperty("--fade-right", overflowing && !atEnd ? "1" : "0");
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    let observer: ResizeObserver | undefined;
+    const RO: typeof ResizeObserver | undefined =
+      typeof globalThis !== "undefined"
+        ? (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
+        : undefined;
+    if (RO) {
+      observer = new RO(update);
+      observer.observe(el);
+    } else {
+      window.addEventListener("resize", update);
+    }
+    return () => {
+      el.removeEventListener("scroll", update);
+      if (observer) observer.disconnect();
+      else window.removeEventListener("resize", update);
+    };
+  }, [ref]);
+}
+
+/* ===========================================================================
    Tabs
    =========================================================================== */
 
@@ -975,6 +1033,8 @@ export function Tabs({
   label: string;
 }) {
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  useHorizontalFade(scrollRef);
 
   function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     const index = tabs.findIndex((tab) => tab.id === active);
@@ -992,7 +1052,13 @@ export function Tabs({
   }
 
   return (
-    <div className="atlas-tabs" role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+    <div
+      ref={scrollRef}
+      className="atlas-tabs"
+      role="tablist"
+      aria-label={label}
+      onKeyDown={onKeyDown}
+    >
       {tabs.map((tab) => (
         <button
           key={tab.id}
@@ -1049,9 +1115,9 @@ const FOCUSABLE =
 function useFocusTrap(
   containerRef: React.RefObject<HTMLElement>,
   onDismiss: () => void,
-  options: { dismissOnEscape?: boolean } = {}
+  options: { dismissOnEscape?: boolean; initialFocusRef?: React.RefObject<HTMLElement | null> } = {}
 ) {
-  const { dismissOnEscape = true } = options;
+  const { dismissOnEscape = true, initialFocusRef } = options;
   const previouslyFocused = useRef<HTMLElement | null>(null);
   // Hold the latest handler and option in refs so the trap installs exactly
   // once for the surface's open lifetime. Keying the effect on the handler
@@ -1063,13 +1129,25 @@ function useFocusTrap(
   onDismissRef.current = onDismiss;
   const dismissOnEscapeRef = useRef(dismissOnEscape);
   dismissOnEscapeRef.current = dismissOnEscape;
+  // Same treatment for the optional initial-focus target so a
+  // caller-supplied ref (typically a stable one created at the parent's
+  // top level) reaches the effect without re-running it.
+  const initialFocusRefRef = useRef(initialFocusRef);
+  initialFocusRefRef.current = initialFocusRef;
 
   useEffect(() => {
     previouslyFocused.current = document.activeElement as HTMLElement | null;
     const container = containerRef.current;
     if (container) {
+      // Prefer the caller-supplied initial focus target when it resolves —
+      // this lets a destructive-action dialog put focus on the safest
+      // control (typically Cancel) rather than the first tab-order match,
+      // which can differ per call site depending on the modal's contents.
+      const preferred = initialFocusRefRef.current?.current ?? null;
       const first = container.querySelector<HTMLElement>(FOCUSABLE);
-      (first ?? container).focus();
+      const target =
+        preferred && container.contains(preferred) ? preferred : (first ?? container);
+      target.focus();
     }
 
     function onKeyDown(event: KeyboardEvent) {
@@ -1143,25 +1221,66 @@ export function Drawer({
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  // Confirmation is a real ConfirmDialog now, not native window.confirm.
+  // The old browser prompt broke the focus trap contract — Chrome would
+  // return focus to <body> after the OK/Cancel choice instead of the
+  // Drawer panel, and the focus trap could never re-install itself
+  // correctly on the round trip. The ConfirmDialog is trap-native, so
+  // Escape and outside-click behave consistently, and focus returns to
+  // the Drawer close control when the user chooses to keep editing.
+  const [discardPending, setDiscardPending] = useState(false);
 
   const requestClose = useCallback(() => {
-    if (dirty && !window.confirm("Discard your unsaved changes?")) return;
+    if (dirty) {
+      setDiscardPending(true);
+      return;
+    }
     onClose();
   }, [dirty, onClose]);
 
+  // If the drawer is externally closed while a discard confirmation is
+  // pending, the leftover `discardPending=true` flashes the confirmation
+  // dialog on the next reopen. Clear it whenever the drawer transitions
+  // to closed so a reopened panel always starts in a clean state.
+  useEffect(() => {
+    if (!open) setDiscardPending(false);
+  }, [open]);
+
   if (!open) return null;
-  return <DrawerBody
-    panelRef={panelRef}
-    titleId={titleId}
-    title={title}
-    description={description}
-    requestClose={requestClose}
-    footer={footer}
-    size={size}
-    flush={flush}
-  >
-    {children}
-  </DrawerBody>;
+  return (
+    <>
+      <DrawerBody
+        panelRef={panelRef}
+        titleId={titleId}
+        title={title}
+        description={description}
+        requestClose={requestClose}
+        footer={footer}
+        size={size}
+        flush={flush}
+      >
+        {children}
+      </DrawerBody>
+      <ConfirmDialog
+        open={discardPending}
+        title="Discard your unsaved changes?"
+        destructive
+        confirmLabel="Discard changes"
+        cancelLabel="Keep editing"
+        body={
+          <p>
+            You have unsaved edits in this panel. Discarding closes the panel
+            and loses them; keeping editing returns you to the form.
+          </p>
+        }
+        onCancel={() => setDiscardPending(false)}
+        onConfirm={() => {
+          setDiscardPending(false);
+          onClose();
+        }}
+      />
+    </>
+  );
 }
 
 function DrawerBody({
@@ -1226,6 +1345,7 @@ export function Modal({
   children,
   footer,
   size = "md",
+  initialFocusRef,
 }: {
   open: boolean;
   title: string;
@@ -1233,10 +1353,20 @@ export function Modal({
   children: ReactNode;
   footer?: ReactNode;
   size?: "md" | "lg";
+  /** Element to receive focus when the modal opens; overrides the
+   *  first-focusable default. Must be a stable ref created at the
+   *  caller's top level (a ref recreated per render tears the trap). */
+  initialFocusRef?: React.RefObject<HTMLElement | null>;
 }) {
   if (!open) return null;
   return (
-    <ModalBody title={title} onClose={onClose} footer={footer} size={size}>
+    <ModalBody
+      title={title}
+      onClose={onClose}
+      footer={footer}
+      size={size}
+      initialFocusRef={initialFocusRef}
+    >
       {children}
     </ModalBody>
   );
@@ -1248,16 +1378,18 @@ function ModalBody({
   children,
   footer,
   size,
+  initialFocusRef,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
   size: "md" | "lg";
+  initialFocusRef?: React.RefObject<HTMLElement | null>;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  useFocusTrap(panelRef, onClose);
+  useFocusTrap(panelRef, onClose, { initialFocusRef });
   return (
     <>
       <div className="atlas-overlay" onClick={onClose} aria-hidden="true" />
@@ -1298,6 +1430,7 @@ export function ConfirmDialog({
   working,
   onConfirm,
   onCancel,
+  initialFocusRef,
 }: {
   open: boolean;
   title: string;
@@ -1308,15 +1441,27 @@ export function ConfirmDialog({
   working?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Element to receive focus on open. Must be a stable ref (created
+   *  once at the caller's top level with useRef). ConfirmDialog attaches
+   *  it to the cancel button when supplied, so a destructive-action
+   *  dialog always lands on the safe choice rather than the confirm. */
+  initialFocusRef?: React.RefObject<HTMLButtonElement | null>;
 }) {
+  // A dialog-owned fallback ref keeps the "focus lands on Cancel" contract
+  // even when the caller does not supply its own — otherwise the first
+  // focusable would still be Cancel today, but the FOCUSABLE query is
+  // structural and can silently change if the Modal internals grow.
+  const internalCancelRef = useRef<HTMLButtonElement | null>(null);
+  const cancelRef = initialFocusRef ?? internalCancelRef;
   return (
     <Modal
       open={open}
       title={title}
       onClose={onCancel}
+      initialFocusRef={cancelRef}
       footer={
         <>
-          <Button onClick={onCancel} disabled={working}>
+          <Button buttonRef={cancelRef} onClick={onCancel} disabled={working}>
             {cancelLabel}
           </Button>
           <Button
@@ -1433,8 +1578,20 @@ export const useToast = () => useContext(ToastContext);
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
+  // Track the auto-dismiss timers so we can (a) cancel one when the user
+  // clicks the close button, avoiding a redundant setState-after-dismiss,
+  // and (b) clear the whole map on unmount, so a full-page reload while
+  // a toast is queued does not leave a setState pending on a torn-down
+  // provider.
+  const timersRef = useRef<Map<number, number>>(new Map());
 
   const dismiss = useCallback((id: number) => {
+    const timers = timersRef.current;
+    const handle = timers.get(id);
+    if (handle !== undefined) {
+      window.clearTimeout(handle);
+      timers.delete(id);
+    }
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
 
@@ -1442,10 +1599,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (message, tone = "default") => {
       const id = nextId.current++;
       setToasts((current) => [...current, { id, message, tone }]);
-      window.setTimeout(() => dismiss(id), 5000);
+      const handle = window.setTimeout(() => dismiss(id), 5000);
+      timersRef.current.set(id, handle);
     },
     [dismiss]
   );
+
+  useEffect(() => {
+    // Clear every pending auto-dismiss when the provider tears down.
+    const timers = timersRef.current;
+    return () => {
+      timers.forEach((handle) => window.clearTimeout(handle));
+      timers.clear();
+    };
+  }, []);
 
   const api = useMemo(() => ({ notify }), [notify]);
 

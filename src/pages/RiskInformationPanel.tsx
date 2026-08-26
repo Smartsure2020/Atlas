@@ -17,7 +17,7 @@
  * personal motor risk is not padded out with empty commercial fields.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ExtractionRecord } from "../lib/atlas";
 import type { ExtractionConfidenceState } from "../lib/extraction-confidence";
 import { parseReviewFieldValue, reviewValueToEditorText } from "../lib/review-edit";
@@ -25,6 +25,7 @@ import {
   Block,
   Button,
   Card,
+  ConfirmDialog,
   EmptyState,
   Notice,
   SourceReference,
@@ -171,13 +172,77 @@ export default function RiskInformationPanel({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Discard-confirmation state: when the user has typed corrections, the
+  // "Discard changes" trigger no longer wipes them silently. It opens a
+  // ConfirmDialog whose default focus lands on "Keep editing", so a
+  // mistrigger loses no work.
+  //
+  // The pending state is a CONTEXT SNAPSHOT — the exact extraction id and
+  // source object identity the confirmation was opened against — rather
+  // than a boolean flag. The render-time dialog guard requires the
+  // current extraction and source to be identity-equal to that snapshot,
+  // so a mid-flight extraction swap (id change, reviewed_json refresh,
+  // extracted_json refresh) closes the dialog on the very same render
+  // that receives the new prop, before any effect fires. Boolean +
+  // effect-based cleanup left a one-render window during which the old
+  // dialog rendered against the new source; the context snapshot closes
+  // that window at the render boundary. Lifecycle-cleanup effects still
+  // clear the snapshot below as a belt-and-braces measure.
+  const [discardContext, setDiscardContext] = useState<
+    { extractionId: string; source: Record<string, unknown> } | null
+  >(null);
+  // Stable ref at the component top level so useFocusTrap installs against
+  // the same ref object across renders (a per-render ref lands as null on
+  // first commit and defeats the trap). Modal's own focus trap handles the
+  // trigger-restore contract automatically via previouslyFocused, so no
+  // trigger ref is needed here.
+  const keepEditingRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     setDraft(source);
     setFieldErrors({});
-    // A fresh extraction result replaces any in-progress edit.
+    // A fresh extraction result replaces any in-progress edit. Belt-and-
+    // braces cleanup of the pending discard context — the render-time
+    // guard has already closed the dialog on this same commit; this
+    // effect just prevents the stale snapshot from sitting on the panel
+    // in case anything later re-references it.
+    setDiscardContext(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [extraction?.id, extraction?.reviewed_json, extraction?.extracted_json]);
+
+  // Whenever correction mode ends through any path (successful save,
+  // external reset, extraction cleared), the pending snapshot must not
+  // survive to resurface on the next reopen.
+  useEffect(() => {
+    if (!editing) setDiscardContext(null);
+  }, [editing]);
+
+  // Dirty predicate: identity-compare draft against source. Once the user
+  // types into a RiskField, setFieldValue's structuredClone gives draft a
+  // fresh identity; before then, useEffect keeps draft === source.
+  const dirty = draft !== null && draft !== source;
+
+  const applyDiscard = useCallback(() => {
+    setEditing(false);
+    setDraft(source);
+    setFieldErrors({});
+    setSaveError(null);
+  }, [source]);
+
+  const requestDiscard = useCallback(() => {
+    if (dirty && source && extraction) {
+      // Capture the exact correction context this confirmation was
+      // opened against — extraction id and source reference. The
+      // render-time guard below checks both by identity, so a
+      // replacement extraction cannot satisfy the pending snapshot.
+      setDiscardContext({ extractionId: extraction.id, source });
+      return;
+    }
+    // No unsaved corrections — preserve the prior direct-close behaviour so
+    // an untouched correction session exits without an unnecessary prompt.
+    // Clean bypass does not create a pending context.
+    applyDiscard();
+  }, [dirty, applyDiscard, source, extraction]);
 
   const summary = (editing ? draft : source) as Record<string, unknown> | null;
 
@@ -242,6 +307,28 @@ export default function RiskInformationPanel({
     }
   }
 
+  // Render-time fail-closed guard bound to the correction context that
+  // opened the confirmation. The dialog renders only when every one of
+  // these holds at commit time:
+  //   • a pending snapshot exists;
+  //   • the panel is still in correction mode;
+  //   • the draft is still dirty;
+  //   • an extraction is still attached;
+  //   • the current extraction id is IDENTITY-equal to the snapshot's;
+  //   • the current source object is IDENTITY-equal to the snapshot's.
+  // Reference equality on source (rather than JSON.stringify) means a
+  // reviewed_json/extracted_json swap always changes the source's object
+  // identity — the guard falls closed on the very same render that
+  // receives the new prop, without waiting for the passive cleanup
+  // effect to fire in a later commit.
+  const discardDialogOpen =
+    discardContext !== null &&
+    editing &&
+    dirty &&
+    extraction !== null &&
+    discardContext.extractionId === extraction.id &&
+    discardContext.source === source;
+
   if (!extraction) {
     return (
       <Card>
@@ -287,15 +374,7 @@ export default function RiskInformationPanel({
         actions={
           editing ? (
             <>
-              <Button
-                onClick={() => {
-                  setEditing(false);
-                  setDraft(source);
-                  setFieldErrors({});
-                  setSaveError(null);
-                }}
-                disabled={saving}
-              >
+              <Button onClick={requestDiscard} disabled={saving}>
                 Discard changes
               </Button>
               <Button variant="primary" onClick={commit} loading={saving} loadingLabel="Saving…">
@@ -393,6 +472,36 @@ export default function RiskInformationPanel({
           </ul>
         </Card>
       )}
+
+      {/*
+       * Discard-confirmation dialog. Only rendered when the user has typed
+       * unsaved corrections and clicked "Discard changes". Initial focus
+       * lands on "Keep editing" (the safe choice) so a mistrigger cannot be
+       * doubled into an actual discard. On confirm, applyDiscard runs
+       * exactly once — purely local state, no network — and Modal's focus
+       * trap restores focus to whichever control opened the dialog. On
+       * cancel or Escape, edits are preserved verbatim.
+       */}
+      <ConfirmDialog
+        open={discardDialogOpen}
+        title="Discard risk corrections?"
+        destructive
+        confirmLabel="Discard changes"
+        cancelLabel="Keep editing"
+        initialFocusRef={keepEditingRef}
+        onCancel={() => setDiscardContext(null)}
+        onConfirm={() => {
+          // Clear the captured snapshot BEFORE applying the local revert
+          // so a second Confirm press cannot fire against the closing
+          // modal, and a stale callback cannot re-open against a
+          // replacement source.
+          setDiscardContext(null);
+          applyDiscard();
+        }}
+        body={
+          <p>Unsaved risk corrections will be lost. Previously saved values remain unchanged.</p>
+        }
+      />
     </div>
   );
 }

@@ -48,13 +48,22 @@ export default function App() {
       setAuth(role ? { kind: "staff", email, role } : { kind: "denied", email });
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       // Re-evaluate on any auth change (sign in/out, token refresh).
-      currentRole().then(async (role) => {
-        const { data } = await supabase.auth.getSession();
-        const email = data.session?.user.email ?? null;
-        if (!data.session) setAuth({ kind: "signed_out" });
-        else setAuth(role ? { kind: "staff", email, role } : { kind: "denied", email });
+      // Read the session from the event argument itself instead of
+      // calling getSession() a second time; both are the same value
+      // but the redundant round-trip introduced a race where a rapid
+      // sign-out could see stale data. Guard every setState with the
+      // outer `active` flag so a torn-down App root never receives an
+      // update from an in-flight role lookup.
+      if (!session) {
+        if (active) setAuth({ kind: "signed_out" });
+        return;
+      }
+      const email = session.user.email ?? null;
+      currentRole().then((role) => {
+        if (!active) return;
+        setAuth(role ? { kind: "staff", email, role } : { kind: "denied", email });
       });
     });
 
@@ -66,12 +75,13 @@ export default function App() {
 
   if (auth.kind === "loading") {
     return (
-      <div className="atlas-auth">
+      <main className="atlas-auth">
         <div className="atlas-auth__card">
           <AuthBrand />
+          <h1 className="atlas-sr-only">Checking your Atlas access</h1>
           <p className="atlas-text-dense atlas-text-muted">Checking your access…</p>
         </div>
-      </div>
+      </main>
     );
   }
 
@@ -82,9 +92,10 @@ export default function App() {
 
   if (auth.kind === "denied") {
     return (
-      <div className="atlas-auth">
+      <main className="atlas-auth">
         <div className="atlas-auth__card">
           <AuthBrand />
+          <h1 className="atlas-sr-only">Access to Atlas is not authorised for this account</h1>
           <div className="atlas-stack">
             <Notice tone="danger" title="This account is not authorised for Atlas">
               {auth.email ? `${auth.email} is not on the Atlas allow-list. ` : ""}
@@ -93,7 +104,7 @@ export default function App() {
             <Button onClick={() => supabase.auth.signOut()}>Sign out</Button>
           </div>
         </div>
-      </div>
+      </main>
     );
   }
 
@@ -122,9 +133,10 @@ function AuthBrand() {
 
 function SignIn() {
   return (
-    <div className="atlas-auth">
+    <main className="atlas-auth">
       <div className="atlas-auth__card">
         <AuthBrand />
+        <h1 className="atlas-sr-only">Sign in to Atlas</h1>
         <div className="atlas-stack">
           <p className="atlas-text-dense atlas-text-muted">
             Sign in with your work account to reach the underwriting queue, insurer appetite,
@@ -135,7 +147,7 @@ function SignIn() {
           </Button>
         </div>
       </div>
-    </div>
+    </main>
   );
 }
 
@@ -172,9 +184,10 @@ function DevSignIn() {
   }
 
   return (
-    <div className="atlas-auth">
+    <main className="atlas-auth">
       <div className="atlas-auth__card">
         <AuthBrand />
+        <h1 className="atlas-sr-only">Development sign-in to Atlas</h1>
         <div className="atlas-auth__form">
           <Notice tone="warning" title="Development sign-in">
             This bypass exists only in local development and is not available in the pilot
@@ -204,7 +217,7 @@ function DevSignIn() {
           </Button>
         </div>
       </div>
-    </div>
+    </main>
   );
 }
 

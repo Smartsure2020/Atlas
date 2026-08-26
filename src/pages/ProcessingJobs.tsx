@@ -71,6 +71,8 @@ import {
   jobsNeedingIntervention,
   orderAlerts,
   processingExceptionMetrics,
+  readExpiredActiveDocumentCount,
+  redactJobMetadata,
   summariseJob,
   type AlertPresentation,
   type JobPresentation,
@@ -102,6 +104,20 @@ export default function ProcessingJobs({
   const [actionError, setActionError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const requestSeq = useRef(0);
+  // See ManagerDashboard: mirror `hydrated` in a ref so a slow older
+  // request that resolves after a newer success cannot read a stale
+  // `hydrated=false` from its closure and blank the freshly loaded data.
+  const hydratedRef = useRef(false);
+  // Stable refs for the ConfirmDialog cancel-button focus targets. These
+  // live at the component top level so the trap installs against the same
+  // ref object across renders — the previous per-render pattern let the
+  // Cancel-job dialog open with focus outside the modal because the ref
+  // that arrived at useFocusTrap was `null` on first commit. Initial focus
+  // deliberately targets the safest control (Cancel, not the destructive
+  // Confirm) so a mistrigger cannot be double-tapped into a real
+  // cancellation. See NEW-3 in the correction pass report.
+  const jobActionCancelRef = useRef<HTMLButtonElement | null>(null);
+  const alertActionCancelRef = useRef<HTMLButtonElement | null>(null);
 
   const [statusFilter, setStatusFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -113,53 +129,128 @@ export default function ProcessingJobs({
   const [alertWorking, setAlertWorking] = useState<string | null>(null);
 
   useEffect(() => {
-    // See ManagerDashboard for the reasoning behind this pattern.
-    // The two guards work together: cancellation prevents the discarded
-    // StrictMode mount from ever issuing its request, and the sequence
-    // guard drops any stale response that outlives a newer one.
+    // See ManagerDashboard for the reasoning behind cancellation +
+    // sequence guards. `listJobs` is the essential call — but we cannot
+    // let a supporting endpoint's failure decide whether the workbench is
+    // shown, and we cannot let `listJobs` be classified from anything
+    // other than its own outcome. Promise.allSettled runs every request
+    // to completion; each result is inspected on its own, so a jobs=200
+    // + alerts=401 combination keeps the workbench alive and only warns
+    // that the supporting data is stale.
     let cancelled = false;
     const seq = ++requestSeq.current;
     queueMicrotask(() => {
       if (cancelled) return;
       setLoading(true);
-      // `listJobs` is the essential call — its failure surface says the
-      // reader lacks permission (or the API is down), so it flows through
-      // the outer catch. The other three are supporting context and keep
-      // their per-call `.catch(() => null)` so a single failing supporting
-      // endpoint never blanks the whole page.
-      Promise.all([
-        getSystemStatus().catch(() => null),
+      Promise.allSettled([
+        getSystemStatus(),
         listJobs(),
-        cleanupPreview().catch(() => null),
-        listAlerts().catch(() => ({ alerts: [] as OperationalAlert[] })),
+        cleanupPreview(),
+        listAlerts(),
       ])
-        .then(([status, jobResult, cleanup, alertResult]) => {
+        .then(([statusResult, jobResult, cleanupResult, alertResult]) => {
           if (requestSeq.current !== seq) return;
-          setSystemStatus(status);
-          setJobs(jobResult.jobs);
-          setSummary(jobResult.summary);
-          setExpiredDocuments(cleanup ? cleanup.expired_active_documents.length : null);
-          setAlerts(alertResult.alerts);
+
+          // Jobs is the workbench-defining call. Its outcome — and only
+          // its outcome — decides whether we render the full page or a
+          // permission/error state. A 200 on jobs guarantees the workbench
+          // renders, even if every supporting call failed. A resolved-null
+          // (endpoint reachable but returned nothing) is treated the same
+          // way a network failure would be: the workbench cannot render
+          // without a jobs payload.
+          const jobsFailed =
+            jobResult.status === "rejected" || jobResult.value == null;
+          if (jobsFailed) {
+            const cause =
+              jobResult.status === "rejected" ? (jobResult.reason as Error | undefined) : undefined;
+            const message =
+              cause?.message === "not_authenticated"
+                ? "Your session has expired. Sign in again to view processing health."
+                : cause?.message === "manager_only" || cause?.message === "forbidden"
+                  ? "This screen requires an administrator or manager account. You may not have permission to view it."
+                  : "You may not have permission, or the server may be temporarily unavailable — try again in a moment.";
+            if (hydratedRef.current) {
+              setRefreshError(
+                cause?.message === "not_authenticated"
+                  ? "Your session has expired, so Atlas could not refresh the operational data. The information shown may be outdated. Sign in again to reload."
+                  : "Atlas could not refresh the operational data. The information shown may be outdated."
+              );
+            } else {
+              setLoadError(message);
+            }
+            return;
+          }
+
+          const jobs = jobResult.value;
+          setJobs(jobs.jobs);
+          setSummary(jobs.summary);
+
+          // Supporting endpoints — set only the values that came back;
+          // failures on any single one drop that slice of context but
+          // never blank the page. A 401/403 on a supporting endpoint
+          // surfaces as a refresh warning so the reader knows part of
+          // the picture is missing without losing the workbench.
+          if (statusResult.status === "fulfilled" && statusResult.value) {
+            setSystemStatus(statusResult.value);
+          } else if (statusResult.status === "fulfilled") {
+            // A resolved-null system status means the endpoint reported
+            // nothing rather than throwing — treat that as "no data" but
+            // do not classify it as a refresh failure.
+            setSystemStatus(null);
+          }
+          if (cleanupResult.status === "fulfilled") {
+            // A fulfilled cleanup can still carry a mis-shaped body — the
+            // parser distinguishes malformed/absent (null) from a
+            // well-shaped empty backlog (0). A naive `.length` here throws
+            // a TypeError when the wrapping object is missing, halting the
+            // rest of this handler before the stale-data warning can be
+            // set. See readExpiredActiveDocumentCount for the accepted
+            // shapes.
+            setExpiredDocuments(readExpiredActiveDocumentCount(cleanupResult.value));
+          } else {
+            setExpiredDocuments(null);
+          }
+          if (alertResult.status === "fulfilled" && alertResult.value) {
+            setAlerts(alertResult.value.alerts);
+          } else if (alertResult.status === "fulfilled") {
+            setAlerts([]);
+          }
+
+          const supportingFailures: string[] = [];
+          if (statusResult.status === "rejected") supportingFailures.push("platform status");
+          if (alertResult.status === "rejected") supportingFailures.push("operational alerts");
+          if (cleanupResult.status === "rejected") supportingFailures.push("retention preview");
+
           setLoadError(null);
-          setRefreshError(null);
+          if (supportingFailures.length === 0) {
+            setRefreshError(null);
+          } else {
+            setRefreshError(
+              `The processing job list loaded, but Atlas could not refresh ${supportingFailures.join(", ")}. Those sections may be missing or outdated.`
+            );
+          }
+          hydratedRef.current = true;
           setHydrated(true);
         })
-        .catch((cause: Error) => {
+        .catch(() => {
+          // Defence-in-depth: if the .then handler itself throws
+          // (unexpected shape from a supporting endpoint, a Response
+          // parser bug, etc.), the workbench must still tell the reader
+          // its supporting context could not be refreshed rather than
+          // silently keeping stale numbers on screen. `listJobs` outcome
+          // has already been classified above, so any throw here is a
+          // supporting-endpoint or presentation-layer problem — surface
+          // it as a refresh warning without escalating to a full error
+          // state.
           if (requestSeq.current !== seq) return;
-          const message =
-            cause.message === "not_authenticated"
-              ? "Your session has expired. Sign in again to view processing health."
-              : "Processing health could not be loaded. This screen requires an administrator or manager account. You may not have permission, or the server may be temporarily unavailable.";
-          if (hydrated) {
-            // We already had trustworthy data on screen — keep it and warn
-            // that it is now stale rather than blanking the page.
+          if (hydratedRef.current) {
             setRefreshError(
-              cause.message === "not_authenticated"
-                ? "Your session has expired, so Atlas could not refresh the operational data. The information shown may be outdated. Sign in again to reload."
-                : "Atlas could not refresh the operational data. The information shown may be outdated."
+              "Atlas could not refresh the operational data. The information shown may be outdated."
             );
           } else {
-            setLoadError(message);
+            setLoadError(
+              "You may not have permission, or the server may be temporarily unavailable — try again in a moment."
+            );
           }
         })
         .finally(() => {
@@ -549,6 +640,7 @@ export default function ProcessingJobs({
       <ConfirmDialog
         open={pendingJobAction !== null}
         destructive={pendingJobAction?.action === "cancel"}
+        initialFocusRef={jobActionCancelRef}
         title={
           pendingJobAction?.action === "retry"
             ? `Retry this ${jobTypeLabel(pendingJobAction.job.job_type).toLowerCase()} job?`
@@ -582,6 +674,7 @@ export default function ProcessingJobs({
 
       <ConfirmDialog
         open={pendingAlertAction !== null}
+        initialFocusRef={alertActionCancelRef}
         title="Mark this alert as resolved?"
         confirmLabel="Mark as resolved"
         working={alertWorking !== null}
@@ -1138,6 +1231,7 @@ function JobDetailDrawer({
 }) {
   if (!job) return null;
   const presentation = summariseJob(job);
+  const safeMetadata = redactJobMetadata(job.metadata);
   return (
     <Drawer
       open
@@ -1196,11 +1290,7 @@ function JobDetailDrawer({
           <Notice
             tone="danger"
             title={job.error_code ? humanise(job.error_code) : "The job failed"}
-            detail={
-              job.metadata && Object.keys(job.metadata).length > 0
-                ? JSON.stringify(job.metadata, null, 2)
-                : null
-            }
+            detail={safeMetadata}
           >
             {job.error_message ?? "Atlas did not record a message for this failure."}
           </Notice>

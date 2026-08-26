@@ -13,7 +13,7 @@
  *     overflow menu alone
  */
 
-import { useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Icon } from "./Icon";
 import { EmptyState, TableSkeleton } from "./ui";
 
@@ -56,6 +56,14 @@ interface DataTableProps<T> {
   /** Footer content, e.g. a result count or pagination. */
   footer?: ReactNode;
   hiddenColumns?: string[];
+  /**
+   * At narrow viewports the leading column stays pinned to the left of
+   * the scroll container so the identifying label (Client, insurer name,
+   * job name) stays visible while the reader pages across the rest of
+   * the row. The rest of the columns scroll under it as usual — this
+   * is scoped to the mobile breakpoint via CSS.
+   */
+  stickyFirstColumn?: boolean;
 }
 
 export function DataTable<T>({
@@ -73,6 +81,7 @@ export function DataTable<T>({
   dense,
   footer,
   hiddenColumns = [],
+  stickyFirstColumn = false,
 }: DataTableProps<T>) {
   const visibleColumns = useMemo(
     () => columns.filter((column) => !hiddenColumns.includes(column.id)),
@@ -104,6 +113,69 @@ export function DataTable<T>({
     }
   }
 
+  // Scroll-container overflow tracking. The wrapper is only a keyboard
+  // scroll region when it actually overflows horizontally — otherwise it
+  // adds a Tab stop, a role="region" landmark, and a keydown hijack that
+  // consumers cannot see and never asked for. The observer keeps this in
+  // sync across mount, row/column changes, viewport resize, and unmount.
+  // These hooks live before the empty-state early return so React's
+  // hook order stays stable across every render.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const measure = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const next = el.scrollWidth > el.clientWidth + 1;
+    setOverflowing((prev) => (prev === next ? prev : next));
+  }, []);
+  useEffect(() => {
+    measure();
+    const el = scrollRef.current;
+    if (!el) return;
+    const RO: typeof ResizeObserver | undefined =
+      typeof globalThis !== "undefined"
+        ? (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
+        : undefined;
+    if (RO) {
+      const observer = new RO(() => measure());
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+    // Fallback for environments without ResizeObserver — re-measure on
+    // window resize so the wrapper's focusable status still tracks the
+    // viewport.
+    const handler = () => measure();
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, [measure, sorted.length, visibleColumns.length]);
+
+  // The keyboard handler only fires when the wrapper itself owns focus.
+  // Descendant events (sort buttons, row action buttons, inputs, links,
+  // summary elements) reach the wrapper via bubbling — those events must
+  // pass through untouched. The overflow gate and modifier gate stop the
+  // handler from stealing keys when there is nothing to scroll or when a
+  // system shortcut (Ctrl/Meta/Alt+Arrow) is in flight.
+  const onScrollKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const el = event.currentTarget;
+    if (el.scrollWidth <= el.clientWidth + 1) return;
+    const step = Math.max(80, el.clientWidth * 0.6);
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      el.scrollBy({ left: step, behavior: "smooth" });
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      el.scrollBy({ left: -step, behavior: "smooth" });
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      el.scrollTo({ left: 0, behavior: "smooth" });
+    } else if (event.key === "End") {
+      event.preventDefault();
+      el.scrollTo({ left: el.scrollWidth, behavior: "smooth" });
+    }
+  }, []);
+
   const showEmpty = !loading && sorted.length === 0;
 
   // When the table has nothing to show, render the empty state OUTSIDE the
@@ -129,12 +201,27 @@ export function DataTable<T>({
 
   return (
     <div className="atlas-table-wrap">
-      <div className="atlas-table-scroll">
+      <div
+        ref={scrollRef}
+        className="atlas-table-scroll"
+        // Only expose the wrapper as a landmark + tab stop while it can
+        // actually be scrolled. In the common non-overflowing case the
+        // wrapper is a plain container the reader hops over.
+        role={overflowing ? "region" : undefined}
+        aria-label={
+          overflowing
+            ? `${caption} — scroll horizontally to see more columns`
+            : undefined
+        }
+        tabIndex={overflowing ? 0 : undefined}
+        onKeyDown={overflowing ? onScrollKeyDown : undefined}
+      >
         <table
           className={[
             "atlas-table",
             "atlas-table--responsive",
             dense ? "atlas-table--dense" : "",
+            stickyFirstColumn ? "atlas-table--sticky-first" : "",
           ]
             .filter(Boolean)
             .join(" ")}
