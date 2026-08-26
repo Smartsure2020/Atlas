@@ -42,7 +42,9 @@ vi.mock("../lib/insurers", () => ({
 
 // Prevent the real atlas API client from loading (Insurers/DocumentsPanel
 // do not use it, but AddRuleForm might transitively).
-vi.mock("../lib/atlas", () => ({}));
+vi.mock("../lib/atlas", () => ({
+  api: vi.fn(async () => ({ ok: true })),
+}));
 
 import InsurerDetail from "../pages/InsurerDetail";
 import { ToastProvider } from "../components/ui";
