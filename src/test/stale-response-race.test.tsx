@@ -15,6 +15,15 @@
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+
+// ../lib/insurers imports `api` from ../lib/atlas, which initialises the
+// real Supabase client at module load. Mock it before the production-page
+// import below so collection never touches Supabase, in an environment
+// with or without VITE_SUPABASE_* variables set.
+vi.mock("../lib/atlas", () => ({
+  api: vi.fn(async () => ({ ok: true })),
+}));
+
 import Insurers from "../pages/Insurers";
 import * as insurersLib from "../lib/insurers";
 
