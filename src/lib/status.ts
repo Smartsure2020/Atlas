@@ -131,6 +131,68 @@ export const QUEUE_STATUS_OPTIONS = Object.entries(QUEUE_STATUS).map(([value, me
 }));
 
 /* ---------------------------------------------------------------------------
+   Pipeline stage (submissions.pipeline_stage) — commercial quote lifecycle,
+   separate from queue_status (operational workflow) and legacy status. Phase 1
+   introduces the vocabulary only; no screen renders it yet.
+   ------------------------------------------------------------------------- */
+
+export const PIPELINE_STAGE: Record<string, StatusMeta> = {
+  new: {
+    label: "New",
+    tone: "info",
+    description: "Received but not yet triaged.",
+  },
+  triaged: {
+    label: "Triaged",
+    tone: "info",
+    description: "Classified and ready for assignment.",
+  },
+  assigned: {
+    label: "Assigned",
+    tone: "info",
+    description: "Assigned to an underwriter; work not yet started.",
+  },
+  in_progress: {
+    label: "In progress",
+    tone: "info",
+    description: "Underwriting work is in progress.",
+  },
+  quoted: {
+    label: "Quoted",
+    tone: "success",
+    description: "An insurer quote has been received.",
+  },
+  bound: {
+    label: "Bound",
+    tone: "success",
+    description: "Business placed / bound.",
+  },
+  declined: {
+    label: "Declined",
+    tone: "danger",
+    description: "Opportunity declined by the insurer or the client.",
+  },
+  lost: {
+    label: "Lost",
+    tone: "neutral",
+    description: "Opportunity did not proceed.",
+  },
+};
+
+export const pipelineStage = (value: string | null | undefined) =>
+  pick(PIPELINE_STAGE, value, "Not yet triaged");
+
+/** Non-terminal stages a case is still commercially active in. */
+export const PIPELINE_STAGE_TERMINAL: readonly string[] = [
+  "bound",
+  "declined",
+  "lost",
+];
+
+export const isPipelineStageOpen = (value: string | null | undefined): boolean =>
+  Boolean(value) && !PIPELINE_STAGE_TERMINAL.includes(value ?? "");
+
+/* ---------------------------------------------------------------------------
    Priority
    ------------------------------------------------------------------------- */
 

@@ -26,6 +26,7 @@
     "worker/src/phase7-endpoints.ts",
     "worker/src/phase8-core.ts",
     "worker/src/pipeline-types.ts",
+    "worker/src/quote-pipeline-types.ts",
     "worker/src/pipeline-mode.ts",
     "worker/src/pipeline-router.ts",
     "worker/src/pipeline-telemetry.ts",
