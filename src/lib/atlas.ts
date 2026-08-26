@@ -73,6 +73,20 @@ export function startLogin() {
 
 // ---- Phase 1 typed API surface ----
 
+/** Values match worker/src/quote-pipeline-types.ts and migration 0023's
+ *  atlas_pipeline_stage enum. Historical rows (created before Phase 1) return
+ *  null; new rows default to 'new' server-side. Kept as `string | null` here
+ *  so an unmigrated environment cannot break the SPA. */
+export type PipelineStage =
+  | "new"
+  | "triaged"
+  | "assigned"
+  | "in_progress"
+  | "quoted"
+  | "bound"
+  | "declined"
+  | "lost";
+
 export interface SubmissionListItem {
   id: string;
   broker_name: string | null;
@@ -92,6 +106,16 @@ export interface SubmissionListItem {
   pilot_flag: boolean | null;
   assigned_to_email: string | null;
   created_at: string;
+  // Phase 1 (Quote Pipeline foundation) additions. Marked optional so
+  // callers built against the pre-Phase-1 shape (existing UI tests, an
+  // older Worker deploy) continue to type-check. Nullable in-value because
+  // historical submissions and unmigrated environments legitimately hold
+  // no pipeline data.
+  pipeline_stage?: PipelineStage | null;
+  received_at?: string | null;
+  source_type?: "manual" | "email" | "api" | null;
+  complexity?: "standard" | "complex" | null;
+  last_pipeline_stage_changed_at?: string | null;
   active_job: {
     job_type: string;
     status: string;

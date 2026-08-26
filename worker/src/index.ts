@@ -485,10 +485,15 @@ async function listSubmissions(
     "id, broker_name, client_name, request_type, status, assigned_underwriter, created_at, updated_at";
   const phase7Columns = `${baseColumns}, assigned_to, assigned_at, assigned_by, queue_status`;
   const phase1Columns = `${phase7Columns}, line_of_business, priority, next_action, due_at, pilot_flag`;
+  // Phase 15 / migration 0023 adds the Quote Pipeline vocabulary. Present on
+  // migrated databases; the fallback tiers below keep the dashboard usable
+  // if a dev/local DB is behind on migrations.
+  const phase15Columns =
+    `${phase1Columns}, pipeline_stage, received_at, source_type, complexity, last_pipeline_stage_changed_at`;
 
   let query = admin
     .from("atlas_submissions")
-    .select(phase1Columns);
+    .select(phase15Columns);
   if (q) {
     query = query.or(
       `client_name.ilike.%${q}%,broker_name.ilike.%${q}%,request_type.ilike.%${q}%`
@@ -503,6 +508,41 @@ async function listSubmissions(
   const { data, error } = await query.order(sort, { ascending }).limit(500);
 
   if (!error) return withAssigneeEmails(admin, data ?? []);
+
+  // First fallback: migration 0023 not yet applied. Retry without the Phase 15
+  // pipeline columns; synthesise them as null so the response shape stays
+  // stable for the frontend.
+  let phase1Query = admin
+    .from("atlas_submissions")
+    .select(phase1Columns);
+  if (q) {
+    phase1Query = phase1Query.or(
+      `client_name.ilike.%${q}%,broker_name.ilike.%${q}%,request_type.ilike.%${q}%`
+    );
+  }
+  if (status) phase1Query = phase1Query.eq("status", status);
+  if (queueStatus) phase1Query = phase1Query.eq("queue_status", queueStatus);
+  if (lineOfBusiness) phase1Query = phase1Query.eq("line_of_business", lineOfBusiness);
+  if (priority) phase1Query = phase1Query.eq("priority", priority);
+  if (pilotOnly) phase1Query = phase1Query.eq("pilot_flag", true);
+  if (!canViewAllSubmissions(env, user)) phase1Query = phase1Query.or(scopedSubmissionOr(user));
+  const { data: phase1Data, error: phase1Error } = await phase1Query
+    .order(sort, { ascending })
+    .limit(500);
+
+  if (!phase1Error) {
+    return withAssigneeEmails(
+      admin,
+      (phase1Data ?? []).map((row: Record<string, unknown>) => ({
+        ...row,
+        pipeline_stage: null,
+        received_at: null,
+        source_type: null,
+        complexity: null,
+        last_pipeline_stage_changed_at: null,
+      }))
+    );
+  }
 
   // Local/dev databases may not have Phase 7 assignment columns until migration
   // 0013 is applied. Keep the shared queue usable and return null assignment
@@ -534,6 +574,11 @@ async function listSubmissions(
       priority: "normal",
       next_action: row.status === "new" ? "Review intake" : null,
       due_at: null,
+      pipeline_stage: null,
+      received_at: null,
+      source_type: null,
+      complexity: null,
+      last_pipeline_stage_changed_at: null,
     })));
 }
 
