@@ -459,8 +459,11 @@ describe("Insurer intelligence workbench", () => {
     });
     deactivateAppetiteMock.mockResolvedValue({ ok: true });
     renderPage();
-    const activeTab = await screen.findByRole("tab", { name: /Active matrix/i });
-    expect(activeTab).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: /Active matrix/i })
+      ).toHaveAttribute("aria-selected", "true");
+    });
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Deactivate/i }));
     const dialog = await screen.findByRole("dialog");
