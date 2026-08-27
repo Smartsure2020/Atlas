@@ -60,3 +60,67 @@ export interface QuotePipelineSubmissionFields {
   complexity: QuoteComplexity | null;
   last_pipeline_stage_changed_at: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2 — assignment engine vocabulary
+// ---------------------------------------------------------------------------
+// Mirrors migration 0024:
+//   - assignment_source: 'auto' | 'manual'
+//   - event_type:        'auto_assigned' | 'manual_assigned' | 'reassigned' | 'unassigned'
+// Assignment RPC outcomes below mirror the JSONB `outcome` string the SQL
+// functions return; the Worker maps them to HTTP responses.
+
+export const ASSIGNMENT_SOURCES = ["auto", "manual"] as const;
+export type AssignmentSource = (typeof ASSIGNMENT_SOURCES)[number];
+
+export const ASSIGNMENT_EVENT_TYPES = [
+  "auto_assigned",
+  "manual_assigned",
+  "reassigned",
+  "unassigned",
+] as const;
+export type AssignmentEventType = (typeof ASSIGNMENT_EVENT_TYPES)[number];
+
+export const ASSIGNMENT_OUTCOMES = [
+  "assigned",
+  "already_assigned",
+  "unchanged",
+  "no_eligible_underwriter",
+  "pipeline_not_initialized",
+  "not_triaged",
+  "terminal_submission",
+  "classification_required",
+  "submission_not_found",
+  "target_user_not_found",
+  "actor_required",
+] as const;
+export type AssignmentOutcome = (typeof ASSIGNMENT_OUTCOMES)[number];
+
+/** One row of public.atlas_assignment_events. */
+export interface AssignmentEventRecord {
+  id: string;
+  submission_id: string;
+  assignment_source: AssignmentSource;
+  event_type: AssignmentEventType;
+  from_user_id: string | null;
+  to_user_id: string | null;
+  actor_user_id: string | null;
+  selected_open_count: number | null;
+  eligible_candidate_count: number | null;
+  created_at: string;
+}
+
+/** Shape returned by the canonical assignment SECURITY DEFINER functions. */
+export interface AssignmentRpcResult {
+  outcome: AssignmentOutcome;
+  submission_id: string;
+  assigned_to?: string | null;
+  from_user_id?: string | null;
+  event_type?: AssignmentEventType;
+  pipeline_stage?: QuotePipelineStage | null;
+  event_id?: string;
+  selected_open_count?: number | null;
+  eligible_candidate_count?: number | null;
+  line_of_business?: string | null;
+  complexity?: string | null;
+}
