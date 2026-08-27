@@ -3,11 +3,9 @@ dist/
 .test-dist/
 .env
 .env.local
-.env.staging
-.env.production
 .dev.vars
-worker/.dev.vars
 .wrangler/
 *.tsbuildinfo
 .verify-*/
 worker/.dry-run/
+supabase/.temp/
