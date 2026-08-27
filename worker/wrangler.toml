@@ -1,4 +1,4 @@
-name = "atlas-worker"
+name = "atlas"
 main = "src/index.ts"
 # Keep this at or below the newest date supported by the installed Wrangler
 # runtime. Upgrade Wrangler before moving this date forward.
