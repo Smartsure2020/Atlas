@@ -1,3 +1,6 @@
 .env.staging
 .env.production
 worker/.dev.vars
+.env.staging
+.env.production
+worker/.dev.vars
