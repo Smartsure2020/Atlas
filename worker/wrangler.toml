@@ -87,7 +87,43 @@ head_sampling_rate = 1
 
 # Wrangler does NOT inherit [vars] (or anything else) into named environments —
 # each [env.X] section is self-contained and must redeclare every var it needs.
-# Deploy with `wrangler deploy --env production`.
+# Deploy with `wrangler deploy --env production` or `--env staging`.
+[env.staging]
+name = "atlas-worker-staging"
+
+[env.staging.triggers]
+crons = ["* * * * *"]
+
+[env.staging.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.staging.vars]
+ATLAS_ENV = "staging"
+ATLAS_DOC_RETENTION_DAYS = "7"
+ATLAS_DOCUMENT_PIPELINE_MODE = "legacy"
+ATLAS_DOCUMENT_PROVIDER = "azure"
+ATLAS_HYBRID_MAX_TEXT_FASTPATH_PAGES = "40"
+ATLAS_EXPLANATION_MODE = "deterministic"
+ATLAS_EMAIL_MODE = "template"
+ATLAS_LEGACY_FALLBACK_DISABLED = "false"
+ATLAS_SHADOW_SAMPLE_PERCENT = "0"
+ATLAS_CLEANUP_APPROVED = "false"
+ATLAS_WORKER_BATCH_SIZE = "5"
+ATLAS_STUCK_JOB_MINUTES = "20"
+ATLAS_ALERT_ESCALATE_MINUTES = "30"
+
+[[env.staging.queues.producers]]
+binding = "ATLAS_SHADOW_QUEUE"
+queue = "atlas-shadow-pipeline-staging"
+
+[[env.staging.queues.consumers]]
+queue = "atlas-shadow-pipeline-staging"
+max_batch_size = 5
+max_batch_timeout = 5
+max_retries = 4
+dead_letter_queue = "atlas-shadow-pipeline-staging-dlq"
+
 [env.production]
 name = "atlas-worker-production"
 
