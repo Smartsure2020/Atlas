@@ -350,51 +350,11 @@ test("0026 defines atlas_broker_audit_action_allowed as an immutable positive al
   assert(!/not\s+in\s*\(/i.test(body), "must not use NOT IN blocklist form");
 });
 
-test("0026 SQL allow-list is a superset of the Worker allow-list (identical sets in this phase)", () => {
-  const body = SRC.split("atlas_broker_audit_action_allowed")[1] ?? "";
-  for (const a of BROKER_SAFE_AUDIT_ACTIONS) {
-    assert(new RegExp(`'${a}'`).test(body),
-      `SQL allow-list missing '${a}' (Worker allows it)`);
-  }
-});
-
-test("0026 replaces atlas_audit_select with an allow-list-guarded broker branch", () => {
-  assert(/drop policy if exists atlas_audit_select on public\.atlas_audit_logs/i.test(SRC),
-    "must drop existing policy");
-  assert(/create policy atlas_audit_select on public\.atlas_audit_logs/i.test(SRC),
-    "must recreate policy");
-  const policy = SRC.split(/create policy atlas_audit_select/)[1] ?? "";
-  assert(/atlas_is_broker\(\)/.test(policy), "broker branch must call atlas_is_broker");
-  assert(/atlas_broker_audit_action_allowed\(action\)/.test(policy),
-    "broker branch MUST call atlas_broker_audit_action_allowed");
-  // Every OR-branch that references atlas_is_broker MUST also gate on the
-  // allow-list — no generic "own submission = every audit action" clause.
-  // Paren-balancing walk to survive nested SQL function calls.
-  const brokerBranches: string[] = [];
-  for (let i = 0; i < policy.length; ) {
-    const at = policy.indexOf("or (", i);
-    if (at < 0) break;
-    let depth = 0;
-    let end = -1;
-    for (let j = at + 3; j < policy.length; j++) {
-      const ch = policy[j];
-      if (ch === "(") depth++;
-      else if (ch === ")") {
-        depth--;
-        if (depth === 0) { end = j + 1; break; }
-      }
-    }
-    if (end < 0) break;
-    const branch = policy.slice(at, end);
-    if (/atlas_is_broker/.test(branch)) brokerBranches.push(branch);
-    i = end;
-  }
-  assert(brokerBranches.length >= 1, "no broker OR-branch found");
-  for (const c of brokerBranches) {
-    assert(/atlas_broker_audit_action_allowed\(action\)/.test(c),
-      `broker OR-branch missing allow-list gate: ${c.slice(0, 220)}`);
-  }
-});
+// Note: the "SQL ⊇ Worker allow-list" parity assertion is intentionally
+// removed. Migration 0027 makes broker direct SELECT on atlas_audit_logs
+// impossible, so SQL/Worker action-set parity is no longer a security
+// invariant. The 0026 helper survives as a legacy artefact; do not treat
+// it as authoritative for broker Data API access.
 
 test("0026 adds no INSERT/UPDATE/DELETE policy on atlas_audit_logs", () => {
   const clauses = SRC.match(/on public\.atlas_audit_logs[\s\S]*?;/gi) ?? [];
@@ -403,6 +363,98 @@ test("0026 adds no INSERT/UPDATE/DELETE policy on atlas_audit_logs", () => {
     assert(!/for\s+update/i.test(c), "no UPDATE policy");
     assert(!/for\s+delete/i.test(c), "no DELETE policy");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Migration 0027 — broker audit Data API lockdown
+// ---------------------------------------------------------------------------
+
+const MIGRATION_0027_PATH = resolve(
+  process.cwd(),
+  "supabase/migrations/0027_broker_audit_data_api_lockdown.sql"
+);
+const SRC_0027 = readFileSync(MIGRATION_0027_PATH, "utf8");
+
+test("0027 does not DROP or TRUNCATE any table", () => {
+  assert(!/\bdrop\s+table\b/i.test(SRC_0027), "no DROP TABLE");
+  assert(!/\btruncate\b/i.test(SRC_0027), "no TRUNCATE");
+});
+
+test("0027 replaces atlas_audit_select and preserves internal semantics", () => {
+  assert(/drop policy if exists atlas_audit_select on public\.atlas_audit_logs/i.test(SRC_0027),
+    "must drop existing policy");
+  assert(/create policy atlas_audit_select on public\.atlas_audit_logs/i.test(SRC_0027),
+    "must recreate policy");
+  const policy = SRC_0027.split(/create policy atlas_audit_select/)[1] ?? "";
+  assert(/atlas_role\(\)\s*in\s*\(\s*'manager'/.test(policy),
+    "manager/admin/readonly/auditor branch missing");
+  assert(/atlas_is_staff\(\)[\s\S]*?atlas_can_access_submission/.test(policy),
+    "staff submission-scoped branch missing");
+  assert(/atlas_is_staff\(\)\s+and\s+actor\s*=\s*auth\.uid\(\)/.test(policy),
+    "staff own-actor branch missing");
+});
+
+test("0027 contains NO broker SELECT branch", () => {
+  const policy = SRC_0027.split(/create policy atlas_audit_select/)[1] ?? "";
+  // The policy body must not mention atlas_is_broker() at all — the
+  // presence of that helper would re-open a broker Data API SELECT branch.
+  assert(!/atlas_is_broker/i.test(policy),
+    "atlas_audit_select must have zero broker branches");
+});
+
+test("0027 adds no INSERT/UPDATE/DELETE policy on atlas_audit_logs", () => {
+  const clauses = SRC_0027.match(/on public\.atlas_audit_logs[\s\S]*?;/gi) ?? [];
+  for (const c of clauses) {
+    assert(!/for\s+insert/i.test(c), "no INSERT policy");
+    assert(!/for\s+update/i.test(c), "no UPDATE policy");
+    assert(!/for\s+delete/i.test(c), "no DELETE policy");
+  }
+});
+
+test("0027 does not DROP the 0026 allow-list helper (legacy artefact retained)", () => {
+  assert(!/drop\s+function[\s\S]*?atlas_broker_audit_action_allowed/i.test(SRC_0027),
+    "helper must be left in place");
+});
+
+// ---------------------------------------------------------------------------
+// Worker invariants — unchanged by 0027, restated as security assertions
+// ---------------------------------------------------------------------------
+
+test("Worker BROKER_SAFE_AUDIT_ACTIONS remains the explicit positive allow-list", () => {
+  const expected = new Set([
+    "submission_created",
+    "document_uploaded",
+    "submission_queue_status_changed",
+    "missing_info_added",
+    "missing_info_updated",
+  ]);
+  assert(BROKER_SAFE_AUDIT_ACTIONS.size === expected.size, "unexpected size after 0027");
+  for (const a of expected) assert(BROKER_SAFE_AUDIT_ACTIONS.has(a), `missing ${a}`);
+});
+
+test("Worker: unknown future audit actions fail closed for broker", () => {
+  const unknowns = [
+    "some_new_underwriting_v3",
+    "risk_reprice",
+    "escalation_review",
+    "shadow_pipeline_stage_ran",
+    "operational_alert_fired",
+  ];
+  for (const u of unknowns) {
+    assert(!isBrokerSafeAuditAction(u), `unknown action ${u} must NOT be broker-safe`);
+  }
+  const events = projectAuditForBroker(
+    unknowns.map((action, i) => ({
+      id: `u-${i}`,
+      action,
+      actor: STAFF_ID,
+      metadata_json: { top_insurer: "leaked" },
+      created_at: "2026-08-28T09:00:00Z",
+    })),
+    BROKER_ID,
+    "broker@example.test"
+  );
+  assert(events.length === 0, "unknown actions must not appear in broker projection");
 });
 
 // ---------------------------------------------------------------------------
