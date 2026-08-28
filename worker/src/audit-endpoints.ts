@@ -5,18 +5,35 @@
  * Returns the chronological audit log for a single submission, with actor
  * email denormalised so the UI doesn't need a second round-trip.
  *
- * Any underwriter can read — visibility of the trail for submissions they
- * work on is part of the job.
+ * Internal roles (admin/manager/consultant/underwriter/readonly) receive the
+ * full timeline with raw metadata — the audit trail is part of their job.
+ *
+ * Broker receives a deliberately curated operational history. The projection
+ * lives in ./audit-projection so it can be tested without the whole Worker
+ * module graph. RLS migration 0026 enforces the same positive action
+ * allow-list at the Data API layer for defence in depth.
  */
 
 import { adminClient, json, type AtlasUser } from "./auth";
 import type { Env } from "./config";
 import { emailsForUserIds } from "./user-directory";
+import {
+  projectAuditForBroker,
+  projectAuditForStaff,
+  type RawAuditRow,
+} from "./audit-projection";
+
+// Re-export the allow-list + pure predicate so callers wanting the
+// server-side allow-list have a single import point.
+export {
+  BROKER_SAFE_AUDIT_ACTIONS,
+  isBrokerSafeAuditAction,
+} from "./audit-projection";
 
 export async function handleGetAuditTimeline(
   submissionId: string,
   env: Env,
-  _user: AtlasUser
+  user: AtlasUser
 ): Promise<Response> {
   const admin = adminClient(env);
 
@@ -29,10 +46,18 @@ export async function handleGetAuditTimeline(
     .order("created_at", { ascending: true });
   if (error) return json({ error: "fetch_failed" }, 500);
 
-  // Resolve actor IDs → emails, paginating the auth directory so actors
-  // beyond the first page are never silently mislabelled.
+  const allRows = (rows ?? []) as RawAuditRow[];
+
+  // Phase 3: broker projection. Allow-list, metadata scrub, internal actor
+  // identity withheld. See ./audit-projection for the pure implementation.
+  if (user.role === "broker") {
+    const events = projectAuditForBroker(allRows, user.id, user.email ?? null);
+    return json({ ok: true, events });
+  }
+
+  // Internal roles: preserve the existing response exactly.
   const actorIds = new Set<string>();
-  for (const r of rows ?? []) if (r.actor) actorIds.add(r.actor);
+  for (const r of allRows) if (r.actor) actorIds.add(r.actor);
 
   let emailById = new Map<string, string>();
   try {
@@ -41,22 +66,6 @@ export async function handleGetAuditTimeline(
     // Non-fatal — UI just shows "system" / actor ID when email is unavailable.
   }
 
-  const enriched = (rows ?? []).map(
-    (r: {
-      id: string;
-      action: string;
-      actor: string | null;
-      metadata_json: unknown;
-      created_at: string;
-    }) => ({
-      id: r.id,
-      action: r.action,
-      actor_id: r.actor,
-      actor_email: r.actor ? emailById.get(r.actor) ?? null : null,
-      metadata: r.metadata_json,
-      created_at: r.created_at,
-    })
-  );
-
-  return json({ ok: true, events: enriched });
+  const events = projectAuditForStaff(allRows, emailById);
+  return json({ ok: true, events });
 }

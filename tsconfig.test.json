@@ -28,6 +28,7 @@
     "worker/src/pipeline-types.ts",
     "worker/src/quote-pipeline-types.ts",
     "worker/src/assignment-helpers.ts",
+    "worker/src/audit-projection.ts",
     "worker/src/pipeline-mode.ts",
     "worker/src/pipeline-router.ts",
     "worker/src/pipeline-telemetry.ts",
