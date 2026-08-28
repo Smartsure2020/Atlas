@@ -22,10 +22,34 @@ import { ROLE_LABELS } from "../lib/status";
 import type { Route } from "../lib/router";
 import { routeSection } from "../lib/router";
 
-export type AtlasUiRole = "underwriter" | "consultant" | "manager" | "admin" | "readonly";
+export type AtlasUiRole =
+  | "underwriter"
+  | "consultant"
+  | "manager"
+  | "admin"
+  | "readonly"
+  | "broker";
 
 export const canManage = (role: AtlasUiRole) => role === "admin" || role === "manager";
-export const canWrite = (role: AtlasUiRole) => role !== "readonly";
+
+// Explicit underwriting-writer allow-list. Do NOT use `role !== "readonly"`
+// once broker exists — that would grant broker generic write ability across
+// every UI-driven mutation (extraction review, decisions, communications).
+export const canWrite = (role: AtlasUiRole) =>
+  role === "admin" ||
+  role === "manager" ||
+  role === "consultant" ||
+  role === "underwriter";
+
+// Broker + internal writers can create a submission. Kept as its own helper
+// so the WorkQueue "New submission" affordance never depends on canWrite.
+export const canCreateSubmission = (role: AtlasUiRole) =>
+  canWrite(role) || role === "broker";
+
+// Broker never sees underwriting intelligence in the SPA. Readonly keeps
+// its existing read-only underwriting access.
+export const canViewUnderwritingIntelligence = (role: AtlasUiRole) =>
+  role !== "broker";
 
 interface NavItem {
   section: ReturnType<typeof routeSection>;
@@ -33,6 +57,7 @@ interface NavItem {
   icon: IconName;
   route: Route;
   managerOnly?: boolean;
+  hideForBroker?: boolean;
 }
 
 interface NavGroup {
@@ -50,7 +75,13 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "Intelligence",
     items: [
-      { section: "insurers", label: "Insurers", icon: "insurers", route: { name: "insurers" } },
+      {
+        section: "insurers",
+        label: "Insurers",
+        icon: "insurers",
+        route: { name: "insurers" },
+        hideForBroker: true,
+      },
     ],
   },
   {
@@ -62,6 +93,7 @@ const NAV_GROUPS: NavGroup[] = [
         icon: "oversight",
         route: { name: "oversight" },
         managerOnly: true,
+        hideForBroker: true,
       },
       {
         section: "jobs",
@@ -69,6 +101,7 @@ const NAV_GROUPS: NavGroup[] = [
         icon: "jobs",
         route: { name: "jobs" },
         managerOnly: true,
+        hideForBroker: true,
       },
     ],
   },
@@ -160,7 +193,11 @@ export function AppShell({
 
   const groups = NAV_GROUPS.map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.managerOnly || canManage(role)),
+    items: group.items.filter((item) => {
+      if (item.hideForBroker && role === "broker") return false;
+      if (item.managerOnly && !canManage(role)) return false;
+      return true;
+    }),
   })).filter((group) => group.items.length > 0);
 
   return (

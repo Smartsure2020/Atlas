@@ -19,7 +19,7 @@ import { getLatestJob } from "./phase7-jobs";
 export async function handleGetSubmission(
   submissionId: string,
   env: Env,
-  _user: AtlasUser
+  user: AtlasUser
 ): Promise<Response> {
   const admin = adminClient(env);
 
@@ -60,6 +60,27 @@ export async function handleGetSubmission(
     .select("id, file_name, document_type, status, expires_at, created_at")
     .eq("submission_id", submissionId)
     .order("created_at", { ascending: true });
+
+  // Phase 3: broker-safe projection. Broker gets the operational status of
+  // their own submission (submission fields, document metadata) but NEVER
+  // the underwriting-intelligence payload. Extraction/job internals are
+  // stripped here; recommendation/quote-review/decision are separate
+  // endpoints and are 403'd for broker in the router (never folded into
+  // this response). Response shape stays stable for internal callers.
+  if (user.role === "broker") {
+    // Also strip broker_email_body from the submission row — that field is
+    // the raw pasted broker email, treated as internal underwriting content.
+    if (submissionRow && "broker_email_body" in submissionRow) {
+      submissionRow = { ...submissionRow, broker_email_body: null };
+    }
+    return json({
+      ok: true,
+      submission: submissionRow,
+      documents: documents ?? [],
+      extraction: null,
+      jobs: null,
+    });
+  }
 
   // Latest extraction (most recent run) for this submission.
   const { data: extraction } = await admin

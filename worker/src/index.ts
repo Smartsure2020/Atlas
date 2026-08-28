@@ -44,7 +44,10 @@ import { retentionDays, type Env } from "./config";
 import {
   MAX_CLIENT_UPLOAD_BYTES,
   logOperationError,
+  roleCanCreateSubmission,
+  roleCanUploadClientDocument,
   roleCanViewManagerDashboard,
+  roleCanViewUnderwritingIntelligence,
   roleCanWrite,
   validateEnv,
   validateUploadInput,
@@ -206,15 +209,15 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         return listSubmissions(request, env, user);
       }
       if (pathname === "/api/submissions" && request.method === "POST") {
-        if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot create submissions.");
+        if (!roleCanCreateSubmission(user.role)) return jsonError("permission_denied", 403, "Your role cannot create submissions.");
         return createSubmission(request, env, user);
       }
       if (pathname === "/api/uploads/sign" && request.method === "POST") {
-        if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot upload documents.");
+        if (!roleCanUploadClientDocument(user.role)) return jsonError("permission_denied", 403, "Your role cannot upload documents.");
         return signUpload(request, env, user);
       }
       if (pathname === "/api/uploads/confirm" && request.method === "POST") {
-        if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot confirm uploads.");
+        if (!roleCanUploadClientDocument(user.role)) return jsonError("permission_denied", 403, "Your role cannot confirm uploads.");
         return confirmUpload(request, env, user);
       }
       if (pathname === "/api/manager/stats" && request.method === "GET") {
@@ -287,10 +290,16 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
           return handleReview(id, request, env, user);
         }
         if (sub === "/assignment" && request.method === "PATCH") {
+          // Broker is explicitly forbidden from assignment mutations even
+          // for their own submission. roleCanWrite already excludes broker
+          // but we surface an explicit broker check to survive future
+          // refactors of the writer set.
+          if (user.role === "broker") return jsonError("permission_denied", 403, "Brokers cannot change case assignment.");
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot update assignments.");
           return handleUpdateAssignment(id, request, env, user);
         }
         if (sub === "/assignment/auto" && request.method === "POST") {
+          if (user.role === "broker") return jsonError("permission_denied", 403, "Brokers cannot auto-assign.");
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot auto-assign.");
           return handleAutoAssignSubmission(id, request, env, user);
         }
@@ -298,20 +307,23 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
           return handleGetAssignmentHistory(id, env, user);
         }
         if (sub === "/recommend" && request.method === "POST") {
-          if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot run recommendations.");
+          if (!roleCanViewUnderwritingIntelligence(user.role) || !roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Your role cannot run recommendations.");
           return handleRunRecommendation(id, request, env, user);
         }
         if (sub === "/recommendation" && request.method === "GET") {
+          if (!roleCanViewUnderwritingIntelligence(user.role)) return jsonError("permission_denied", 403, "Recommendation intelligence is not available for your role.");
           return handleGetRecommendation(id, env, user);
         }
         if (sub === "/quote-review" && request.method === "POST") {
-          if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot run quote reviews.");
+          if (!roleCanViewUnderwritingIntelligence(user.role) || !roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Your role cannot run quote reviews.");
           return handleRunQuoteReview(id, request, env, user);
         }
         if (sub === "/quote-review" && request.method === "GET") {
+          if (!roleCanViewUnderwritingIntelligence(user.role)) return jsonError("permission_denied", 403, "Quote-review intelligence is not available for your role.");
           return handleGetQuoteReview(id, env, user);
         }
         if (sub === "/quote-review-history" && request.method === "GET") {
+          if (!roleCanViewUnderwritingIntelligence(user.role)) return jsonError("permission_denied", 403, "Quote-review intelligence is not available for your role.");
           return handleGetQuoteReviewHistory(id, env, user);
         }
         if (sub === "/missing-info" && request.method === "GET") {
@@ -326,6 +338,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
           return handleGenerateMissingInfo(id, env, user);
         }
         if (sub === "/communications" && request.method === "GET") {
+          if (!roleCanViewUnderwritingIntelligence(user.role)) return jsonError("permission_denied", 403, "Internal communications are not available for your role.");
           return handleListCommunications(id, env, user);
         }
         if (sub === "/communications" && request.method === "POST") {
@@ -349,18 +362,22 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
           return handleRecordDecision(id, request, env, user);
         }
         if (sub === "/decision" && request.method === "GET") {
+          if (!roleCanViewUnderwritingIntelligence(user.role)) return jsonError("permission_denied", 403, "Decision intelligence is not available for your role.");
           return handleGetDecision(id, env, user);
         }
         if (sub === "/audit" && request.method === "GET") {
           return handleGetAuditTimeline(id, env, user);
         }
         if (sub === "/pilot" && request.method === "PATCH") {
+          if (user.role === "broker") return jsonError("permission_denied", 403, "Pilot controls are not available for your role.");
           return handleUpdatePilotFlag(id, request, env, user);
         }
         if (sub === "/pilot-issues" && request.method === "GET") {
+          if (user.role === "broker") return jsonError("permission_denied", 403, "Pilot issues are not available for your role.");
           return handleListPilotIssues(id, env, user);
         }
         if (sub === "/pilot-issues" && request.method === "POST") {
+          if (user.role === "broker") return jsonError("permission_denied", 403, "Pilot issues are not available for your role.");
           return handleCreatePilotIssue(id, request, env, user);
         }
         if (sub && sub.startsWith("/emails/") && request.method === "POST") {
@@ -397,9 +414,11 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       }
 
       if (pathname === "/api/insurers" && request.method === "GET") {
+        if (!roleCanViewUnderwritingIntelligence(user.role)) return jsonError("permission_denied", 403, "Insurer intelligence is not available for your role.");
         return handleListInsurers(env, user);
       }
       if (pathname === "/api/insurers" && request.method === "POST") {
+        if (!roleCanViewUnderwritingIntelligence(user.role)) return jsonError("permission_denied", 403, "Insurer intelligence is not available for your role.");
         return handleCreateInsurer(request, env, user);
       }
 
@@ -518,7 +537,7 @@ async function listSubmissions(
   if (!canViewAllSubmissions(env, user)) query = query.or(scopedSubmissionOr(user));
   const { data, error } = await query.order(sort, { ascending }).limit(500);
 
-  if (!error) return withAssigneeEmails(admin, data ?? []);
+  if (!error) return withAssigneeEmails(admin, data ?? [], user);
 
   // First fallback: migration 0023 not yet applied. Retry without the Phase 15
   // pipeline columns; synthesise them as null so the response shape stays
@@ -551,7 +570,8 @@ async function listSubmissions(
         source_type: null,
         complexity: null,
         last_pipeline_stage_changed_at: null,
-      }))
+      })),
+      user
     );
   }
 
@@ -590,12 +610,13 @@ async function listSubmissions(
       source_type: null,
       complexity: null,
       last_pipeline_stage_changed_at: null,
-    })));
+    })), user);
 }
 
 async function withAssigneeEmails(
   admin: ReturnType<typeof adminClient>,
-  rows: unknown[]
+  rows: unknown[],
+  user: AtlasUser
 ): Promise<Response> {
   const typedRows = rows as Record<string, unknown>[];
   const ids = typedRows
@@ -605,9 +626,16 @@ async function withAssigneeEmails(
     .map((row) => row.id)
     .filter((id): id is string => typeof id === "string");
 
+  // Phase 3: broker MUST NOT see the internal underwriting processing state
+  // (job_type, progress_percent, current_step, cancellation_requested) — that
+  // leaks whether extraction / recommendation / quote-review / any internal
+  // job is in flight and how far along it is. Skip the join entirely and
+  // return active_job: null uniformly for every row.
+  const isBroker = user.role === "broker";
+
   const [emails, activeJobs] = await Promise.all([
     emailsForUserIds(admin, ids),
-    submissionIds.length > 0
+    !isBroker && submissionIds.length > 0
       ? admin
           .from("atlas_jobs")
           .select("submission_id, job_type, status, progress_percent, current_step, cancellation_requested")
@@ -628,7 +656,7 @@ async function withAssigneeEmails(
   return json({
     ok: true,
     submissions: typedRows.map((row) => {
-      const activeJob = jobsBySubmission.get(row.id as string);
+      const activeJob = isBroker ? undefined : jobsBySubmission.get(row.id as string);
       return {
         ...row,
         assigned_to_email:
@@ -649,7 +677,7 @@ async function withAssigneeEmails(
 async function createSubmission(
   request: Request,
   env: Env,
-  user: { id: string; role: string }
+  user: AtlasUser
 ): Promise<Response> {
   const body = (await request.json().catch(() => null)) as {
     broker_name?: string;
@@ -658,25 +686,45 @@ async function createSubmission(
     request_type?: string;
     broker_email_body?: string;
     line_of_business?: "personal" | "commercial";
-    assigned_underwriter?: string;
+    assigned_underwriter?: string | null;
     assigned_to?: string | null;
   } | null;
   if (!body) return json({ error: "bad_request" }, 400);
 
+  const isBroker = user.role === "broker";
+
+  // Phase 3: brokers must never inject assignment on creation. Reject a
+  // non-null assignment field explicitly rather than silently dropping it,
+  // so a mis-configured client fails loud in review. NULLs are fine.
+  if (isBroker && (body.assigned_to != null || body.assigned_underwriter != null)) {
+    return jsonError("permission_denied", 403, "Brokers cannot set assignment on new submissions.");
+  }
+
+  // Broker identity is the authenticated user. Prefer user.email over a
+  // supplied broker_email so a spoofed identifier can't reach the audit
+  // trail. broker_name may be supplied by the broker (their own display
+  // name in this session).
+  const brokerEmail = isBroker ? (user.email ?? body.broker_email ?? null) : (body.broker_email ?? null);
   const admin = adminClient(env);
   const insertRow = {
     broker_name: body.broker_name ?? null,
-    broker_email: body.broker_email ?? null,
+    broker_email: brokerEmail,
     client_name: body.client_name ?? null,
     request_type: body.request_type ?? null,
     broker_email_body: body.broker_email_body ?? null,
     line_of_business: body.line_of_business ?? null,
     priority: "normal",
     next_action: "Review intake",
-    assigned_underwriter: body.assigned_underwriter ?? null,
-    assigned_to: body.assigned_to ?? body.assigned_underwriter ?? null,
-    assigned_at: body.assigned_to || body.assigned_underwriter ? new Date().toISOString() : null,
-    assigned_by: body.assigned_to || body.assigned_underwriter ? user.id : null,
+    // Broker path always enters with null assignment fields, regardless of
+    // future body drift. Internal-role compatibility preserved unchanged.
+    assigned_underwriter: isBroker ? null : (body.assigned_underwriter ?? null),
+    assigned_to: isBroker ? null : (body.assigned_to ?? body.assigned_underwriter ?? null),
+    assigned_at: isBroker
+      ? null
+      : (body.assigned_to || body.assigned_underwriter ? new Date().toISOString() : null),
+    assigned_by: isBroker
+      ? null
+      : (body.assigned_to || body.assigned_underwriter ? user.id : null),
     queue_status: "new",
     created_by: user.id,
     status: "new",

@@ -121,6 +121,9 @@ test("all RLS-enabled tables are listed in PHASE6_RLS_TABLES (static registry ch
     "atlas_missing_info_items", "atlas_communications",
     "atlas_jobs", "atlas_cleanup_candidates", "atlas_operational_alerts",
     "atlas_pilot_issues",
+    // Phase 2 (migration 0023 + 0024) — added to the security inventory in Phase 3.
+    "atlas_underwriter_profiles",
+    "atlas_assignment_events",
   ];
   for (const table of allRlsTables) {
     assert(PHASE6_RLS_TABLES.includes(table as (typeof PHASE6_RLS_TABLES)[number]), `${table} should be covered`);

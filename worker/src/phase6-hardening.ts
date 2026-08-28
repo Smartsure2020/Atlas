@@ -18,6 +18,7 @@ export const ROLE_LABELS: Record<AtlasRole, string> = {
   consultant: "consultant",
   readonly: "readonly/auditor",
   underwriter: "consultant (legacy underwriter claim)",
+  broker: "broker",
 };
 
 const REQUIRED_ENV: (keyof Env)[] = [
@@ -51,6 +52,8 @@ export const PHASE6_RLS_TABLES = [
   "atlas_cleanup_candidates",
   "atlas_operational_alerts",
   "atlas_pilot_issues",
+  "atlas_underwriter_profiles",
+  "atlas_assignment_events",
 ] as const;
 
 export const PHASE6_AUDIT_EVENTS = [
@@ -68,7 +71,13 @@ const ALLOWED_UPLOAD_EXTENSIONS = new Set([".pdf"]);
 const ALLOWED_UPLOAD_TYPES = new Set(["application/pdf"]);
 
 export function normalizeAtlasRole(role: unknown): AtlasRole | null {
-  if (role === "admin" || role === "manager" || role === "consultant" || role === "readonly") {
+  if (
+    role === "admin" ||
+    role === "manager" ||
+    role === "consultant" ||
+    role === "readonly" ||
+    role === "broker"
+  ) {
     return role;
   }
   if (role === "auditor") return "readonly";
@@ -76,6 +85,11 @@ export function normalizeAtlasRole(role: unknown): AtlasRole | null {
   return null;
 }
 
+// Generic writer set — DO NOT add "broker". Broker uses narrow capability
+// helpers below. Adding broker here would grant Data-API-scoped write access
+// through every current *_scoped_update / *_scoped_insert policy that uses
+// atlas_can_write(), i.e. extractions, recommendations, decisions, quote
+// reviews, communications, missing-info mutations, and submission updates.
 export function roleCanWrite(role: AtlasRole): boolean {
   return role === "admin" || role === "manager" || role === "consultant" || role === "underwriter";
 }
@@ -90,6 +104,33 @@ export function roleCanRunExtraction(role: AtlasRole): boolean {
 
 export function roleCanViewManagerDashboard(role: AtlasRole): boolean {
   return role === "admin" || role === "manager";
+}
+
+// ---------- Phase 3 narrow capability helpers ----------
+// Broker gets specific, well-scoped abilities WITHOUT inheriting the
+// generic writer set above. Each helper is deliberately named for the
+// capability it grants so a security review can grep for it in isolation.
+
+export function roleCanCreateSubmission(role: AtlasRole): boolean {
+  return roleCanWrite(role) || role === "broker";
+}
+
+export function roleCanUploadClientDocument(role: AtlasRole): boolean {
+  return roleCanWrite(role) || role === "broker";
+}
+
+// Underwriting intelligence = extraction / recommendation / quote review /
+// decision / internal communications / insurer intelligence. Broker MUST
+// be excluded from every route (read or write) protected by this helper.
+// Readonly and auditor keep their existing read-only access.
+export function roleCanViewUnderwritingIntelligence(role: AtlasRole): boolean {
+  return (
+    role === "admin" ||
+    role === "manager" ||
+    role === "consultant" ||
+    role === "underwriter" ||
+    role === "readonly"
+  );
 }
 
 export function validateEnv(env: Env): string[] {
