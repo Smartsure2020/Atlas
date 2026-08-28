@@ -136,6 +136,20 @@ export function mapAssignmentRpcResult(
           eligible_candidate_count: result.eligible_candidate_count ?? 0,
         },
       };
+    case "target_not_assignable":
+      // Phase 3: target user exists but does not carry a trusted assignable
+      // atlas_role (e.g. broker, readonly, missing role). Return 409 with
+      // a generic validation error — the caller learns the target cannot
+      // own underwriting work without learning the target's actual role.
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error: "validation_failed",
+          message: "The selected user cannot own underwriting work.",
+          outcome: result.outcome,
+        },
+      };
     default:
       return {
         status: 500,

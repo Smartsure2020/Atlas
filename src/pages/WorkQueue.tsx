@@ -24,7 +24,7 @@ import {
 import { DataTable, type Column, type SortState } from "../components/DataTable";
 import ColumnPicker from "../components/ColumnPicker";
 import { Icon } from "../components/Icon";
-import { canWrite, type AtlasUiRole } from "../components/AppShell";
+import { canCreateSubmission, type AtlasUiRole } from "../components/AppShell";
 import {
   EMPTY,
   formatDate,
@@ -490,8 +490,8 @@ export default function WorkQueue({
               variant="primary"
               icon="plus"
               onClick={onNew}
-              disabled={!canWrite(role)}
-              title={!canWrite(role) ? "Read-only accounts cannot create submissions." : undefined}
+              disabled={!canCreateSubmission(role)}
+              title={!canCreateSubmission(role) ? "Your role cannot create submissions." : undefined}
             >
               New submission
             </Button>
@@ -719,7 +719,7 @@ export default function WorkQueue({
                   title="The work queue is empty"
                   body="No submissions have been captured yet. Create one to start the underwriting workflow."
                   actions={
-                    canWrite(role) ? (
+                    canCreateSubmission(role) ? (
                       <Button variant="primary" icon="plus" onClick={onNew}>
                         New submission
                       </Button>

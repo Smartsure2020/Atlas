@@ -168,10 +168,12 @@ test("Phase 1 introduces no 'broker' role in executable DDL", () => {
   );
 });
 
-test("normalizeAtlasRole still rejects 'broker' (role not introduced yet)", () => {
-  // We normalise unknown inputs to null. Phase 1 depends on this staying true
-  // — Phase 3 will explicitly extend the allowlist parser to accept broker.
-  assertEqual(normalizeAtlasRole("broker"), null, "'broker' must not normalise in Phase 1");
+test("normalizeAtlasRole accepts 'broker' from Phase 3 onward", () => {
+  // Historical Phase 1 guard: broker was rejected until Phase 3 landed. Phase 3
+  // (migration 0025) legitimately introduced the broker role — with narrow
+  // capability helpers, not roleCanWrite. See tests/phase17-broker-role.test.ts
+  // for the exhaustive capability matrix that keeps broker out of the writer set.
+  assertEqual(normalizeAtlasRole("broker"), "broker", "broker must normalise from Phase 3 onward");
 });
 
 // ---------------------------------------------------------------------------

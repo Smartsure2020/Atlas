@@ -25,14 +25,17 @@ async function accessToken(): Promise<string | null> {
 }
 
 /** The signed-in user's Atlas role, read from the trusted app_metadata claim. */
-export async function currentRole(): Promise<"underwriter" | "consultant" | "manager" | "admin" | "readonly" | null> {
+export async function currentRole(): Promise<
+  "underwriter" | "consultant" | "manager" | "admin" | "readonly" | "broker" | null
+> {
   const { data } = await supabase.auth.getUser();
   const role = (data.user?.app_metadata as Record<string, unknown>)?.atlas_role;
   return role === "admin" ||
     role === "manager" ||
     role === "consultant" ||
     role === "readonly" ||
-    role === "underwriter"
+    role === "underwriter" ||
+    role === "broker"
     ? role
     : null;
 }

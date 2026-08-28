@@ -254,18 +254,23 @@ export default function SubmissionDetail({
     async (options: { silent?: boolean; dependents?: boolean } = {}) => {
       const dependents = options.dependents !== false;
       if (!options.silent) setLoading(true);
+      // Phase 3: brokers must NEVER issue recommendation/quote-review/decision
+      // requests. Even though those endpoints return 403 for broker, relying on
+      // that as normal flow leaks intent through network logs and produces
+      // console noise in the SPA. Skip the calls entirely for broker.
+      const isBroker = role === "broker";
       try {
         // One round of parallel reads for the whole workspace. Failures on the
         // optional pieces must not blank the record.
         const results = await Promise.all([
           getSubmission(submissionId),
-          dependents
+          dependents && !isBroker
             ? getRecommendation(submissionId).catch(() => ({ recommendation: null }))
             : Promise.resolve(null),
-          dependents
+          dependents && !isBroker
             ? getQuoteReview(submissionId).catch(() => ({ quote_review: null, sections: [] }))
             : Promise.resolve(null),
-          dependents
+          dependents && !isBroker
             ? getDecision(submissionId).catch(() => ({ decision: null }))
             : Promise.resolve(null),
           dependents ? listMissingInfo(submissionId).catch(() => ({ items: [] })) : Promise.resolve(null),
@@ -313,7 +318,7 @@ export default function SubmissionDetail({
         if (!options.silent) setLoading(false);
       }
     },
-    [submissionId]
+    [submissionId, role]
   );
 
   useEffect(() => {
@@ -376,6 +381,26 @@ export default function SubmissionDetail({
     // dependentSignature is deliberately the only trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dependentSignature]);
+
+  // Normalise a broker who direct-navigates to a hidden tab back to Overview.
+  // Kept above the loading/error early returns so React's hook order is
+  // stable across the pre-data → post-data transition. The allowed broker
+  // tab set is static and does not depend on `data`, so pinning it here is
+  // safe.
+  const isBrokerRole = role === "broker";
+  const BROKER_TABS: readonly SubmissionTab[] = [
+    "overview",
+    "missing-information",
+    "documents",
+    "history",
+  ];
+  useEffect(() => {
+    if (isBrokerRole && !BROKER_TABS.includes(tab as SubmissionTab)) {
+      onTabChange("overview" as SubmissionTab);
+    }
+    // BROKER_TABS is a stable readonly literal; excluded from deps intentionally.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBrokerRole, tab, onTabChange]);
 
   useEffect(() => {
     if (!workInFlight) return;
@@ -471,21 +496,42 @@ export default function SubmissionDetail({
     ),
   });
 
-  const tabs: TabDefinition[] = [
-    { id: "overview", label: "Overview" },
-    { id: "risk", label: "Risk information", count: uncertainFieldCount, attention: uncertainFieldCount > 0 },
-    { id: "recommendation", label: "Recommendation" },
-    { id: "quote-review", label: "Quote review" },
-    {
-      id: "missing-information",
-      label: "Missing information",
-      count: openMissingInfo.length,
-      attention: openMissingInfo.length > 0,
-    },
-    { id: "documents", label: "Documents", count: activeDocuments.length },
-    { id: "communications", label: "Communications" },
-    { id: "history", label: "History" },
-  ];
+  // Phase 3: brokers get a narrow tab set only. Underwriting-intelligence
+  // tabs (Risk information, Recommendation, Quote review, Communications)
+  // are removed entirely — not hidden — so a direct hash navigation to one
+  // of them normalises to Overview via the effect below.
+  const isBroker = role === "broker";
+  const tabs: TabDefinition[] = isBroker
+    ? [
+        { id: "overview", label: "Overview" },
+        {
+          id: "missing-information",
+          label: "Missing information",
+          count: openMissingInfo.length,
+          attention: openMissingInfo.length > 0,
+        },
+        { id: "documents", label: "Documents", count: activeDocuments.length },
+        { id: "history", label: "History" },
+      ]
+    : [
+        { id: "overview", label: "Overview" },
+        { id: "risk", label: "Risk information", count: uncertainFieldCount, attention: uncertainFieldCount > 0 },
+        { id: "recommendation", label: "Recommendation" },
+        { id: "quote-review", label: "Quote review" },
+        {
+          id: "missing-information",
+          label: "Missing information",
+          count: openMissingInfo.length,
+          attention: openMissingInfo.length > 0,
+        },
+        { id: "documents", label: "Documents", count: activeDocuments.length },
+        { id: "communications", label: "Communications" },
+        { id: "history", label: "History" },
+      ];
+
+  // Tab-normalisation for broker moved above the loading/error early
+  // returns so hook ordering stays stable — see the effect defined
+  // alongside BROKER_TABS earlier in this component.
 
   async function onExtract(force = false) {
     setExtracting(true);
@@ -515,20 +561,22 @@ export default function SubmissionDetail({
         submission={submission}
         onBack={onBack}
         primaryAction={
-          <NextActionButton
-            action={nextAction}
-            extracting={extracting}
-            canWrite={canWrite}
-            onExtract={() => {
-              if (forceRetry) {
-                setForceRetry(false);
-                onExtract(true);
-              } else {
-                onExtract();
-              }
-            }}
-            onGoToTab={onTabChange}
-          />
+          isBroker ? null : (
+            <NextActionButton
+              action={nextAction}
+              extracting={extracting}
+              canWrite={canWrite}
+              onExtract={() => {
+                if (forceRetry) {
+                  setForceRetry(false);
+                  onExtract(true);
+                } else {
+                  onExtract();
+                }
+              }}
+              onGoToTab={onTabChange}
+            />
+          )
         }
       />
 
@@ -570,56 +618,63 @@ export default function SubmissionDetail({
               activeDocuments={activeDocuments.length}
               extractionConfidence={extractionConfidence}
               onGoToTab={onTabChange}
+              isBroker={isBroker}
             />
           </TabPanel>
 
-          <TabPanel id="risk" active={tab}>
-            <RiskInformationPanel
-              submissionId={submissionId}
-              extraction={extraction}
-              extractionConfidence={extractionConfidence}
-              canWrite={canWrite}
-              canManage={canManage}
-              extracting={extracting}
-              onExtract={() => {
-                if (forceRetry) {
-                  setForceRetry(false);
-                  onExtract(true);
-                } else {
-                  onExtract();
-                }
-              }}
-              onSave={async (extractionId, reviewedJson) => {
-                await saveReview(submissionId, extractionId, reviewedJson);
-                await load({ silent: true });
-                toast.notify("Corrections saved. Rerun the analysis to use them.", "success");
-              }}
-            />
-          </TabPanel>
+          {!isBroker && (
+            <TabPanel id="risk" active={tab}>
+              <RiskInformationPanel
+                submissionId={submissionId}
+                extraction={extraction}
+                extractionConfidence={extractionConfidence}
+                canWrite={canWrite}
+                canManage={canManage}
+                extracting={extracting}
+                onExtract={() => {
+                  if (forceRetry) {
+                    setForceRetry(false);
+                    onExtract(true);
+                  } else {
+                    onExtract();
+                  }
+                }}
+                onSave={async (extractionId, reviewedJson) => {
+                  await saveReview(submissionId, extractionId, reviewedJson);
+                  await load({ silent: true });
+                  toast.notify("Corrections saved. Rerun the analysis to use them.", "success");
+                }}
+              />
+            </TabPanel>
+          )}
 
-          <TabPanel id="recommendation" active={tab}>
-            <RecommendationPanel
-              submissionId={submissionId}
-              recommendation={data.recommendation}
-              extractionExists={Boolean(extraction)}
-              extractionReviewed={reviewed}
-              extractionConfidence={extractionConfidence}
-              openMissingInfo={openMissingInfo}
-              onRefresh={() => load({ silent: true })}
-              onGoToTab={onTabChange}
-            />
-          </TabPanel>
+          {!isBroker && (
+            <TabPanel id="recommendation" active={tab}>
+              <RecommendationPanel
+                submissionId={submissionId}
+                recommendation={data.recommendation}
+                extractionExists={Boolean(extraction)}
+                extractionReviewed={reviewed}
+                extractionConfidence={extractionConfidence}
+                openMissingInfo={openMissingInfo}
+                onRefresh={() => load({ silent: true })}
+                onGoToTab={onTabChange}
+              />
+            </TabPanel>
+          )}
 
-          <TabPanel id="quote-review" active={tab}>
-            <QuoteReviewPanel
-              submissionId={submissionId}
-              data={data}
-              extractionReviewed={reviewed}
-              extractionConfidence={extractionConfidence}
-              onRefresh={() => load({ silent: true })}
-              onGoToTab={onTabChange}
-            />
-          </TabPanel>
+          {!isBroker && (
+            <TabPanel id="quote-review" active={tab}>
+              <QuoteReviewPanel
+                submissionId={submissionId}
+                data={data}
+                extractionReviewed={reviewed}
+                extractionConfidence={extractionConfidence}
+                onRefresh={() => load({ silent: true })}
+                onGoToTab={onTabChange}
+              />
+            </TabPanel>
+          )}
 
           <TabPanel id="missing-information" active={tab}>
             <MissingInfoPanel
@@ -649,14 +704,16 @@ export default function SubmissionDetail({
             />
           </TabPanel>
 
-          <TabPanel id="communications" active={tab}>
-            <CommunicationsPanel
-              submissionId={submissionId}
-              data={data}
-              canWrite={canWrite}
-              onRefresh={() => load({ silent: true })}
-            />
-          </TabPanel>
+          {!isBroker && (
+            <TabPanel id="communications" active={tab}>
+              <CommunicationsPanel
+                submissionId={submissionId}
+                data={data}
+                canWrite={canWrite}
+                onRefresh={() => load({ silent: true })}
+              />
+            </TabPanel>
+          )}
 
           <TabPanel id="history" active={tab}>
             <AuditTimeline submissionId={submissionId} />
@@ -700,7 +757,7 @@ export default function SubmissionDetail({
                 <dd>{submission.due_at ? formatDate(submission.due_at) : "Not set"}</dd>
               </div>
             </dl>
-            {canWrite && (
+            {canWrite && !isBroker && (
               <div style={{ marginTop: "var(--atlas-space-3)" }}>
                 <Button size="sm" icon="edit" block onClick={() => setAssignmentOpen(true)}>
                   Change assignment
@@ -709,14 +766,16 @@ export default function SubmissionDetail({
             )}
           </div>
 
-          <PilotRailCard
-            submissionId={submissionId}
-            pilotFlag={submission.pilot_flag ?? false}
-            pilotNotes={submission.pilot_notes ?? ""}
-            canWrite={canWrite}
-            canManage={canManage}
-            onSaved={() => load({ silent: true })}
-          />
+          {!isBroker && (
+            <PilotRailCard
+              submissionId={submissionId}
+              pilotFlag={submission.pilot_flag ?? false}
+              pilotNotes={submission.pilot_notes ?? ""}
+              canWrite={canWrite}
+              canManage={canManage}
+              onSaved={() => load({ silent: true })}
+            />
+          )}
 
           <div className="atlas-workspace__rail-card">
             <h2 className="atlas-workspace__rail-title">Outstanding</h2>
@@ -726,12 +785,16 @@ export default function SubmissionDetail({
                 value={openMissingInfo.length}
                 onClick={() => onTabChange("missing-information")}
               />
-              <RailCount
-                label="Uncertain risk fields"
-                value={uncertainFieldCount}
-                onClick={() => onTabChange("risk")}
-              />
-              <RailCount label="Risk concerns raised" value={redFlags.length} onClick={() => onTabChange("risk")} />
+              {!isBroker && (
+                <>
+                  <RailCount
+                    label="Uncertain risk fields"
+                    value={uncertainFieldCount}
+                    onClick={() => onTabChange("risk")}
+                  />
+                  <RailCount label="Risk concerns raised" value={redFlags.length} onClick={() => onTabChange("risk")} />
+                </>
+              )}
               <RailCount label="Active documents" value={activeDocuments.length} onClick={() => onTabChange("documents")} />
             </dl>
           </div>
@@ -756,17 +819,19 @@ export default function SubmissionDetail({
         </aside>
       </div>
 
-      <AssignmentDrawer
-        open={assignmentOpen}
-        submissionId={submissionId}
-        submission={submission}
-        onClose={() => setAssignmentOpen(false)}
-        onSaved={async () => {
-          setAssignmentOpen(false);
-          await load({ silent: true });
-          toast.notify("Assignment updated.", "success");
-        }}
-      />
+      {!isBroker && (
+        <AssignmentDrawer
+          open={assignmentOpen}
+          submissionId={submissionId}
+          submission={submission}
+          onClose={() => setAssignmentOpen(false)}
+          onSaved={async () => {
+            setAssignmentOpen(false);
+            await load({ silent: true });
+            toast.notify("Assignment updated.", "success");
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1119,6 +1184,7 @@ function OverviewTab({
   activeDocuments,
   extractionConfidence,
   onGoToTab,
+  isBroker,
 }: {
   data: WorkspaceData;
   nextAction: NextAction;
@@ -1129,9 +1195,50 @@ function OverviewTab({
   activeDocuments: number;
   extractionConfidence: ExtractionConfidenceState;
   onGoToTab: (tab: SubmissionTab) => void;
+  isBroker: boolean;
 }) {
   const { recommendation, quoteReview, decision, payload } = data;
   const top = recommendation?.reasoning_json.top ?? null;
+
+  // Phase 3: broker-safe overview. Never render recommendation reasoning,
+  // insurer ranking, quote-review analysis, decision internals, extraction
+  // trust, or risk concerns. Broker sees operational status only.
+  if (isBroker) {
+    return (
+      <div className="atlas-stack">
+        <div className="atlas-nextaction">
+          <div>
+            <p className="atlas-nextaction__label">Case status</p>
+            <p className="atlas-nextaction__text">
+              {openMissingInfo > 0
+                ? "Outstanding information requested"
+                : "With the underwriter"}
+            </p>
+            <p className="atlas-nextaction__why">
+              You will be notified when the underwriter needs more from you.
+            </p>
+          </div>
+        </div>
+        <div className="atlas-uwsummary">
+          <aside className="atlas-uwsummary__metrics" aria-label="Operational metrics">
+            <dl className="atlas-uwsummary__counts">
+              <MetricRow
+                label="Outstanding information"
+                value={openMissingInfo}
+                onClick={() => onGoToTab("missing-information")}
+                emphasise={openMissingInfo > 0}
+              />
+              <MetricRow
+                label="Active documents"
+                value={activeDocuments}
+                onClick={() => onGoToTab("documents")}
+              />
+            </dl>
+          </aside>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="atlas-stack">

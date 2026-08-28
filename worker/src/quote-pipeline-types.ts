@@ -92,6 +92,12 @@ export const ASSIGNMENT_OUTCOMES = [
   "classification_required",
   "submission_not_found",
   "target_user_not_found",
+  // Phase 3: target exists in auth.users but does not carry a trusted
+  // app_metadata.atlas_role in the assignable set
+  // (underwriter | consultant | manager | admin). Distinct from
+  // target_user_not_found so the API can return HTTP 409 instead of 404
+  // without leaking why.
+  "target_not_assignable",
   "actor_required",
 ] as const;
 export type AssignmentOutcome = (typeof ASSIGNMENT_OUTCOMES)[number];

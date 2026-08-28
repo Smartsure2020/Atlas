@@ -38,8 +38,10 @@ export interface Env {
 
   // --- Atlas authorisation allow-list ---
   // JSON mapping of lower-cased email -> 'consultant' | 'manager' | 'admin'
-  // | 'readonly'. Legacy 'underwriter' is still accepted as consultant-level
-  // access so existing local allow-lists do not fail closed during upgrade.
+  // | 'readonly' | 'broker'. Legacy 'underwriter' is still accepted as
+  // consultant-level access so existing local allow-lists do not fail
+  // closed during upgrade. 'broker' is the Phase 3 authenticated internal
+  // broker role — deliberately narrow (own-case only, no underwriting).
   // Kept as a secret/env value so access changes need no redeploy of code,
   // only an env update. (Could move to a table later without touching callers.)
   ATLAS_ALLOWLIST_JSON: string;
@@ -107,7 +109,13 @@ export interface Env {
   };
 }
 
-export type AtlasRole = "underwriter" | "consultant" | "manager" | "admin" | "readonly";
+export type AtlasRole =
+  | "underwriter"
+  | "consultant"
+  | "manager"
+  | "admin"
+  | "readonly"
+  | "broker";
 
 /** Default retention window if ATLAS_DOC_RETENTION_DAYS is unset. */
 export const DEFAULT_RETENTION_DAYS = 7;
@@ -137,7 +145,8 @@ export function resolveRoleFromAllowlist(
     role === "manager" ||
     role === "consultant" ||
     role === "readonly" ||
-    role === "underwriter"
+    role === "underwriter" ||
+    role === "broker"
     ? role
     : null;
 }

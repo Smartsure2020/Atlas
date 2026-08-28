@@ -12,3 +12,6 @@ worker/.dev.vars
 .verify-*/
 worker/.dry-run/
 supabase/.temp/
+
+# Local-only staging wrangler override (do NOT commit staging secrets)
+worker/wrangler.staging.toml

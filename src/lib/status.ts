@@ -634,6 +634,7 @@ export const ROLE_LABELS: Record<string, string> = {
   underwriter: "Underwriter",
   consultant: "Consultant",
   readonly: "Read only",
+  broker: "Broker",
 };
 
 export const LINE_OF_BUSINESS_OPTIONS = [

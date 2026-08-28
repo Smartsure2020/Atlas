@@ -306,9 +306,19 @@ function RouteView({
       );
 
     case "insurers":
+      // Phase 3: broker cannot access insurer intelligence even via direct
+      // hash navigation. Redirect to the queue (their only nav target).
+      if (role === "broker") {
+        navigate({ name: "queue" }, { replace: true });
+        return null;
+      }
       return <Insurers role={role} onOpen={(id) => navigate({ name: "insurer", id })} />;
 
     case "insurer":
+      if (role === "broker") {
+        navigate({ name: "queue" }, { replace: true });
+        return null;
+      }
       return (
         <InsurerDetail
           key={route.id}
@@ -319,9 +329,17 @@ function RouteView({
       );
 
     case "oversight":
+      if (role === "broker") {
+        navigate({ name: "queue" }, { replace: true });
+        return null;
+      }
       return <ManagerDashboard onOpenSubmission={(id) => navigate({ name: "submission", id, tab: "overview" })} />;
 
     case "jobs":
+      if (role === "broker") {
+        navigate({ name: "queue" }, { replace: true });
+        return null;
+      }
       return <ProcessingJobs onOpenSubmission={(id) => navigate({ name: "submission", id, tab: "overview" })} />;
 
     case "queue":
