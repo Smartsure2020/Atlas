@@ -40,6 +40,13 @@ export async function currentRole(): Promise<
     : null;
 }
 
+/** The signed-in user's Supabase auth UUID. Never their email. Returns null
+ *  when signed out. Phase 4: drives the Quote Pipeline "Mine" saved view. */
+export async function currentUserId(): Promise<string | null> {
+  const { data } = await supabase.auth.getUser();
+  return data.user?.id ?? null;
+}
+
 /** Authenticated call to the Worker API. Attaches the session bearer token. */
 export async function api<T = unknown>(
   path: string,
@@ -193,6 +200,84 @@ export function getSubmission(id: string) {
   return api<SubmissionDetailResponse>(
     `/api/submissions/${id}`
   );
+}
+
+// ---- Phase 4 (Quote Pipeline UI) typed read-only endpoints ----
+
+export interface WorkloadEntry {
+  user_id: string;
+  email: string | null;
+  active_for_assignment: boolean;
+  open_count: number;
+  by_stage: {
+    new: number;
+    triaged: number;
+    assigned: number;
+    in_progress: number;
+    quoted: number;
+  };
+  by_line: {
+    personal: number;
+    commercial: number;
+  };
+}
+
+/** Manager/admin only. Server responds 403 for every other role. */
+export function getPipelineWorkload() {
+  return api<{ ok: true; workload: WorkloadEntry[] }>("/api/pipeline/workload");
+}
+
+export interface QuickSubmissionResponse {
+  ok: true;
+  submission: {
+    id: string;
+    client_name: string | null;
+    broker_name: string | null;
+    broker_email: string | null;
+    request_type: string | null;
+    pipeline_stage: PipelineStage | null;
+    queue_status: string | null;
+    line_of_business: "personal" | "commercial" | null;
+    complexity: "standard" | "complex" | null;
+    priority: "low" | "normal" | "high" | "urgent" | null;
+    assigned_to: string | null;
+    assigned_to_email: string | null;
+    next_action: string | null;
+    due_at: string | null;
+    source_type: "manual" | "email" | "api" | null;
+    received_at: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+    last_pipeline_stage_changed_at: string | null;
+  };
+  documents: {
+    total: number;
+    active: number;
+    pending_scan: number;
+    clean: number;
+    failed: number;
+  };
+  assignment_events: Array<{
+    id: string;
+    assignment_source: string;
+    event_type: string;
+    from_user_id: string | null;
+    to_user_id: string | null;
+    actor_user_id: string | null;
+    created_at: string;
+  }>;
+  history: Array<{
+    id: string;
+    action: string;
+    actor_id: string | null;
+    actor_email: string | null;
+    metadata: unknown;
+    created_at: string;
+  }>;
+}
+
+export function getSubmissionQuick(id: string) {
+  return api<QuickSubmissionResponse>(`/api/submissions/${id}/quick`);
 }
 
 /** Request a signed upload URL, then PUT the file straight to storage. */

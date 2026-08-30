@@ -1,22 +1,21 @@
 /**
- * Atlas — work queue
+ * Atlas — Quote pipeline
  * ----------------------------------------------------------------------------
- * The screen an underwriter starts the day in. It answers, in this order:
- * what needs me, what is waiting on someone else, and what should I open next.
+ * (Route name remains "queue" and the hash remains #submissions so old
+ * bookmarks keep working. The user-facing name is now "Quote pipeline".)
  *
- * The metric tiles are not decoration — each one is a filter. Clicking
- * "Needs attention" scopes the table below it, so a number never leads to a
- * dead end.
+ * Answers, in order: what's coming in, what's mine, and what's waiting on
+ * someone else. The lifecycle metric tiles double as pipeline-stage filters;
+ * a saved view scopes the visible list without re-defining those numbers.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listSubmissions, type SubmissionListItem } from "../lib/atlas";
 import {
   Button,
   EmptyState,
   ErrorState,
   FilterChips,
-  Metric,
   PageHeader,
   StatusBadge,
   type ActiveFilter,
@@ -24,7 +23,13 @@ import {
 import { DataTable, type Column, type SortState } from "../components/DataTable";
 import ColumnPicker from "../components/ColumnPicker";
 import { Icon } from "../components/Icon";
-import { canCreateSubmission, type AtlasUiRole } from "../components/AppShell";
+import PipelineStats, {
+  type PipelineStageFilter,
+} from "../components/PipelineStats";
+import WorkloadPanel from "../components/WorkloadPanel";
+import PipelineQuickDrawer from "../components/PipelineQuickDrawer";
+import QuickCapture from "../components/QuickCapture";
+import { canCreateSubmission, canManage, type AtlasUiRole } from "../components/AppShell";
 import {
   EMPTY,
   formatDate,
@@ -35,31 +40,26 @@ import {
 } from "../lib/format";
 import {
   LINE_OF_BUSINESS_OPTIONS,
+  PIPELINE_STAGE,
   PRIORITY_ORDER,
   QUEUE_STATUS_OPTIONS,
-  WORKFLOW_COLUMNS,
-  WORKFLOW_STATUS,
   lineOfBusinessLabel,
+  pipelineStage,
   priority as priorityStatus,
   queueStatus,
-  workflowStatus,
 } from "../lib/status";
+import {
+  defaultViewForRole,
+  filterPipelineView,
+  needsAttention as pipelineNeedsAttention,
+  stageAgeMs,
+  type PipelineSavedView,
+  type AtlasRoleForView,
+} from "../lib/pipeline";
 
 type ViewMode = "list" | "board";
 
-/** The saved views the metric tiles switch between. */
-type Focus = "all" | "attention" | "waiting" | "referred" | "unassigned";
-
-const FOCUS_LABELS: Record<Focus, string> = {
-  all: "Everything",
-  attention: "Needs attention",
-  waiting: "Waiting for information",
-  referred: "Referral required",
-  unassigned: "Unassigned",
-};
-
 type Filters = {
-  status: string;
   queue_status: string;
   line_of_business: "" | "personal" | "commercial";
   priority: "" | "low" | "normal" | "high" | "urgent";
@@ -67,35 +67,57 @@ type Filters = {
 };
 
 const EMPTY_FILTERS: Filters = {
-  status: "",
   queue_status: "",
   line_of_business: "",
   priority: "",
   pilot: false,
 };
 
-/** A submission wants a human when it is overdue, escalated, or parked. */
-function needsAttention(item: SubmissionListItem): boolean {
-  const overdue = Boolean(item.due_at && new Date(item.due_at).getTime() < Date.now());
-  return (
-    overdue ||
-    item.priority === "urgent" ||
-    item.priority === "high" ||
-    ["waiting_info", "referred"].includes(item.queue_status ?? "") ||
-    ["missing_info_requested", "referred_to_insurer"].includes(item.status)
-  );
+interface SavedViewDef {
+  key: PipelineSavedView;
+  label: string;
 }
 
-function isWaiting(item: SubmissionListItem): boolean {
-  return item.queue_status === "waiting_info" || item.status === "missing_info_requested";
-}
-
-function isReferred(item: SubmissionListItem): boolean {
-  return item.queue_status === "referred" || item.status === "referred_to_insurer";
-}
-
-function isUnassigned(item: SubmissionListItem): boolean {
-  return !item.assigned_to && !item.assigned_underwriter;
+function savedViewsForRole(role: AtlasUiRole): SavedViewDef[] {
+  if (role === "broker") {
+    return [
+      { key: "all", label: "My submissions" },
+      { key: "needs_attention", label: "Needs attention" },
+      { key: "waiting_info", label: "Waiting for information" },
+      { key: "referred", label: "Referred" },
+      { key: "quoted", label: "Quoted" },
+    ];
+  }
+  if (role === "readonly") {
+    return [
+      { key: "all", label: "All" },
+      { key: "needs_attention", label: "Needs attention" },
+      { key: "waiting_info", label: "Waiting for information" },
+      { key: "referred", label: "Referred" },
+      { key: "quoted", label: "Quoted" },
+    ];
+  }
+  if (role === "consultant" || role === "underwriter") {
+    return [
+      { key: "mine", label: "Mine" },
+      { key: "all", label: "All accessible" },
+      { key: "unassigned", label: "Unassigned" },
+      { key: "needs_attention", label: "Needs attention" },
+      { key: "waiting_info", label: "Waiting for information" },
+      { key: "referred", label: "Referred" },
+      { key: "quoted", label: "Quoted" },
+    ];
+  }
+  // manager / admin
+  return [
+    { key: "all", label: "All" },
+    { key: "mine", label: "Mine" },
+    { key: "unassigned", label: "Unassigned" },
+    { key: "needs_attention", label: "Needs attention" },
+    { key: "waiting_info", label: "Waiting for information" },
+    { key: "referred", label: "Referred" },
+    { key: "quoted", label: "Quoted" },
+  ];
 }
 
 /** The action the workflow status implies, when nobody has written one down. */
@@ -116,21 +138,48 @@ function defaultNextAction(item: SubmissionListItem): string {
   }
 }
 
+function formatStageAge(ms: number | null): string {
+  if (ms == null) return "";
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
+  if (days > 1) return `In this stage for ${days} days`;
+  if (days === 1) return "In this stage for 1 day";
+  const hours = Math.floor(ms / (1000 * 60 * 60));
+  if (hours >= 1) return `In this stage for ${hours}h`;
+  return "In this stage for under 1h";
+}
+
+const PIPELINE_BOARD_LANES: { key: string; title: string; match: (row: SubmissionListItem) => boolean }[] = [
+  { key: "new", title: "New", match: (r) => r.pipeline_stage === "new" },
+  { key: "triaged", title: "Triaged", match: (r) => r.pipeline_stage === "triaged" },
+  { key: "assigned", title: "Assigned", match: (r) => r.pipeline_stage === "assigned" },
+  { key: "in_progress", title: "In progress", match: (r) => r.pipeline_stage === "in_progress" },
+  { key: "quoted", title: "Quoted", match: (r) => r.pipeline_stage === "quoted" },
+  { key: "not_initialised", title: "Not initialised", match: (r) => (r.pipeline_stage ?? null) === null },
+  { key: "bound", title: "Bound", match: (r) => r.pipeline_stage === "bound" },
+  { key: "declined", title: "Declined", match: (r) => r.pipeline_stage === "declined" },
+  { key: "lost", title: "Lost", match: (r) => r.pipeline_stage === "lost" },
+];
+
 export default function WorkQueue({
   role,
+  currentUserId,
   search,
   onSearchChange,
   onNew,
   onOpen,
 }: {
   role: AtlasUiRole;
+  currentUserId?: string | null;
   search: string;
   onSearchChange: (value: string) => void;
   onNew: () => void;
   onOpen: (id: string) => void;
 }) {
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
-  const [focus, setFocus] = useState<Focus>("all");
+  const [savedView, setSavedView] = useState<PipelineSavedView>(() =>
+    defaultViewForRole(role as AtlasRoleForView)
+  );
+  const [stageFilter, setStageFilter] = useState<PipelineStageFilter>(null);
   const [mode, setMode] = useState<ViewMode>("list");
   const [items, setItems] = useState<SubmissionListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -138,15 +187,18 @@ export default function WorkQueue({
   const [sort, setSort] = useState<SortState>({ columnId: "updated", direction: "desc" });
   const [hiddenColumns, setHiddenColumns] = useState<string[]>(["created", "line"]);
   const [reloadToken, setReloadToken] = useState(0);
+  const [drawerId, setDrawerId] = useState<string | null>(null);
+  const [captureOpen, setCaptureOpen] = useState(false);
+
+  const savedViews = savedViewsForRole(role);
+  const savedViewLabel =
+    savedViews.find((v) => v.key === savedView)?.label ?? savedViews[0]?.label ?? "";
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
   const hasActiveJobs = items.some((item) => item.active_job);
   useEffect(() => {
     if (!hasActiveJobs) return;
-    // Only poll while the tab is visible. A background tab quietly
-    // firing an authenticated queue-list fetch every 5s is wasted work
-    // and competes with foreground traffic.
     let timer: number | null = null;
     const start = () => {
       if (timer !== null) return;
@@ -169,18 +221,18 @@ export default function WorkQueue({
     };
   }, [hasActiveJobs]);
 
+  // Snapshot the initial load state so debounce doesn't inflate the search delay
+  // beyond 220ms — matches the pre-Phase-4 behaviour the existing tests pin.
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+
   useEffect(() => {
     let live = true;
-    // Debounce free-text search AND the active-job poll. A typing user
-    // must never trigger a queue-list fetch every 5 s alongside their
-    // keystrokes; sharing the 220 ms tail keeps the search feel intact
-    // and coalesces a burst of poll + type into one request.
     const timer = window.setTimeout(
       () => {
-        if (items.length === 0) setLoading(true);
+        if (itemsRef.current.length === 0) setLoading(true);
         listSubmissions({
           q: search || undefined,
-          status: filters.status || undefined,
           queue_status: filters.queue_status || undefined,
           line_of_business: filters.line_of_business || undefined,
           priority: filters.priority || undefined,
@@ -195,19 +247,14 @@ export default function WorkQueue({
             if (!live) return;
             setError(
               cause.message === "not_authenticated"
-                ? "Your session has expired. Sign in again to load the work queue."
-                : "The work queue could not be loaded. The Atlas API did not respond."
+                ? "Your session has expired. Sign in again to load the quote pipeline."
+                : "The quote pipeline could not be loaded. The Atlas API did not respond."
             );
           })
           .finally(() => {
             if (live) setLoading(false);
           });
       },
-      // Debounce both the free-text search AND any poll-triggered
-      // reload. A dropdown change starts a fresh effect with the same
-      // 220 ms tail; a keystroke-driven change already had 0 ms, but the
-      // poll (which increments reloadToken) now shares this tail so a
-      // typing user's fetch and the 5 s poll coalesce into one request.
       search || reloadToken > 0 ? 220 : 0
     );
     return () => {
@@ -216,31 +263,26 @@ export default function WorkQueue({
     };
   }, [search, filters, reloadToken]);
 
-  const counts = useMemo(
-    () => ({
-      total: items.length,
-      attention: items.filter(needsAttention).length,
-      waiting: items.filter(isWaiting).length,
-      referred: items.filter(isReferred).length,
-      unassigned: items.filter(isUnassigned).length,
-    }),
-    [items]
+  // Filter order (deterministic, documented for downstream readers):
+  //   1. BASE ITEMS = server-scoped + search + queue_status/priority/line filters
+  //   2. saved view
+  //   3. local pipeline stage filter
+  // PipelineStats always counts BASE ITEMS — never the visible slice.
+  const afterSavedView = useMemo(
+    () =>
+      filterPipelineView(items, savedView, {
+        currentUserId: currentUserId ?? null,
+      }),
+    [items, savedView, currentUserId]
   );
 
   const visible = useMemo(() => {
-    switch (focus) {
-      case "attention":
-        return items.filter(needsAttention);
-      case "waiting":
-        return items.filter(isWaiting);
-      case "referred":
-        return items.filter(isReferred);
-      case "unassigned":
-        return items.filter(isUnassigned);
-      default:
-        return items;
+    if (!stageFilter) return afterSavedView;
+    if (stageFilter === "not_initialised") {
+      return afterSavedView.filter((r) => (r.pipeline_stage ?? null) === null);
     }
-  }, [focus, items]);
+    return afterSavedView.filter((r) => r.pipeline_stage === stageFilter);
+  }, [afterSavedView, stageFilter]);
 
   const activeFilters: ActiveFilter[] = [];
   if (search) {
@@ -251,20 +293,12 @@ export default function WorkQueue({
       onRemove: () => onSearchChange(""),
     });
   }
-  if (filters.status) {
-    activeFilters.push({
-      key: "status",
-      label: "Stage",
-      value: workflowStatus(filters.status).label,
-      onRemove: () => setFilters((current) => ({ ...current, status: "" })),
-    });
-  }
   if (filters.queue_status) {
     activeFilters.push({
       key: "queue_status",
       label: "Queue state",
       value: queueStatus(filters.queue_status).label,
-      onRemove: () => setFilters((current) => ({ ...current, queue_status: "" })),
+      onRemove: () => setFilters((c) => ({ ...c, queue_status: "" })),
     });
   }
   if (filters.line_of_business) {
@@ -272,7 +306,7 @@ export default function WorkQueue({
       key: "line",
       label: "Line",
       value: lineOfBusinessLabel(filters.line_of_business),
-      onRemove: () => setFilters((current) => ({ ...current, line_of_business: "" })),
+      onRemove: () => setFilters((c) => ({ ...c, line_of_business: "" })),
     });
   }
   if (filters.priority) {
@@ -280,23 +314,32 @@ export default function WorkQueue({
       key: "priority",
       label: "Priority",
       value: priorityStatus(filters.priority).label,
-      onRemove: () => setFilters((current) => ({ ...current, priority: "" })),
+      onRemove: () => setFilters((c) => ({ ...c, priority: "" })),
     });
   }
-  if (filters.pilot) {
+  if (filters.pilot && role !== "broker") {
     activeFilters.push({
       key: "pilot",
       label: "Pilot",
       value: "Pilot cases only",
-      onRemove: () => setFilters((current) => ({ ...current, pilot: false })),
+      onRemove: () => setFilters((c) => ({ ...c, pilot: false })),
     });
   }
-  if (focus !== "all") {
+  if (stageFilter) {
     activeFilters.push({
-      key: "focus",
+      key: "stage",
+      label: "Pipeline stage",
+      value:
+        stageFilter === "not_initialised" ? "Not initialised" : pipelineStage(stageFilter).label,
+      onRemove: () => setStageFilter(null),
+    });
+  }
+  if (savedView !== defaultViewForRole(role as AtlasRoleForView)) {
+    activeFilters.push({
+      key: "view",
       label: "View",
-      value: FOCUS_LABELS[focus],
-      onRemove: () => setFocus("all"),
+      value: savedViewLabel,
+      onRemove: () => setSavedView(defaultViewForRole(role as AtlasRoleForView)),
     });
   }
 
@@ -317,7 +360,7 @@ export default function WorkQueue({
             >
               {row.client_name || "Untitled submission"}
             </button>
-            {row.pilot_flag && (
+            {row.pilot_flag && role !== "broker" && (
               <span className="atlas-badge atlas-badge--info" style={{ flexShrink: 0 }}>
                 <span className="atlas-badge__label">Pilot</span>
               </span>
@@ -356,30 +399,51 @@ export default function WorkQueue({
     },
     {
       id: "stage",
-      header: "Stage",
-      sortValue: (row) => workflowStatus(row.status).label,
-      cell: (row) => (
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <StatusBadge status={workflowStatus(row.status)} />
-          {row.active_job && (
-            row.active_job.cancellation_requested ? (
-              <span className="atlas-badge atlas-badge--warning" style={{ fontSize: 11 }}>
-                <span className="atlas-badge__label">Cancelling</span>
-              </span>
+      header: "Pipeline stage",
+      sortValue: (row) => pipelineStage(row.pipeline_stage).label,
+      cell: (row) => {
+        const stage = row.pipeline_stage ?? null;
+        const age = stage != null ? stageAgeMs(row) : null;
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            {stage == null ? (
+              <span className="atlas-text-muted">Not initialised</span>
             ) : (
-              <span className="atlas-badge atlas-badge--info" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}>
-                <span className="atlas-pulse-dot" />
-                <span className="atlas-badge__label">
-                  {row.active_job.job_type === "extraction" ? "Extracting" :
-                   row.active_job.job_type === "recommendation" ? "Recommending" :
-                   row.active_job.job_type === "quote_review" ? "Reviewing" : "Processing"}
-                  {row.active_job.progress_percent != null ? ` ${Math.round(row.active_job.progress_percent)}%` : "…"}
-                </span>
+              <StatusBadge status={pipelineStage(stage)} />
+            )}
+            {stage != null && age != null && (
+              <span className="atlas-text-muted" style={{ fontSize: 12 }}>
+                {formatStageAge(age)}
               </span>
-            )
-          )}
-        </div>
-      ),
+            )}
+            {row.active_job &&
+              (row.active_job.cancellation_requested ? (
+                <span className="atlas-badge atlas-badge--warning" style={{ fontSize: 11 }}>
+                  <span className="atlas-badge__label">Cancelling</span>
+                </span>
+              ) : (
+                <span
+                  className="atlas-badge atlas-badge--info"
+                  style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}
+                >
+                  <span className="atlas-pulse-dot" />
+                  <span className="atlas-badge__label">
+                    {row.active_job.job_type === "extraction"
+                      ? "Extracting"
+                      : row.active_job.job_type === "recommendation"
+                      ? "Recommending"
+                      : row.active_job.job_type === "quote_review"
+                      ? "Reviewing"
+                      : "Processing"}
+                    {row.active_job.progress_percent != null
+                      ? ` ${Math.round(row.active_job.progress_percent)}%`
+                      : "…"}
+                  </span>
+                </span>
+              ))}
+          </div>
+        );
+      },
     },
     {
       id: "queue",
@@ -399,7 +463,11 @@ export default function WorkQueue({
       sortValue: (row) => (row.assigned_to_email ?? "zzz").toLowerCase(),
       cell: (row) =>
         row.assigned_to_email ? (
-          <span className="atlas-truncate" style={{ display: "block", maxWidth: "20ch" }} title={row.assigned_to_email}>
+          <span
+            className="atlas-truncate"
+            style={{ display: "block", maxWidth: "20ch" }}
+            title={row.assigned_to_email}
+          >
             {row.assigned_to_email}
           </span>
         ) : (
@@ -458,18 +526,28 @@ export default function WorkQueue({
     },
   ];
 
+  const isBroker = role === "broker";
+  const showWorkload = canManage(role);
+  const showPilot = !isBroker;
+
+  const description = isBroker
+    ? "Track the quote requests you've submitted to Atlas."
+    : "Track every quote request from intake through assignment, underwriting and outcome.";
+
   return (
     <div>
       <PageHeader
         eyebrow="Underwriting operations"
-        title="Work queue"
-        description="Every live submission, and the next human action each one is waiting on."
+        title="Quote pipeline"
+        description={description}
         actions={
           <>
-            <div className="atlas-btn-group" role="group" aria-label="Queue view">
+            <div className="atlas-btn-group" role="group" aria-label="Pipeline view">
               <button
                 type="button"
-                className={`atlas-btn atlas-btn--sm atlas-btn--ghost ${mode === "list" ? "atlas-btn--pressed" : ""}`}
+                className={`atlas-btn atlas-btn--sm atlas-btn--ghost ${
+                  mode === "list" ? "atlas-btn--pressed" : ""
+                }`}
                 aria-pressed={mode === "list"}
                 onClick={() => setMode("list")}
               >
@@ -478,7 +556,9 @@ export default function WorkQueue({
               </button>
               <button
                 type="button"
-                className={`atlas-btn atlas-btn--sm atlas-btn--ghost ${mode === "board" ? "atlas-btn--pressed" : ""}`}
+                className={`atlas-btn atlas-btn--sm atlas-btn--ghost ${
+                  mode === "board" ? "atlas-btn--pressed" : ""
+                }`}
                 aria-pressed={mode === "board"}
                 onClick={() => setMode("board")}
               >
@@ -486,65 +566,52 @@ export default function WorkQueue({
                 Board
               </button>
             </div>
-            <Button
-              variant="primary"
-              icon="plus"
-              onClick={onNew}
-              disabled={!canCreateSubmission(role)}
-              title={!canCreateSubmission(role) ? "Your role cannot create submissions." : undefined}
-            >
-              New submission
-            </Button>
+            {canCreateSubmission(role) && (
+              <>
+                <Button variant="primary" icon="plus" onClick={() => setCaptureOpen(true)}>
+                  Quick capture
+                </Button>
+                <Button variant="ghost" onClick={onNew}>
+                  Full intake
+                </Button>
+              </>
+            )}
           </>
         }
       />
 
-      <section className="atlas-metrics atlas-queue__metrics" aria-label="Queue summary">
-        <Metric
-          label="In the queue"
-          value={counts.total}
-          loading={loading}
-          hint="Submissions matching the current filters."
-          active={focus === "all"}
-          onClick={() => setFocus("all")}
-        />
-        <Metric
-          label="Needs attention"
-          value={counts.attention}
-          loading={loading}
-          tone={counts.attention > 0 ? "warning" : "default"}
-          hint="Overdue, high priority, waiting on information, or referred."
-          active={focus === "attention"}
-          onClick={() => setFocus(focus === "attention" ? "all" : "attention")}
-        />
-        <Metric
-          label="Waiting for information"
-          value={counts.waiting}
-          loading={loading}
-          hint="Parked until the broker or client replies."
-          active={focus === "waiting"}
-          onClick={() => setFocus(focus === "waiting" ? "all" : "waiting")}
-        />
-        <Metric
-          label="Referral required"
-          value={counts.referred}
-          loading={loading}
-          tone={counts.referred > 0 ? "warning" : "default"}
-          hint="With the insurer or a senior underwriter for a decision."
-          active={focus === "referred"}
-          onClick={() => setFocus(focus === "referred" ? "all" : "referred")}
-        />
-        <Metric
-          label="Unassigned"
-          value={counts.unassigned}
-          loading={loading}
-          hint="Sitting on the shared queue with no named owner."
-          active={focus === "unassigned"}
-          onClick={() => setFocus(focus === "unassigned" ? "all" : "unassigned")}
-        />
+      <PipelineStats
+        items={items}
+        loading={loading}
+        active={stageFilter}
+        onToggle={setStageFilter}
+        scope={isBroker ? "broker" : "internal"}
+      />
+
+      <section
+        className="atlas-toolbar"
+        aria-label="Saved views"
+        style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: "var(--atlas-space-3)" }}
+      >
+        {savedViews.map((v) => (
+          <button
+            key={v.key}
+            type="button"
+            className={`atlas-btn atlas-btn--sm ${
+              savedView === v.key ? "atlas-btn--pressed" : "atlas-btn--ghost"
+            }`}
+            aria-pressed={savedView === v.key}
+            onClick={() => setSavedView(v.key)}
+          >
+            {v.label}
+          </button>
+        ))}
       </section>
 
-      <section className="atlas-toolbar atlas-queue__controls" aria-label="Filter the work queue">
+      <section
+        className="atlas-toolbar atlas-queue__controls"
+        aria-label="Filter the quote pipeline"
+      >
         <div className="atlas-toolbar__field atlas-toolbar__field--grow">
           <label htmlFor="queue-search">Search</label>
           <div className="atlas-search">
@@ -555,25 +622,31 @@ export default function WorkQueue({
               className="atlas-input"
               value={search}
               placeholder="Client, broker, or request type"
-              onChange={(event) => onSearchChange(event.target.value)}
+              onChange={(e) => onSearchChange(e.target.value)}
             />
           </div>
         </div>
 
         <div className="atlas-toolbar__field">
-          <label htmlFor="queue-stage">Stage</label>
+          <label htmlFor="queue-pipeline-stage">Pipeline stage</label>
           <select
-            id="queue-stage"
+            id="queue-pipeline-stage"
             className="atlas-select"
-            value={filters.status}
-            onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
+            value={stageFilter ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              setStageFilter(
+                (v === "" ? null : (v as PipelineStageFilter)) as PipelineStageFilter
+              );
+            }}
           >
             <option value="">All stages</option>
-            {Object.entries(WORKFLOW_STATUS).map(([value, meta]) => (
+            {Object.entries(PIPELINE_STAGE).map(([value, meta]) => (
               <option key={value} value={value}>
                 {meta.label}
               </option>
             ))}
+            <option value="not_initialised">Not initialised</option>
           </select>
         </div>
 
@@ -583,7 +656,9 @@ export default function WorkQueue({
             id="queue-state"
             className="atlas-select"
             value={filters.queue_status}
-            onChange={(event) => setFilters((current) => ({ ...current, queue_status: event.target.value }))}
+            onChange={(e) =>
+              setFilters((c) => ({ ...c, queue_status: e.target.value }))
+            }
           >
             <option value="">All queue states</option>
             {QUEUE_STATUS_OPTIONS.map((option) => (
@@ -600,10 +675,10 @@ export default function WorkQueue({
             id="queue-line"
             className="atlas-select"
             value={filters.line_of_business}
-            onChange={(event) =>
-              setFilters((current) => ({
-                ...current,
-                line_of_business: event.target.value as Filters["line_of_business"],
+            onChange={(e) =>
+              setFilters((c) => ({
+                ...c,
+                line_of_business: e.target.value as Filters["line_of_business"],
               }))
             }
           >
@@ -622,8 +697,8 @@ export default function WorkQueue({
             id="queue-priority"
             className="atlas-select"
             value={filters.priority}
-            onChange={(event) =>
-              setFilters((current) => ({ ...current, priority: event.target.value as Filters["priority"] }))
+            onChange={(e) =>
+              setFilters((c) => ({ ...c, priority: e.target.value as Filters["priority"] }))
             }
           >
             <option value="">All priorities</option>
@@ -634,17 +709,21 @@ export default function WorkQueue({
           </select>
         </div>
 
-        <div className="atlas-toolbar__field" style={{ alignSelf: "flex-end" }}>
-          <button
-            type="button"
-            className={`atlas-btn atlas-btn--sm ${filters.pilot ? "atlas-btn--pressed" : "atlas-btn--ghost"}`}
-            aria-pressed={filters.pilot}
-            onClick={() => setFilters((current) => ({ ...current, pilot: !current.pilot }))}
-            title="Show only submissions flagged as pilot cases"
-          >
-            Pilot only
-          </button>
-        </div>
+        {showPilot && (
+          <div className="atlas-toolbar__field" style={{ alignSelf: "flex-end" }}>
+            <button
+              type="button"
+              className={`atlas-btn atlas-btn--sm ${
+                filters.pilot ? "atlas-btn--pressed" : "atlas-btn--ghost"
+              }`}
+              aria-pressed={filters.pilot}
+              onClick={() => setFilters((c) => ({ ...c, pilot: !c.pilot }))}
+              title="Show only submissions flagged as pilot cases"
+            >
+              Pilot only
+            </button>
+          </div>
+        )}
 
         {mode === "list" && (
           <div className="atlas-toolbar__field" style={{ alignSelf: "flex-end" }}>
@@ -657,16 +736,12 @@ export default function WorkQueue({
         filters={activeFilters}
         onClearAll={() => {
           setFilters(EMPTY_FILTERS);
-          setFocus("all");
+          setSavedView(defaultViewForRole(role as AtlasRoleForView));
+          setStageFilter(null);
           onSearchChange("");
         }}
-        resultLabel={
-          loading ? "Loading…" : `${pluralise(visible.length, "submission")} shown`
-        }
+        resultLabel={loading ? "Loading…" : `${pluralise(visible.length, "submission")} shown`}
       />
-      {/* Polite screen-reader announcement of the visible result count.
-          The list fetch is debounced 220ms upstream, so this only updates
-          after search or filters settle — never per keystroke. */}
       <span className="atlas-sr-only" role="status" aria-live="polite">
         {loading ? "" : `${pluralise(visible.length, "submission")} shown`}
       </span>
@@ -674,14 +749,14 @@ export default function WorkQueue({
       <div style={{ marginTop: "var(--atlas-space-4)" }}>
         {error ? (
           <ErrorState
-            title="The work queue could not be loaded"
+            title="The quote pipeline could not be loaded"
             message={error}
             onRetry={reload}
             retryLabel="Retry"
           />
         ) : mode === "list" ? (
           <DataTable
-            caption="Submissions in the work queue"
+            caption="Submissions in the quote pipeline"
             columns={columns}
             hiddenColumns={hiddenColumns}
             rows={visible}
@@ -689,24 +764,21 @@ export default function WorkQueue({
             loading={loading}
             sort={sort}
             onSortChange={setSort}
-            onRowActivate={(row) => onOpen(row.id)}
-            rowAttention={needsAttention}
-            // Pin Client to the left of the horizontal scroll on
-            // narrow viewports. Without this the queue's home screen
-            // clips every column after Broker at 375 with no obvious
-            // scroll hint; with it, Client stays on-screen while the
-            // reader pages the rest of the row into view.
+            onRowActivate={(row) => setDrawerId(row.id)}
+            selectedKey={drawerId}
+            rowAttention={pipelineNeedsAttention}
             stickyFirstColumn
             empty={
               activeFilters.length > 0 ? (
                 <EmptyState
                   title="No submissions match these filters"
-                  body="Nothing in the queue matches the current search and filters. Clear one to widen the view."
+                  body="Nothing in the pipeline matches the current search and filters. Clear one to widen the view."
                   actions={
                     <Button
                       onClick={() => {
                         setFilters(EMPTY_FILTERS);
-                        setFocus("all");
+                        setSavedView(defaultViewForRole(role as AtlasRoleForView));
+                        setStageFilter(null);
                         onSearchChange("");
                       }}
                     >
@@ -716,12 +788,12 @@ export default function WorkQueue({
                 />
               ) : (
                 <EmptyState
-                  title="The work queue is empty"
+                  title="The quote pipeline is empty"
                   body="No submissions have been captured yet. Create one to start the underwriting workflow."
                   actions={
                     canCreateSubmission(role) ? (
-                      <Button variant="primary" icon="plus" onClick={onNew}>
-                        New submission
+                      <Button variant="primary" icon="plus" onClick={() => setCaptureOpen(true)}>
+                        Quick capture
                       </Button>
                     ) : undefined
                   }
@@ -730,14 +802,42 @@ export default function WorkQueue({
             }
           />
         ) : (
-          <QueueBoard items={visible} loading={loading} onOpen={onOpen} />
+          <PipelineBoard items={visible} loading={loading} onOpen={(id) => setDrawerId(id)} />
         )}
       </div>
+
+      {showWorkload && (
+        <div style={{ marginTop: "var(--atlas-space-4)" }}>
+          <WorkloadPanel reloadToken={reloadToken} />
+        </div>
+      )}
+
+      <PipelineQuickDrawer
+        submissionId={drawerId}
+        role={role}
+        onClose={() => setDrawerId(null)}
+        onOpenFull={(id) => {
+          setDrawerId(null);
+          onOpen(id);
+        }}
+      />
+
+      {canCreateSubmission(role) && (
+        <QuickCapture
+          open={captureOpen}
+          onClose={() => setCaptureOpen(false)}
+          onCreated={(id) => {
+            setCaptureOpen(false);
+            reload();
+            setDrawerId(id);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function QueueBoard({
+function PipelineBoard({
   items,
   loading,
   onOpen,
@@ -749,7 +849,7 @@ function QueueBoard({
   if (loading) {
     return (
       <div className="atlas-board" aria-hidden="true">
-        {WORKFLOW_COLUMNS.map((column) => (
+        {PIPELINE_BOARD_LANES.slice(0, 5).map((column) => (
           <div className="atlas-board__col" key={column.key}>
             <div className="atlas-board__head">
               <span className="atlas-board__title">{column.title}</span>
@@ -764,10 +864,17 @@ function QueueBoard({
     );
   }
 
+  const lanes = PIPELINE_BOARD_LANES.filter((lane) => {
+    // Always show the five active lanes; only render terminal / not_initialised
+    // if there are rows for them so the board isn't cluttered.
+    if (["new", "triaged", "assigned", "in_progress", "quoted"].includes(lane.key)) return true;
+    return items.some((r) => lane.match(r));
+  });
+
   return (
     <div className="atlas-board">
-      {WORKFLOW_COLUMNS.map((column) => {
-        const cards = items.filter((item) => column.match(item.status));
+      {lanes.map((column) => {
+        const cards = items.filter((item) => column.match(item));
         return (
           <section className="atlas-board__col" key={column.key} aria-label={column.title}>
             <div className="atlas-board__head">
@@ -793,22 +900,14 @@ function QueueBoard({
                     </span>
                     <span className="atlas-queue__tagcell">
                       <StatusBadge status={priorityStatus(item.priority)} />
-                      {needsAttention(item) && <StatusBadge status={queueStatus(item.queue_status)} />}
-                      {item.active_job && (
-                        item.active_job.cancellation_requested ? (
-                          <span className="atlas-badge atlas-badge--warning" style={{ fontSize: 11 }}>
-                            <span className="atlas-badge__label">Cancelling</span>
-                          </span>
-                        ) : (
-                          <span className="atlas-badge atlas-badge--info" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}>
-                            <span className="atlas-pulse-dot" />
-                            <span className="atlas-badge__label">
-                              {item.active_job.job_type === "extraction" ? "Extracting" :
-                               item.active_job.job_type === "recommendation" ? "Recommending" : "Processing"}
-                              {item.active_job.progress_percent != null ? ` ${Math.round(item.active_job.progress_percent)}%` : "…"}
-                            </span>
-                          </span>
-                        )
+                      {item.assigned_to_email && (
+                        <span
+                          className="atlas-text-muted"
+                          style={{ fontSize: 11 }}
+                          title={item.assigned_to_email}
+                        >
+                          {item.assigned_to_email}
+                        </span>
                       )}
                     </span>
                     <span className="atlas-board__card-next">
@@ -826,4 +925,4 @@ function QueueBoard({
 }
 
 /** Shared with the submission workspace so both agree on what "needs a human" means. */
-export { needsAttention as submissionNeedsAttention, defaultNextAction };
+export { pipelineNeedsAttention as submissionNeedsAttention, defaultNextAction };

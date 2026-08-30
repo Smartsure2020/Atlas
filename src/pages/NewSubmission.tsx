@@ -317,12 +317,12 @@ export default function NewSubmission({
        * to the form fields they belong to.
        */}
       <PageHeader
-        breadcrumbs={[{ label: "Work queue", onClick: requestCancel }, { label: "New submission" }]}
+        breadcrumbs={[{ label: "Quote pipeline", onClick: requestCancel }, { label: "New submission" }]}
         title="New submission"
         description="Capture the broker request and attach the client documents. Atlas reads them during extraction."
         actions={
           <Button variant="link" icon="arrow-right" onClick={requestCancel} disabled={working}>
-            Back to work queue
+            Back to quote pipeline
           </Button>
         }
       />

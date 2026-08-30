@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase, currentRole, startLogin } from "./lib/atlas";
+import { supabase, currentRole, currentUserId, startLogin } from "./lib/atlas";
 import { routeFromHash, routeToHash, type Route } from "./lib/router";
 import { AppShell, type AtlasUiRole } from "./components/AppShell";
 import { Button, Notice, TextField, ToastProvider } from "./components/ui";
@@ -29,7 +29,7 @@ type AuthState =
   | { kind: "loading" }
   | { kind: "signed_out" }
   | { kind: "denied"; email: string | null }
-  | { kind: "staff"; email: string | null; role: AtlasUiRole };
+  | { kind: "staff"; email: string | null; role: AtlasUiRole; userId: string | null };
 
 export default function App() {
   const [auth, setAuth] = useState<AuthState>({ kind: "loading" });
@@ -45,7 +45,8 @@ export default function App() {
       }
       const role = await currentRole();
       const email = data.session.user.email ?? null;
-      setAuth(role ? { kind: "staff", email, role } : { kind: "denied", email });
+      const userId = data.session.user.id ?? null;
+      setAuth(role ? { kind: "staff", email, role, userId } : { kind: "denied", email });
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -61,9 +62,10 @@ export default function App() {
         return;
       }
       const email = session.user.email ?? null;
+      const userId = session.user.id ?? null;
       currentRole().then((role) => {
         if (!active) return;
-        setAuth(role ? { kind: "staff", email, role } : { kind: "denied", email });
+        setAuth(role ? { kind: "staff", email, role, userId } : { kind: "denied", email });
       });
     });
 
@@ -110,7 +112,7 @@ export default function App() {
 
   return (
     <ToastProvider>
-      <StaffApp role={auth.role} email={auth.email} />
+      <StaffApp role={auth.role} email={auth.email} userId={auth.userId} />
     </ToastProvider>
   );
 }
@@ -221,7 +223,16 @@ function DevSignIn() {
   );
 }
 
-function StaffApp({ role, email }: { role: AtlasUiRole; email: string | null }) {
+function StaffApp({
+  role,
+  email,
+  userId,
+}: {
+  role: AtlasUiRole;
+  email: string | null;
+  userId: string | null;
+}) {
+  void currentUserId;
   const [route, setRoute] = useState<Route>(() => routeFromHash());
   // Search is shell-level so the global field can scope the queue from anywhere.
   const [search, setSearch] = useState("");
@@ -266,7 +277,7 @@ function StaffApp({ role, email }: { role: AtlasUiRole; email: string | null }) 
       onNavigate={(next) => navigate(next)}
       onSignOut={() => supabase.auth.signOut()}
     >
-      <RouteView route={route} role={role} search={search} onSearchChange={setSearch} navigate={navigate} />
+      <RouteView route={route} role={role} userId={userId} search={search} onSearchChange={setSearch} navigate={navigate} />
     </AppShell>
   );
 }
@@ -274,12 +285,14 @@ function StaffApp({ role, email }: { role: AtlasUiRole; email: string | null }) 
 function RouteView({
   route,
   role,
+  userId,
   search,
   onSearchChange,
   navigate,
 }: {
   route: Route;
   role: AtlasUiRole;
+  userId: string | null;
   search: string;
   onSearchChange: (value: string) => void;
   navigate: (route: Route, options?: { replace?: boolean }) => void;
@@ -347,6 +360,7 @@ function RouteView({
       return (
         <WorkQueue
           role={role}
+          currentUserId={userId}
           search={search}
           onSearchChange={onSearchChange}
           onNew={() => navigate({ name: "new-submission" })}
