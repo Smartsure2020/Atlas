@@ -78,18 +78,24 @@ export default function QuickCapture({ open, onClose, onCreated }: Props) {
     }
   }
 
+  // Single dismissal path: Cancel, X, Escape, and outside-click MUST all clear
+  // entered values before firing onClose. Reopening a dismissed sheet must
+  // start blank — anything else lets a broker's abandoned draft appear when
+  // an underwriter opens the sheet on a shared device.
+  const dismiss = () => {
+    if (submitting) return;
+    reset();
+    onClose();
+  };
+
   return (
     <Modal
       open={open}
       title="Quick capture"
-      onClose={() => {
-        if (submitting) return;
-        reset();
-        onClose();
-      }}
+      onClose={dismiss}
       footer={
         <>
-          <Button variant="ghost" onClick={onClose} disabled={submitting}>
+          <Button variant="ghost" onClick={dismiss} disabled={submitting}>
             Cancel
           </Button>
           <Button

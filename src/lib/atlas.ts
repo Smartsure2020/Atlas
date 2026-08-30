@@ -40,13 +40,6 @@ export async function currentRole(): Promise<
     : null;
 }
 
-/** The signed-in user's Supabase auth UUID. Never their email. Returns null
- *  when signed out. Phase 4: drives the Quote Pipeline "Mine" saved view. */
-export async function currentUserId(): Promise<string | null> {
-  const { data } = await supabase.auth.getUser();
-  return data.user?.id ?? null;
-}
-
 /** Authenticated call to the Worker API. Attaches the session bearer token. */
 export async function api<T = unknown>(
   path: string,

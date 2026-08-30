@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase, currentRole, currentUserId, startLogin } from "./lib/atlas";
+import { supabase, currentRole, startLogin } from "./lib/atlas";
 import { routeFromHash, routeToHash, type Route } from "./lib/router";
 import { AppShell, type AtlasUiRole } from "./components/AppShell";
 import { Button, Notice, TextField, ToastProvider } from "./components/ui";
@@ -232,7 +232,6 @@ function StaffApp({
   email: string | null;
   userId: string | null;
 }) {
-  void currentUserId;
   const [route, setRoute] = useState<Route>(() => routeFromHash());
   // Search is shell-level so the global field can scope the queue from anywhere.
   const [search, setSearch] = useState("");

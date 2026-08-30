@@ -354,6 +354,39 @@ describe("QuickCapture", () => {
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
+  it("Cancel resets form state — reopened sheet does not leak the prior draft", async () => {
+    const user = userEvent.setup();
+    renderWQ({ role: "underwriter", currentUserId: "user-uuid-1" });
+    await screen.findByRole("heading", { level: 1, name: /Quote pipeline/i });
+    const captureBtns = screen.getAllByRole("button", { name: /^Quick capture$/i });
+
+    // Open, type a draft, then Cancel.
+    await user.click(captureBtns[0]);
+    let dialog = await screen.findByRole("dialog");
+    await user.type(
+      within(dialog).getByLabelText(/Client name/i),
+      "Draft Client Should Not Leak"
+    );
+    await user.selectOptions(
+      within(dialog).getByLabelText(/Line of business/i),
+      "commercial"
+    );
+    await user.click(within(dialog).getByRole("button", { name: /^Cancel$/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // Reopen: the fields MUST be blank and the primary submit disabled again.
+    await user.click(captureBtns[0]);
+    dialog = await screen.findByRole("dialog");
+    expect(
+      (within(dialog).getByLabelText(/Client name/i) as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (within(dialog).getByLabelText(/Line of business/i) as HTMLSelectElement).value
+    ).toBe("");
+    expect(within(dialog).getByRole("button", { name: /Create submission/i })).toBeDisabled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
   it("rapid double click results in exactly one createSubmission call", async () => {
     let resolveCreate: (v: unknown) => void = () => undefined;
     mockCreate.mockImplementation(
