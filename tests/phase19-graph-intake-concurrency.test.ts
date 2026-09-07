@@ -158,13 +158,13 @@ test("mailbox lease has bounded stale duration", () => {
 // ---------------------------------------------------------------------------
 
 test("delta cursor is not advanced when processing failed", () => {
-  // On the success path, deltaLink is only passed when the whole round
-  // completed (finalDeltaLink !== null).
+  // Checkpoint 3: the fenced success RPC atomically advances delta_link AND
+  // writes graph_poll_success. It only fires under `if (finalDeltaLink)`.
   assert(
-    /if \(finalDeltaLink\) \{[\s\S]*?releaseLease\([^,]+, mailbox, leaseId, \{[\s\S]*?deltaLink: finalDeltaLink/.test(
+    /if \(finalDeltaLink\) \{[\s\S]*?releaseLeaseSuccess\([^,]+, mailbox, leaseId, \{[\s\S]*?deltaLink: finalDeltaLink/.test(
       INTAKE_SRC,
     ),
-    "durable deltaLink advance is gated on finalDeltaLink !== null",
+    "durable deltaLink advance is gated on finalDeltaLink !== null AND uses the atomic RPC",
   );
 });
 
@@ -252,24 +252,35 @@ test("router wires admin poll route + intake-messages route", () => {
 // ---------------------------------------------------------------------------
 
 test("intake audits never emit sender/subject/body_preview as raw text", () => {
-  // Checkpoint 2 audits use the checked auditChecked() writer.
-  const auditCalls = INTAKE_SRC.match(/await auditChecked\(admin,[\s\S]*?\}\);/g) ?? [];
-  for (const call of auditCalls) {
-    assert(!/subject:/.test(call), "audit metadata must not include subject");
-    assert(!/body_preview:/.test(call), "audit metadata must not include body_preview");
-    assert(!/sender_address:/.test(call), "audit metadata must not include sender_address");
+  // Checkpoint 3: the audit rows are written by the SQL RPCs from only the
+  // dedicated audit-metadata parameters (p_correlation_rule / p_mailbox_hash
+  // / p_graph_message_id_hash / p_candidate_ids). The SQL migration is the
+  // authoritative surface — assert its audit INSERTs never reference the
+  // sender/subject/body_preview columns.
+  const MIGRATION_0030 = readFileSync(
+    resolve("supabase/migrations/0030_graph_intake_privilege_and_atomic_audits.sql"),
+    "utf8",
+  );
+  const auditInserts = MIGRATION_0030.match(/insert into public\.atlas_audit_logs[\s\S]*?\);/g) ?? [];
+  assert(auditInserts.length >= 3, "at least three audit inserts in migration 0030");
+  for (const stmt of auditInserts) {
+    assert(!/p_subject/.test(stmt), "audit metadata must not include subject");
+    assert(!/p_body_preview/.test(stmt), "audit metadata must not include body_preview");
+    assert(!/p_sender_address/.test(stmt), "audit metadata must not include sender_address");
+    assert(!/p_sender_name/.test(stmt), "audit metadata must not include sender_name");
+    assert(!/p_recipients/.test(stmt), "audit metadata must not include recipients");
   }
-  // At least three audit events must fire (attach, needs_review, new+recorded, poll_success).
-  assert(auditCalls.length >= 3, "at least three audit events must fire");
 });
 
 test("intake audits do NOT contain the raw delta link or tokens", () => {
-  const auditCalls = INTAKE_SRC.match(/await auditChecked\(admin,[\s\S]*?\}\);/g) ?? [];
-  for (const call of auditCalls) {
-    assert(!/delta_link:/.test(call), "no delta_link");
-    assert(!/deltaLink/.test(call), "no deltaLink token");
-    assert(!/access_token/.test(call), "no access_token");
-  }
+  // Success metadata builder in the Worker never carries the deltaLink token
+  // or access token.
+  const buildFn = INTAKE_SRC.match(/const buildSuccessMetadata[\s\S]*?\}\);/);
+  assert(buildFn, "buildSuccessMetadata present");
+  const body = buildFn?.[0] ?? "";
+  assert(!/delta_link:/.test(body), "no delta_link in success audit metadata");
+  assert(!/deltaLink/.test(body), "no deltaLink in success audit metadata");
+  assert(!/access_token/.test(body), "no access_token in success audit metadata");
 });
 
 test("mailbox identity is hashed in audit metadata", () => {

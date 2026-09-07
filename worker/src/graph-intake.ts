@@ -127,55 +127,6 @@ function logIntakeError(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Checked audit writer — surfaces failure so callers can abort a poll before
-// the delta cursor advances.
-// ---------------------------------------------------------------------------
-
-async function auditChecked(
-  admin: SupabaseClient,
-  params: {
-    submissionId: string | null;
-    action: string;
-    metadata: Record<string, unknown>;
-  },
-): Promise<void> {
-  const { error } = await admin.from("atlas_audit_logs").insert({
-    submission_id: params.submissionId,
-    action: params.action,
-    // Phase 5A: system/cron audit lines use actor = null per Atlas convention.
-    actor: null,
-    metadata_json: params.metadata,
-  });
-  if (error) {
-    // Do not include the Supabase error.message — it can echo bind values.
-    throw new IntakeAuditError(params.action);
-  }
-}
-
-class IntakeAuditError extends Error {
-  code = "intake_audit_failed";
-  constructor(action: string) {
-    super(`intake_audit_failed:${action}`);
-    this.name = "IntakeAuditError";
-  }
-}
-
-async function insertAlertChecked(
-  admin: SupabaseClient,
-  payload: Parameters<typeof buildAlert>[0],
-): Promise<void> {
-  const { error } = await admin.from("atlas_operational_alerts").insert(buildAlert(payload));
-  if (error) throw new IntakeAlertError();
-}
-class IntakeAlertError extends Error {
-  code = "intake_alert_failed";
-  constructor() {
-    super("intake_alert_failed");
-    this.name = "IntakeAlertError";
-  }
-}
-
-// ---------------------------------------------------------------------------
 // State model
 // ---------------------------------------------------------------------------
 
@@ -430,6 +381,9 @@ interface IngestNewResult {
 async function ingestNewEmail(
   admin: SupabaseClient,
   fields: IngestFields,
+  correlationRule: string,
+  mailboxHash: string,
+  graphMessageIdHash: string,
 ): Promise<IngestNewResult> {
   const { data, error } = await admin.rpc("atlas_intake_ingest_new_email", {
     p_system_actor_id: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
@@ -451,6 +405,10 @@ async function ingestNewEmail(
     p_body_preview: fields.bodyPreview,
     p_has_attachments: fields.hasAttachments,
     p_processing_state: fields.processingState,
+    // Atomic audit metadata (safe: no sender/subject/body).
+    p_correlation_rule: correlationRule,
+    p_mailbox_hash: mailboxHash,
+    p_graph_message_id_hash: graphMessageIdHash,
   });
   if (error) throw new IntakeDbError("intake_ingest_new_failed");
   const row = (Array.isArray(data) ? data[0] : data) as
@@ -473,6 +431,9 @@ async function attachIntakeMessage(
   admin: SupabaseClient,
   submissionId: string,
   fields: IngestFields,
+  correlationRule: string,
+  mailboxHash: string,
+  graphMessageIdHash: string,
 ): Promise<AttachResult> {
   const { data, error } = await admin.rpc("atlas_intake_attach_message", {
     p_submission_id: submissionId,
@@ -488,6 +449,10 @@ async function attachIntakeMessage(
     p_received_at: fields.receivedAt,
     p_has_attachments: fields.hasAttachments,
     p_processing_state: fields.processingState,
+    // Atomic audit metadata (safe: no sender/subject/body).
+    p_correlation_rule: correlationRule,
+    p_mailbox_hash: mailboxHash,
+    p_graph_message_id_hash: graphMessageIdHash,
   });
   if (error) throw new IntakeDbError("intake_attach_failed");
   const row = (Array.isArray(data) ? data[0] : data) as
@@ -496,6 +461,57 @@ async function attachIntakeMessage(
   if (!row) throw new IntakeDbError("intake_attach_returned_no_row");
   return {
     outcome: row.outcome as AttachResult["outcome"],
+    intakeMessageId: String(row.intake_message_id),
+  };
+}
+
+/**
+ * Transactional needs-review ingest. Creates the review-container submission,
+ * the needs_review intake row, the required audit event, AND the operational
+ * alert in one SQL transaction — no partial states possible.
+ */
+async function ingestNeedsReview(
+  admin: SupabaseClient,
+  fields: IngestFields,
+  correlationRule: string,
+  mailboxHash: string,
+  graphMessageIdHash: string,
+  candidateSubmissionIds: string[],
+): Promise<IngestNewResult> {
+  const { data, error } = await admin.rpc("atlas_intake_ingest_needs_review", {
+    p_system_actor_id: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
+    p_source_type: "email",
+    p_pipeline_stage: "new",
+    p_queue_status: "new",
+    p_status: "new",
+    p_priority: "normal",
+    p_next_action: "Review intake",
+    p_received_at: fields.receivedAt,
+    p_mailbox: fields.mailbox,
+    p_graph_message_id: fields.graphMessageId,
+    p_internet_message_id: fields.internetMessageId,
+    p_conversation_id: fields.conversationId,
+    p_sender_name: fields.senderName,
+    p_sender_address: fields.senderAddress,
+    p_recipients: fields.recipients,
+    p_subject: fields.subject,
+    p_body_preview: fields.bodyPreview,
+    p_has_attachments: fields.hasAttachments,
+    p_correlation_rule: correlationRule,
+    p_mailbox_hash: mailboxHash,
+    p_graph_message_id_hash: graphMessageIdHash,
+    p_candidate_ids: candidateSubmissionIds,
+    p_alert_title: "Ambiguous intake correlation",
+    p_alert_message: "An email matched more than one open case. Operator review is required.",
+  });
+  if (error) throw new IntakeDbError("intake_needs_review_failed");
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { outcome: string; submission_id: string; intake_message_id: string }
+    | undefined;
+  if (!row) throw new IntakeDbError("intake_needs_review_returned_no_row");
+  return {
+    outcome: row.outcome as IngestNewResult["outcome"],
+    submissionId: String(row.submission_id),
     intakeMessageId: String(row.intake_message_id),
   };
 }
@@ -530,8 +546,37 @@ async function processSingleMessage(args: {
   if (!message.id) return { kind: "removed" };
 
   const lookups = buildLookups(admin);
-  let parentMessageIds: string[] = [];
+  const canonicalInternetId = canonicalMessageId(message.internetMessageId ?? null);
+  const mailboxHash = await safeHash(mailbox);
+  const graphIdHash = await safeHash(message.id);
+
+  // Rules 1–4 first, WITHOUT fetching In-Reply-To/References. This avoids
+  // extra Graph traffic for known duplicates / conversation matches and means
+  // a header endpoint hiccup cannot block deterministic correlation.
+  const initialOutcome: CorrelationOutcome = await correlate(
+    {
+      mailbox,
+      graphMessageId: message.id,
+      internetMessageId: canonicalInternetId,
+      conversationId: message.conversationId ?? null,
+      parentMessageIds: [],
+    },
+    lookups,
+  );
+
+  // If Rules 1–4 produced any decisive outcome, act on it and return.
+  if (initialOutcome.kind === "duplicate") return { kind: "duplicate" };
+  if (initialOutcome.kind === "attach") {
+    return finaliseAttach(admin, mailbox, message, initialOutcome.submissionId, initialOutcome.rule, mailboxHash, graphIdHash);
+  }
+  if (initialOutcome.kind === "needs_review") {
+    return finaliseNeedsReview(admin, mailbox, message, initialOutcome.rule, mailboxHash, graphIdHash, initialOutcome.candidateSubmissionIds);
+  }
+
+  // Rules 1–4 miss. NOW try the reply-header rule.
+  let outcome: CorrelationOutcome = initialOutcome;
   if (deps.attemptReplyHeaders !== false) {
+    let parentMessageIds: string[] = [];
     try {
       const headers = await fetchInternetMessageHeaders(mailbox, message.id, token, deps.graph);
       const ids = [
@@ -540,99 +585,73 @@ async function processSingleMessage(args: {
       ];
       parentMessageIds = ids.filter((v, i, arr) => v && arr.indexOf(v) === i);
     } catch (err) {
-      if (err instanceof GraphError && (err.status === 404 || err.status === 410)) {
+      // 404/410 on the header endpoint is a benign "no headers"; every other
+      // Graph error means we cannot deterministically decide Rule 5. In that
+      // case skip Rule 5 and fall through to Rule 6 (new submission) — the
+      // message is still ingested, just as a new case rather than a reply.
+      if (!(err instanceof GraphError && (err.status === 404 || err.status === 410))) {
         parentMessageIds = [];
-      } else {
-        throw err;
       }
+    }
+    if (parentMessageIds.length > 0) {
+      outcome = await correlate(
+        {
+          mailbox,
+          graphMessageId: message.id,
+          internetMessageId: canonicalInternetId,
+          conversationId: message.conversationId ?? null,
+          parentMessageIds,
+        },
+        lookups,
+      );
     }
   }
 
-  const canonicalInternetId = canonicalMessageId(message.internetMessageId ?? null);
-  const outcome: CorrelationOutcome = await correlate(
-    {
-      mailbox,
-      graphMessageId: message.id,
-      internetMessageId: canonicalInternetId,
-      conversationId: message.conversationId ?? null,
-      parentMessageIds,
-    },
-    lookups,
-  );
-
-  const mailboxHash = await safeHash(mailbox);
-  const graphIdHash = await safeHash(message.id);
-
+  if (outcome.kind === "attach") {
+    return finaliseAttach(admin, mailbox, message, outcome.submissionId, outcome.rule, mailboxHash, graphIdHash);
+  }
+  if (outcome.kind === "needs_review") {
+    return finaliseNeedsReview(admin, mailbox, message, outcome.rule, mailboxHash, graphIdHash, outcome.candidateSubmissionIds);
+  }
   if (outcome.kind === "duplicate") return { kind: "duplicate" };
 
-  if (outcome.kind === "attach") {
-    const fields = projectFields(mailbox, message, "processed");
-    const attach = await attachIntakeMessage(admin, outcome.submissionId, fields);
-    if (attach.outcome !== "attached") return { kind: "duplicate" };
-    await auditChecked(admin, {
-      submissionId: outcome.submissionId,
-      action: "intake_message_correlated",
-      metadata: {
-        intake_message_id: attach.intakeMessageId,
-        correlation_rule_matched: outcome.rule,
-        graph_message_id_hash: graphIdHash,
-        mailbox_hash: mailboxHash,
-      },
-    });
-    return { kind: "attach" };
-  }
-
-  if (outcome.kind === "needs_review") {
-    const fields = projectFields(mailbox, message, "needs_review");
-    const ingested = await ingestNewEmail(admin, fields);
-    if (ingested.outcome !== "created") return { kind: "duplicate" };
-    // Alert must persist — needs-review without alert is silently unsafe.
-    await insertAlertChecked(admin, {
-      alertType: "intake_correlation_needs_review",
-      severity: "warning",
-      title: "Ambiguous intake correlation",
-      message: "An email matched more than one open case. Operator review is required.",
-      relatedSubmissionId: ingested.submissionId,
-      metadata: {
-        intake_message_id: ingested.intakeMessageId,
-        candidate_count: outcome.candidateSubmissionIds.length,
-        rule: outcome.rule,
-      },
-    });
-    await auditChecked(admin, {
-      submissionId: ingested.submissionId,
-      action: "intake_correlation_needs_review",
-      metadata: {
-        intake_message_id: ingested.intakeMessageId,
-        correlation_rule_matched: outcome.rule,
-        graph_message_id_hash: graphIdHash,
-        mailbox_hash: mailboxHash,
-        candidate_submission_ids: outcome.candidateSubmissionIds,
-      },
-    });
-    return { kind: "needs_review" };
-  }
-
-  // new_submission
+  // Rule 6 — new submission. Atomic ingest RPC writes the submission, intake
+  // row, submission_created_from_email + intake_message_recorded audits under
+  // one transaction.
   const fields = projectFields(mailbox, message, "processed");
-  const ingested = await ingestNewEmail(admin, fields);
+  const ingested = await ingestNewEmail(admin, fields, outcome.rule, mailboxHash, graphIdHash);
   if (ingested.outcome !== "created") return { kind: "duplicate" };
-  await auditChecked(admin, {
-    submissionId: ingested.submissionId,
-    action: "submission_created_from_email",
-    metadata: {
-      intake_message_id: ingested.intakeMessageId,
-      correlation_rule_matched: outcome.rule,
-      graph_message_id_hash: graphIdHash,
-      mailbox_hash: mailboxHash,
-    },
-  });
-  await auditChecked(admin, {
-    submissionId: ingested.submissionId,
-    action: "intake_message_recorded",
-    metadata: { intake_message_id: ingested.intakeMessageId, mailbox_hash: mailboxHash },
-  });
   return { kind: "new_submission" };
+}
+
+async function finaliseAttach(
+  admin: SupabaseClient,
+  mailbox: string,
+  message: GraphMessage,
+  submissionId: string,
+  rule: string,
+  mailboxHash: string,
+  graphIdHash: string,
+): Promise<ProcessMessageOutcome> {
+  const fields = projectFields(mailbox, message, "processed");
+  const attach = await attachIntakeMessage(admin, submissionId, fields, rule, mailboxHash, graphIdHash);
+  if (attach.outcome !== "attached") return { kind: "duplicate" };
+  return { kind: "attach" };
+}
+
+async function finaliseNeedsReview(
+  admin: SupabaseClient,
+  mailbox: string,
+  message: GraphMessage,
+  rule: string,
+  mailboxHash: string,
+  graphIdHash: string,
+  candidateSubmissionIds: string[],
+): Promise<ProcessMessageOutcome> {
+  const fields = projectFields(mailbox, message, "needs_review");
+  const ingested = await ingestNeedsReview(admin, fields, rule, mailboxHash, graphIdHash, candidateSubmissionIds);
+  if (ingested.outcome !== "created") return { kind: "duplicate" };
+  return { kind: "needs_review" };
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +709,11 @@ export async function pollMailbox(
   let finalDeltaLink: string | null = null;
   let pageBudgetExhausted = false;
   let lastNextLink: string | null = null;
+  // Bounded delta-cursor reset: at most one restart from initialDeltaUrl per
+  // poll attempt. A second delta-expired response in the same tick becomes a
+  // classified failure — otherwise a persistently-expired delta could
+  // indefinitely restart the loop.
+  let deltaResetAttempted = false;
 
   try {
     while (cursor && result.pagesFetched < MAX_DELTA_PAGES_PER_POLL) {
@@ -698,8 +722,14 @@ export async function pollMailbox(
         page = await fetchDeltaPage(cursor, token, deps.graph);
       } catch (err) {
         if (err instanceof GraphError && err.deltaTokenExpired) {
-          // Restart from the initial URL for this run only. The persisted
-          // cursor is only overwritten on success.
+          if (deltaResetAttempted) {
+            throw new GraphError({
+              status: err.status,
+              code: "graph_delta_reset_failed",
+              message: "graph_delta_reset_failed",
+            });
+          }
+          deltaResetAttempted = true;
           cursor = initialDeltaUrl(mailbox);
           continue;
         }
@@ -730,105 +760,54 @@ export async function pollMailbox(
     }
 
     const nowIso = new Date(nowFn()).toISOString();
+    const buildSuccessMetadata = (resumable: boolean) => ({
+      mailbox_hash: mailboxHash,
+      pages: result.pagesFetched,
+      messages: result.messagesConsidered,
+      duplicates: result.duplicates,
+      attached: result.attached,
+      needs_review: result.needsReview,
+      new_submissions: result.newSubmissions,
+      removed_events: result.removedEvents,
+      resumable,
+    });
+
     if (finalDeltaLink) {
-      // Full round complete — durable cursor advances; in-round checkpoint clears.
-      const release = await releaseLease(admin, mailbox, leaseId, {
+      // Full round complete. Fenced RPC atomically advances the durable
+      // cursor, clears failure/breaker/throttle state, AND writes the
+      // graph_poll_success audit in one transaction. A lease-lost result
+      // mutates nothing.
+      const ok = await releaseLeaseSuccess(admin, mailbox, leaseId, {
         deltaLink: finalDeltaLink,
         inRoundNextLink: null,
-        lastError: null,
-        consecutiveFailures: 0,
         lastSuccessAt: nowIso,
-        breakerOpenedAt: null,
-        breakerProvided: true,
-        nextAttemptAfter: null,
-        nextAttemptProvided: true,
-      }, {});
-      if (!release.ok) {
-        // Lease was reclaimed by another isolate. Do NOT declare success; the
-        // other worker will make forward progress.
-        result.status = "skipped_lease_lost";
-        result.errorCode = "lease_lost";
-        return result;
-      }
-      await auditChecked(admin, {
-        submissionId: null,
-        action: "graph_poll_success",
-        metadata: {
-          mailbox_hash: mailboxHash,
-          pages: result.pagesFetched,
-          messages: result.messagesConsidered,
-          duplicates: result.duplicates,
-          attached: result.attached,
-          needs_review: result.needsReview,
-          new_submissions: result.newSubmissions,
-          removed_events: result.removedEvents,
-          resumable: false,
-        },
+        auditMetadata: buildSuccessMetadata(false),
       });
+      if (!ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
       result.status = "ok";
       return result;
     }
 
     if (pageBudgetExhausted && lastNextLink) {
-      // Resumable partial tick: persist the intermediate checkpoint. Delta
-      // cursor is unchanged; next tick starts from lastNextLink.
-      const release = await releaseLease(admin, mailbox, leaseId, {
+      // Resumable partial tick — same atomicity guarantee; only in_round
+      // checkpoint moves, delta_link is untouched.
+      const ok = await releaseLeaseSuccess(admin, mailbox, leaseId, {
         inRoundNextLink: lastNextLink,
-        lastError: null,
-        consecutiveFailures: 0,
         lastSuccessAt: nowIso,
-        breakerOpenedAt: null,
-        breakerProvided: true,
-        nextAttemptAfter: null,
-        nextAttemptProvided: true,
-      }, {});
-      if (!release.ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
-      await auditChecked(admin, {
-        submissionId: null,
-        action: "graph_poll_success",
-        metadata: {
-          mailbox_hash: mailboxHash,
-          pages: result.pagesFetched,
-          messages: result.messagesConsidered,
-          duplicates: result.duplicates,
-          attached: result.attached,
-          needs_review: result.needsReview,
-          new_submissions: result.newSubmissions,
-          removed_events: result.removedEvents,
-          resumable: true,
-        },
+        auditMetadata: buildSuccessMetadata(true),
       });
+      if (!ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
       result.status = "ok_resumable";
       return result;
     }
 
-    // No pages fetched at all (e.g. empty inbox on a fresh delta) — still a
-    // healthy release with no cursor change.
-    const release = await releaseLease(admin, mailbox, leaseId, {
-      lastError: null,
-      consecutiveFailures: 0,
+    // No pages fetched at all (e.g. empty inbox on a fresh delta) — atomic
+    // release + audit with no cursor change.
+    const ok = await releaseLeaseSuccess(admin, mailbox, leaseId, {
       lastSuccessAt: nowIso,
-      breakerOpenedAt: null,
-      breakerProvided: true,
-      nextAttemptAfter: null,
-      nextAttemptProvided: true,
-    }, {});
-    if (!release.ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
-    await auditChecked(admin, {
-      submissionId: null,
-      action: "graph_poll_success",
-      metadata: {
-        mailbox_hash: mailboxHash,
-        pages: result.pagesFetched,
-        messages: result.messagesConsidered,
-        duplicates: result.duplicates,
-        attached: result.attached,
-        needs_review: result.needsReview,
-        new_submissions: result.newSubmissions,
-        removed_events: result.removedEvents,
-        resumable: false,
-      },
+      auditMetadata: buildSuccessMetadata(false),
     });
+    if (!ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
     result.status = "ok";
     return result;
   } catch (err) {
@@ -839,10 +818,39 @@ export async function pollMailbox(
   }
 }
 
+/**
+ * Fenced success-completion RPC wrapper. Returns true iff the transaction
+ * committed under the caller's lease. On a lost fence the DB state is
+ * untouched — the caller must not report a false poll success.
+ */
+async function releaseLeaseSuccess(
+  admin: SupabaseClient,
+  mailbox: string,
+  leaseId: string,
+  update: {
+    deltaLink?: string | null;
+    inRoundNextLink?: string | null;
+    lastSuccessAt?: string | null;
+    auditMetadata: Record<string, unknown>;
+  },
+): Promise<boolean> {
+  const { data, error } = await admin.rpc("atlas_intake_release_lease_success", {
+    p_mailbox: mailbox,
+    p_expected_lease_id: leaseId,
+    p_delta_link: update.deltaLink ?? null,
+    p_delta_link_provided: update.deltaLink !== undefined,
+    p_in_round_next_link: update.inRoundNextLink ?? null,
+    p_in_round_provided: update.inRoundNextLink !== undefined,
+    p_last_success_at: update.lastSuccessAt ?? null,
+    p_audit_metadata: update.auditMetadata,
+  });
+  if (error) throw new IntakeDbError("intake_release_success_failed");
+  const row = (Array.isArray(data) ? data[0] : data) as { ok?: boolean } | undefined;
+  return Boolean(row?.ok);
+}
+
 function classifyError(err: unknown): string {
   if (err instanceof GraphError) return err.code;
-  if (err instanceof IntakeAuditError) return err.code;
-  if (err instanceof IntakeAlertError) return err.code;
   if (err instanceof IntakeDbError) return err.code;
   if (err instanceof Error && err.message === "intake_processing_failed") return err.message;
   return "intake_processing_failed";
@@ -868,18 +876,31 @@ async function recordFailure(
     ? new Date(nowMs + retryAfterSec * 1000).toISOString()
     : null;
 
-  // Open the breaker when we cross the threshold. Reuse the existing anchor
-  // if the breaker is already open (do not push cooldown further).
+  // Breaker anchor selection:
+  //   * If threshold has just been crossed  → open at nowIso.
+  //   * If the breaker was already open AND this failure came from a probe
+  //     (a poll that ran because the previous cooldown had elapsed) → re-open
+  //     the breaker at nowIso for a fresh cooldown.
+  //   * Otherwise (breaker was already open and this failure came from within
+  //     the cooldown — should be unreachable because acquire is gated, but
+  //     safe by default) preserve the existing anchor.
   const breakerJustOpened =
     nextFailures >= CIRCUIT_BREAKER_FAILURES && !lease.breaker_opened_at;
-  const breakerOpenedAtIso = breakerJustOpened ? nowIso : (lease.breaker_opened_at ?? null);
+  const failedProbe =
+    Boolean(lease.breaker_opened_at) &&
+    nextFailures >= CIRCUIT_BREAKER_FAILURES;
+  const breakerOpenedAtIso =
+    breakerJustOpened || failedProbe
+      ? nowIso
+      : (lease.breaker_opened_at ?? null);
 
   await releaseLease(admin, mailbox, leaseId, {
     lastError: code,
     consecutiveFailures: nextFailures,
     lastFailureAt: nowIso,
     breakerOpenedAt: breakerOpenedAtIso,
-    breakerProvided: breakerJustOpened || Boolean(lease.breaker_opened_at),
+    breakerProvided:
+      breakerJustOpened || failedProbe || Boolean(lease.breaker_opened_at),
     nextAttemptAfter: nextAttemptIso,
     nextAttemptProvided: retryAfterSec != null,
   }, {});
@@ -977,8 +998,9 @@ export async function runGraphIntakeCycle(
 
 // Test-only exports — pollMailbox is already exported.
 export const __testables = {
-  auditChecked,
   releaseLease,
+  releaseLeaseSuccess,
   ingestNewEmail,
   attachIntakeMessage,
+  ingestNeedsReview,
 };

@@ -134,13 +134,18 @@ export function assertAllowedGraphUrl(rawUrl: string): void {
       message: "graph_url_invalid",
     });
   }
-  if (parsed.protocol !== "https:") {
-    throw new GraphError({ status: 0, code: "graph_url_scheme_disallowed", message: "graph_url_scheme_disallowed" });
-  }
+  // Userinfo is rejected explicitly. URL.origin already excludes userinfo, but
+  // a rejection with the specific classifier is more useful to the caller than
+  // a generic origin mismatch.
   if (parsed.username || parsed.password) {
     throw new GraphError({ status: 0, code: "graph_url_userinfo_disallowed", message: "graph_url_userinfo_disallowed" });
   }
-  if (parsed.hostname.toLowerCase() !== "graph.microsoft.com") {
+  // Exact origin comparison. This is stricter than hostname/protocol split
+  // because it rejects non-default ports (e.g. https://graph.microsoft.com:444),
+  // wrong schemes (http://…), userinfo (already handled above but re-guarded),
+  // and every look-alike hostname in one predicate. Allowed: only the exact
+  // origin https://graph.microsoft.com (implicit :443).
+  if (parsed.origin !== GRAPH_ORIGIN) {
     throw new GraphError({ status: 0, code: "graph_url_origin_disallowed", message: "graph_url_origin_disallowed" });
   }
 }

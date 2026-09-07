@@ -278,6 +278,90 @@ function makeFakeAdmin(state: FakeState): {
       if (args.p_next_attempt_provided) row.next_attempt_after = (args.p_next_attempt_after as string | null) ?? null;
       return { data: [{ mailbox }], error: null };
     }
+    if (name === "atlas_intake_release_lease_success") {
+      const mailbox = String(args.p_mailbox);
+      const expectedLeaseId = String(args.p_expected_lease_id);
+      const row = state.graphState.find((r) => r.mailbox === mailbox);
+      if (!row || row.lease_id !== expectedLeaseId) {
+        return { data: [{ ok: false, reason: "lease_lost" }], error: null };
+      }
+      // Optional injectable audit failure inside the transaction.
+      if (state.failNextAudit === "graph_poll_success") {
+        state.failNextAudit = undefined;
+        // Simulate transaction rollback: no state mutation, no audit written.
+        return { data: [{ ok: false, reason: "audit_broken" }], error: null };
+      }
+      row.poll_in_flight_since = null;
+      row.lease_id = null;
+      if (args.p_delta_link_provided) row.delta_link = (args.p_delta_link as string | null) ?? null;
+      if (args.p_in_round_provided) row.in_round_next_link = (args.p_in_round_next_link as string | null) ?? null;
+      row.last_error = null;
+      row.consecutive_failures = 0;
+      if (args.p_last_success_at != null) row.last_success_at = args.p_last_success_at as string;
+      row.breaker_opened_at = null;
+      row.next_attempt_after = null;
+      state.audit.push({
+        id: nextUuid(),
+        submission_id: null,
+        action: "graph_poll_success",
+        actor: null,
+        metadata_json: args.p_audit_metadata,
+      });
+      return { data: [{ ok: true, reason: null }], error: null };
+    }
+    if (name === "atlas_intake_ingest_needs_review") {
+      const im = args.p_internet_message_id as string | null;
+      const gm = args.p_graph_message_id as string;
+      const mb = args.p_mailbox as string;
+      if (im && state.intake.some((r) => r.internet_message_id === im)) {
+        const dup = state.intake.find((r) => r.internet_message_id === im)!;
+        return { data: [{ outcome: "duplicate_internet_message_id", submission_id: dup.submission_id, intake_message_id: dup.id }], error: null };
+      }
+      if (state.intake.some((r) => r.mailbox === mb && r.graph_message_id === gm)) {
+        const dup = state.intake.find((r) => r.mailbox === mb && r.graph_message_id === gm)!;
+        return { data: [{ outcome: "duplicate_graph_message_id", submission_id: dup.submission_id, intake_message_id: dup.id }], error: null };
+      }
+      const submissionId = nextUuid();
+      const intakeId = nextUuid();
+      state.submissions.push({
+        id: submissionId, created_by: args.p_system_actor_id, source_type: args.p_source_type,
+        status: args.p_status, queue_status: args.p_queue_status, pipeline_stage: args.p_pipeline_stage,
+        received_at: args.p_received_at ?? new Date().toISOString(),
+        priority: args.p_priority, next_action: args.p_next_action,
+      });
+      state.intake.push({
+        id: intakeId, submission_id: submissionId, source: "email", mailbox: mb, graph_message_id: gm,
+        internet_message_id: im, conversation_id: args.p_conversation_id,
+        sender_name: args.p_sender_name, sender_address: args.p_sender_address,
+        recipients: args.p_recipients, subject: args.p_subject, body_preview: args.p_body_preview,
+        received_at: args.p_received_at, has_attachments: args.p_has_attachments,
+        processing_state: "needs_review",
+      });
+      state.audit.push({
+        id: nextUuid(), submission_id: submissionId,
+        action: "intake_correlation_needs_review", actor: null,
+        metadata_json: {
+          intake_message_id: intakeId,
+          correlation_rule_matched: args.p_correlation_rule,
+          graph_message_id_hash: args.p_graph_message_id_hash,
+          mailbox_hash: args.p_mailbox_hash,
+          candidate_submission_ids: args.p_candidate_ids,
+        },
+      });
+      state.alerts.push({
+        id: nextUuid(),
+        alert_type: "intake_correlation_needs_review",
+        severity: "warning", status: "open",
+        title: args.p_alert_title, message: args.p_alert_message,
+        related_submission_id: submissionId,
+        metadata: {
+          intake_message_id: intakeId,
+          candidate_count: Array.isArray(args.p_candidate_ids) ? (args.p_candidate_ids as unknown[]).length : 0,
+          rule: args.p_correlation_rule,
+        },
+      });
+      return { data: [{ outcome: "created", submission_id: submissionId, intake_message_id: intakeId }], error: null };
+    }
     if (name === "atlas_intake_ingest_new_email") {
       const im = args.p_internet_message_id as string | null;
       const gm = args.p_graph_message_id as string;
@@ -306,6 +390,22 @@ function makeFakeAdmin(state: FakeState): {
         received_at: args.p_received_at, has_attachments: args.p_has_attachments,
         processing_state: args.p_processing_state,
       });
+      // Atomic audits — same shape as migration 0030.
+      state.audit.push({
+        id: nextUuid(), submission_id: submissionId,
+        action: "submission_created_from_email", actor: null,
+        metadata_json: {
+          intake_message_id: intakeId,
+          correlation_rule_matched: args.p_correlation_rule,
+          graph_message_id_hash: args.p_graph_message_id_hash,
+          mailbox_hash: args.p_mailbox_hash,
+        },
+      });
+      state.audit.push({
+        id: nextUuid(), submission_id: submissionId,
+        action: "intake_message_recorded", actor: null,
+        metadata_json: { intake_message_id: intakeId, mailbox_hash: args.p_mailbox_hash },
+      });
       return { data: [{ outcome: "created", submission_id: submissionId, intake_message_id: intakeId }], error: null };
     }
     if (name === "atlas_intake_attach_message") {
@@ -329,6 +429,16 @@ function makeFakeAdmin(state: FakeState): {
         recipients: args.p_recipients, subject: args.p_subject, body_preview: args.p_body_preview,
         received_at: args.p_received_at, has_attachments: args.p_has_attachments,
         processing_state: args.p_processing_state,
+      });
+      state.audit.push({
+        id: nextUuid(), submission_id: submissionId,
+        action: "intake_message_correlated", actor: null,
+        metadata_json: {
+          intake_message_id: intakeId,
+          correlation_rule_matched: args.p_correlation_rule,
+          graph_message_id_hash: args.p_graph_message_id_hash,
+          mailbox_hash: args.p_mailbox_hash,
+        },
       });
       return { data: [{ outcome: "attached", intake_message_id: intakeId }], error: null };
     }
@@ -662,35 +772,23 @@ test("breaker: opens after threshold and blocks polls during cooldown", async ()
 // FINDING #9: Checked audit — audit failure prevents cursor advancement
 // -----------------------------------------------------------------------
 
-test("audit insert failure prevents delta cursor advancement", async () => {
-  const state = newFakeState();
-  const { admin } = makeFakeAdmin(state);
-  // Wrap admin.audit table insert to fail once.
-  const originalFrom = (admin as { from: (n: string) => unknown }).from.bind(admin);
-  let auditFailed = false;
-  (admin as { from: (n: string) => unknown }).from = (name: string) => {
-    if (name === "atlas_audit_logs" && !auditFailed) {
-      auditFailed = true;
-      return { insert: () => ({
-        then: (cb: (v: { data: null; error: { code: string } }) => unknown) =>
-          Promise.resolve(cb({ data: null, error: { code: "audit_broken" } })),
-        select: () => ({ single: async () => ({ data: null, error: { code: "audit_broken" } }) }),
-      }) } as unknown;
-    }
-    return originalFrom(name);
-  };
+test("graph_poll_success audit failure rolls back cursor advance (lease_lost result)", async () => {
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  // Simulate the transactional audit insert failing inside the fenced
+  // success RPC. The whole transaction rolls back → cursor stays null →
+  // no false success audit is written.
+  state.failNextAudit = "graph_poll_success";
   const routeDelta = (call: FetchCall) =>
     call.url.includes("/messages/delta")
-      ? jsonResponse(200, {
-          value: [{ id: "m1", internetMessageId: "im-1", from: { emailAddress: { address: "a@a" } }, receivedDateTime: new Date().toISOString() }],
-          "@odata.deltaLink": "https://graph.microsoft.com/final",
-        })
+      ? jsonResponse(200, { value: [], "@odata.deltaLink": "https://graph.microsoft.com/final" })
       : null;
   const { fetchImpl } = makeFetchMock([tokenRoute, routeDelta]);
   const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl }, attemptReplyHeaders: false });
-  eq(result.status, "failed", "poll failed");
   const row = state.graphState.find((r) => r.mailbox === "mbx")!;
-  eq(row.delta_link, null, "cursor NOT advanced despite Graph success");
+  eq(row.delta_link, null, "cursor NOT advanced");
+  const successAudits = state.audit.filter((a) => a.action === "graph_poll_success");
+  eq(successAudits.length, 0, "no graph_poll_success audit written");
+  assert(result.status === "skipped_lease_lost" || result.status === "failed", "safe result status");
 });
 
 // -----------------------------------------------------------------------
