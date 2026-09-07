@@ -30,6 +30,10 @@ const INTAKE_SRC = readFileSync(
   resolve("worker/src/graph-intake.ts"),
   "utf8",
 );
+const ENDPOINTS_SRC = readFileSync(
+  resolve("worker/src/graph-intake-endpoints.ts"),
+  "utf8",
+);
 const INDEX_SRC = readFileSync(
   resolve("worker/src/index.ts"),
   "utf8",
@@ -130,12 +134,18 @@ test("intake processing_state check restricts to processed | needs_review", () =
 // Concurrency guard (CAS lease)
 // ---------------------------------------------------------------------------
 
-test("mailbox lease uses conditional UPDATE keyed on poll_in_flight_since", () => {
+test("mailbox lease uses fenced RPC keyed on lease_id + poll_in_flight_since", () => {
+  // After Checkpoint 2 the lease acquire/release runs as SQL functions that
+  // include lease_id fencing. The Worker calls them via admin.rpc(). The
+  // migration text encodes the CAS predicate; here we assert the Worker uses
+  // the fenced RPC surface rather than an inline update.
   assert(
-    /acquireMailboxLease[\s\S]*?\.update\(\{ poll_in_flight_since:[\s\S]*?\.or\(`poll_in_flight_since\.is\.null,poll_in_flight_since\.lt\.\$\{staleCutoffIso\}`\)/.test(
-      INTAKE_SRC,
-    ),
-    "lease acquired via CAS on poll_in_flight_since",
+    /admin\.rpc\("atlas_intake_acquire_lease"/.test(INTAKE_SRC),
+    "acquire uses fenced RPC",
+  );
+  assert(
+    /admin\.rpc\("atlas_intake_release_lease"/.test(INTAKE_SRC),
+    "release uses fenced RPC",
   );
 });
 
@@ -148,26 +158,25 @@ test("mailbox lease has bounded stale duration", () => {
 // ---------------------------------------------------------------------------
 
 test("delta cursor is not advanced when processing failed", () => {
+  // On the success path, deltaLink is only passed when the whole round
+  // completed (finalDeltaLink !== null).
   assert(
-    /processingHadFailure[\s\S]*?throw new Error\("intake_processing_failed"\)/.test(INTAKE_SRC),
-    "processing failure prevents releaseMailboxLease from being called with deltaLink",
-  );
-  // The release with deltaLink is unreachable after the throw:
-  assert(
-    /if \(processingHadFailure\) \{\s*throw new Error\("intake_processing_failed"\);\s*\}\s*await releaseMailboxLease\(admin, mailbox, \{\s*deltaLink:/.test(
+    /if \(finalDeltaLink\) \{[\s\S]*?releaseLease\([^,]+, mailbox, leaseId, \{[\s\S]*?deltaLink: finalDeltaLink/.test(
       INTAKE_SRC,
     ),
-    "successful release only after processingHadFailure guard",
+    "durable deltaLink advance is gated on finalDeltaLink !== null",
   );
 });
 
 test("failure path releases lease without advancing delta cursor", () => {
   assert(
-    /recordFailure\(admin, mailbox, lease\.consecutive_failures, err, env\)/.test(INTAKE_SRC),
+    /recordFailure\(admin, mailbox, mailboxHash, leaseId, lease, err, nowFn\(\)\)/.test(INTAKE_SRC),
     "failure path calls recordFailure",
   );
+  // recordFailure() calls releaseLease with NO delta_link_provided flag —
+  // the state model preserves the existing cursor.
   assert(
-    /releaseMailboxLease\(admin, mailbox, \{\s*lastError: code,/.test(INTAKE_SRC),
+    /async function recordFailure[\s\S]*?releaseLease\(admin, mailbox, leaseId, \{\s*lastError:/.test(INTAKE_SRC),
     "recordFailure releases lease WITHOUT passing deltaLink",
   );
 });
@@ -176,11 +185,13 @@ test("failure path releases lease without advancing delta cursor", () => {
 // Idempotency at insert
 // ---------------------------------------------------------------------------
 
-test("persistIntakeRow swallows unique-violation (23505) as duplicate", () => {
-  assert(
-    /if \(code === "23505"\) return null/.test(INTAKE_SRC),
-    "unique violation must be treated as duplicate no-op",
-  );
+test("atomic ingest RPC classifies duplicates by outcome, not by DB error code", () => {
+  // The 23505 branch has moved into the SQL function; the Worker now
+  // distinguishes "created" / "duplicate_*" outcomes from any DB error, and
+  // a DB error is an IntakeDbError (poll fails, cursor unchanged).
+  assert(/outcome !== "attached"/.test(INTAKE_SRC), "attach: outcome-driven duplicate check");
+  assert(/outcome !== "created"/.test(INTAKE_SRC), "ingest: outcome-driven duplicate check");
+  assert(/IntakeDbError/.test(INTAKE_SRC), "DB errors are a distinct class");
 });
 
 // ---------------------------------------------------------------------------
@@ -213,14 +224,14 @@ test("runGraphIntakeCycle is a no-op when the flag is off", () => {
 
 test("handleGraphPollNow rejects non-admin", () => {
   assert(
-    /if \(user\.role !== "admin"\)[\s\S]*?jsonError\("permission_denied"/.test(INTAKE_SRC),
+    /if \(user\.role !== "admin"\)[\s\S]*?jsonError\("permission_denied"/.test(ENDPOINTS_SRC),
     "admin only",
   );
 });
 
 test("handleGraphPollNow rejects production", () => {
   assert(
-    /if \(env\.ATLAS_ENV === "production"\)[\s\S]*?jsonError\("permission_denied"/.test(INTAKE_SRC),
+    /if \(env\.ATLAS_ENV === "production"\)[\s\S]*?jsonError\("permission_denied"/.test(ENDPOINTS_SRC),
     "production disabled",
   );
 });
@@ -241,18 +252,19 @@ test("router wires admin poll route + intake-messages route", () => {
 // ---------------------------------------------------------------------------
 
 test("intake audits never emit sender/subject/body_preview as raw text", () => {
-  const auditCalls = INTAKE_SRC.match(/await audit\(env,[\s\S]*?\}\);/g) ?? [];
+  // Checkpoint 2 audits use the checked auditChecked() writer.
+  const auditCalls = INTAKE_SRC.match(/await auditChecked\(admin,[\s\S]*?\}\);/g) ?? [];
   for (const call of auditCalls) {
     assert(!/subject:/.test(call), "audit metadata must not include subject");
     assert(!/body_preview:/.test(call), "audit metadata must not include body_preview");
     assert(!/sender_address:/.test(call), "audit metadata must not include sender_address");
   }
-  // At least one poll-success audit exists.
+  // At least three audit events must fire (attach, needs_review, new+recorded, poll_success).
   assert(auditCalls.length >= 3, "at least three audit events must fire");
 });
 
 test("intake audits do NOT contain the raw delta link or tokens", () => {
-  const auditCalls = INTAKE_SRC.match(/await audit\(env,[\s\S]*?\}\);/g) ?? [];
+  const auditCalls = INTAKE_SRC.match(/await auditChecked\(admin,[\s\S]*?\}\);/g) ?? [];
   for (const call of auditCalls) {
     assert(!/delta_link:/.test(call), "no delta_link");
     assert(!/deltaLink/.test(call), "no deltaLink token");
@@ -278,25 +290,26 @@ test("email-created submissions use the reserved system-actor UUID", () => {
     /ATLAS_INTAKE_SYSTEM_ACTOR_ID\s*=\s*"00000000-0000-0000-0000-00005a1a5a1a"/.test(INTAKE_SRC),
     "system actor UUID is stable",
   );
+  // Now passed via RPC arg `p_system_actor_id`.
   assert(
-    /created_by: ATLAS_INTAKE_SYSTEM_ACTOR_ID/.test(INTAKE_SRC),
-    "new submissions attribute created_by to the system actor",
+    /p_system_actor_id:\s*ATLAS_INTAKE_SYSTEM_ACTOR_ID/.test(INTAKE_SRC),
+    "atomic ingest passes the system actor as created_by via RPC",
   );
 });
 
 test("email submission creation sets source_type + pipeline_stage + queue_status server-side", () => {
-  assert(/source_type: "email"/.test(INTAKE_SRC), "source_type email");
-  assert(/pipeline_stage: "new"/.test(INTAKE_SRC), "pipeline_stage new");
-  assert(/queue_status: "new"/.test(INTAKE_SRC), "queue_status new");
+  assert(/p_source_type:\s*"email"/.test(INTAKE_SRC), "source_type email");
+  assert(/p_pipeline_stage:\s*"new"/.test(INTAKE_SRC), "pipeline_stage new");
+  assert(/p_queue_status:\s*"new"/.test(INTAKE_SRC), "queue_status new");
 });
 
 // ---------------------------------------------------------------------------
 // Scheduled wiring
 // ---------------------------------------------------------------------------
 
-test("scheduled handler invokes runGraphIntakeCycle via waitUntil", () => {
+test("scheduled handler invokes runGraphIntakeCycleForEnv via waitUntil", () => {
   assert(
-    /ctx\.waitUntil\(runGraphIntakeCycle\(env\)/.test(INDEX_SRC),
+    /ctx\.waitUntil\(runGraphIntakeCycleForEnv\(env\)/.test(INDEX_SRC),
     "scheduled invokes intake cycle",
   );
 });

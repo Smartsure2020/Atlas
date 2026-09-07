@@ -7,11 +7,24 @@
  *
  * Everything mutable is threaded through the `deps` argument so tests can
  * substitute an in-memory HTTP without going near the network.
+ *
+ * Security posture (Checkpoint 2 hardening)
+ * -----------------------------------------
+ *   * Every dynamic URL that carries the Graph bearer token is validated by
+ *     `assertAllowedGraphUrl()` before fetch. Anything not on
+ *     https://graph.microsoft.com is refused with a classified GraphError and
+ *     the injected fetch is NEVER called.
+ *   * Token-bearing requests use `redirect: "manual"` and reject non-2xx.
+ *     A 3xx would otherwise permit Graph to bounce the token to a different
+ *     origin.
+ *   * Message-Id canonicalisation is exported so the orchestrator applies the
+ *     same normalisation to internetMessageId, In-Reply-To, and References.
  */
 
-import type { Env } from "./config";
+import type { Env } from "./config.js";
 
 const GRAPH_SCOPE = "https://graph.microsoft.com/.default";
+const GRAPH_ORIGIN = "https://graph.microsoft.com";
 const GRAPH_TOKEN_URL_FN = (tenantId: string) =>
   `https://login.microsoftonline.com/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`;
 
@@ -94,6 +107,89 @@ export class GraphError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// URL origin allowlist (checkpoint 2 blocker #5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Refuse any URL that would forward the Graph bearer token to a non-Graph
+ * origin. Cases explicitly rejected:
+ *   * anything but https:
+ *   * hostname != graph.microsoft.com  (subdomains excluded — Microsoft
+ *     never bounces delta URLs to a subdomain of graph.microsoft.com)
+ *   * URL userinfo tricks (https://graph.microsoft.com@evil.example)
+ *   * look-alike domains (graph.microsoft.com.evil.example)
+ *
+ * This function throws a classified GraphError. The caller's fetch is never
+ * invoked when validation fails — see `fetchWithAllowlist` below.
+ */
+export function assertAllowedGraphUrl(rawUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new GraphError({
+      status: 0,
+      code: "graph_url_invalid",
+      message: "graph_url_invalid",
+    });
+  }
+  if (parsed.protocol !== "https:") {
+    throw new GraphError({ status: 0, code: "graph_url_scheme_disallowed", message: "graph_url_scheme_disallowed" });
+  }
+  if (parsed.username || parsed.password) {
+    throw new GraphError({ status: 0, code: "graph_url_userinfo_disallowed", message: "graph_url_userinfo_disallowed" });
+  }
+  if (parsed.hostname.toLowerCase() !== "graph.microsoft.com") {
+    throw new GraphError({ status: 0, code: "graph_url_origin_disallowed", message: "graph_url_origin_disallowed" });
+  }
+}
+
+async function fetchWithAllowlist(
+  url: string,
+  init: RequestInit,
+  deps: GraphClientDeps,
+): Promise<Response> {
+  assertAllowedGraphUrl(url);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const res = await fetchImpl(url, { ...init, redirect: "manual" });
+  // A 3xx would take us off-origin with the bearer token still attached.
+  // With redirect:"manual" the runtime returns the redirect itself; treat it
+  // as a hard error rather than following.
+  if (res.status >= 300 && res.status < 400) {
+    throw new GraphError({
+      status: res.status,
+      code: "graph_unexpected_redirect",
+      message: "graph_unexpected_redirect",
+    });
+  }
+  return res;
+}
+
+// ---------------------------------------------------------------------------
+// Canonical message-id (checkpoint 2 blocker #6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical form used everywhere Atlas compares an RFC 5322 Message-Id:
+ *   * strip surrounding whitespace
+ *   * if wrapped in angle brackets, return the inner value
+ *   * empty / whitespace-only input becomes null
+ *
+ * Case is preserved: msg-id local-part is case-sensitive per RFC 5322 §3.6.4.
+ * (Domain part is case-insensitive but we do not lowercase blindly because
+ * that would misalign with senders that echo mixed case back verbatim; the
+ * comparison space stays the value Graph and the header emitted.)
+ */
+export function canonicalMessageId(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  const m = trimmed.match(/<([^<>]+)>/);
+  const inner = m ? m[1].trim() : trimmed;
+  return inner.length > 0 ? inner : null;
+}
+
 function classifyGraphErrorCode(status: number): string {
   if (status === 401) return "graph_unauthorized";
   if (status === 403) return "graph_forbidden";
@@ -166,11 +262,18 @@ export async function acquireGraphToken(
     scope: GRAPH_SCOPE,
   });
   const fetchImpl = deps.fetchImpl ?? fetch;
+  // The token endpoint is a well-known static Microsoft URL. redirect:"manual"
+  // matches the delta path: any 3xx here is a misconfiguration, not a normal
+  // OAuth response.
   const res = await fetchImpl(GRAPH_TOKEN_URL_FN(tenant), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
+    redirect: "manual",
   });
+  if (res.status >= 300 && res.status < 400) {
+    throw new GraphError({ status: res.status, code: "graph_unexpected_redirect", message: "graph_unexpected_redirect" });
+  }
   if (!res.ok) throw await graphErrorFromResponse(res);
   const payload = (await res.json()) as {
     access_token?: string;
@@ -204,21 +307,30 @@ export async function fetchDeltaPage(
   token: GraphAccessToken,
   deps: GraphClientDeps = {},
 ): Promise<GraphDeltaBatch> {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const res = await fetchImpl(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token.token}`, Accept: "application/json" },
-  });
+  const res = await fetchWithAllowlist(
+    url,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token.token}`, Accept: "application/json" },
+    },
+    deps,
+  );
   if (!res.ok) throw await graphErrorFromResponse(res);
   const payload = (await res.json()) as {
     value?: GraphMessage[];
     "@odata.nextLink"?: string;
     "@odata.deltaLink"?: string;
   };
+  const nextLink = typeof payload["@odata.nextLink"] === "string" ? payload["@odata.nextLink"] : null;
+  const deltaLink = typeof payload["@odata.deltaLink"] === "string" ? payload["@odata.deltaLink"] : null;
+  // Server-returned continuation URLs are also validated so a poisoned Graph
+  // response cannot redirect the next iteration off-origin.
+  if (nextLink) assertAllowedGraphUrl(nextLink);
+  if (deltaLink) assertAllowedGraphUrl(deltaLink);
   return {
     messages: Array.isArray(payload.value) ? payload.value : [],
-    nextLink: typeof payload["@odata.nextLink"] === "string" ? payload["@odata.nextLink"] : null,
-    deltaLink: typeof payload["@odata.deltaLink"] === "string" ? payload["@odata.deltaLink"] : null,
+    nextLink,
+    deltaLink,
   };
 }
 
@@ -234,11 +346,14 @@ export async function fetchInternetMessageHeaders(
   token: GraphAccessToken,
   deps: GraphClientDeps = {},
 ): Promise<{ inReplyTo: string | null; references: string[] }> {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const res = await fetchImpl(GRAPH_HEADERS_URL_FN(mailbox, messageId), {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token.token}`, Accept: "application/json" },
-  });
+  const res = await fetchWithAllowlist(
+    GRAPH_HEADERS_URL_FN(mailbox, messageId),
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token.token}`, Accept: "application/json" },
+    },
+    deps,
+  );
   if (!res.ok) throw await graphErrorFromResponse(res);
   const payload = (await res.json()) as {
     internetMessageHeaders?: Array<{ name?: string; value?: string }>;
@@ -249,7 +364,7 @@ export async function fetchInternetMessageHeaders(
   const rawInReplyTo = rows.find((h) => h.name?.toLowerCase() === "in-reply-to")?.value ?? null;
   const rawReferences = rows.find((h) => h.name?.toLowerCase() === "references")?.value ?? "";
   return {
-    inReplyTo: cleanMessageId(rawInReplyTo),
+    inReplyTo: canonicalMessageId(rawInReplyTo),
     references: parseMessageIdList(rawReferences),
   };
 }
@@ -262,18 +377,17 @@ export function isRemovedEvent(message: GraphMessage): boolean {
   return message?.removed != null || message?.["@removed"] != null;
 }
 
-function cleanMessageId(raw: string | null): string | null {
-  if (!raw) return null;
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  // RFC 5322 msg-id form is <token@domain>; strip angle brackets when present.
-  const m = trimmed.match(/<([^<>]+)>/);
-  return m ? m[1] : trimmed;
-}
-
 function parseMessageIdList(raw: string): string[] {
   if (!raw) return [];
   const matches = raw.match(/<([^<>]+)>/g);
   if (!matches) return [];
-  return matches.map((m) => m.slice(1, -1)).filter((s) => s.length > 0);
+  const out: string[] = [];
+  for (const m of matches) {
+    const canon = canonicalMessageId(m);
+    if (canon) out.push(canon);
+  }
+  return out;
 }
+
+// Referenced for stable module-graph presence in checked builds; harmless.
+export const GRAPH_ORIGIN_FOR_TESTS: string = GRAPH_ORIGIN;

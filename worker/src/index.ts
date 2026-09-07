@@ -101,8 +101,8 @@ import { runBackgroundMaintenance } from "./phase4-background";
 import {
   handleGraphPollNow,
   handleListSubmissionIntakeMessages,
-  runGraphIntakeCycle,
-} from "./graph-intake";
+  runGraphIntakeCycleForEnv,
+} from "./graph-intake-endpoints";
 import { beginJob } from "./phase7-jobs";
 import { canAccessSubmission, canViewAllSubmissions, scopedSubmissionOr } from "./access-scope";
 import { handleShadowQueueBatch, type ShadowQueueMessage } from "./shadow-queue";
@@ -154,7 +154,7 @@ export default {
     }));
     // Phase 5A Graph intake — fails closed on missing flag / config. When
     // disabled this call returns immediately and performs no Graph requests.
-    ctx.waitUntil(runGraphIntakeCycle(env).catch((error) => {
+    ctx.waitUntil(runGraphIntakeCycleForEnv(env).catch((error) => {
       console.error("atlas_graph_intake_failed", { error_name: (error as Error)?.name });
     }));
   },

@@ -1,31 +1,20 @@
 /**
- * Atlas Phase 5A — Microsoft Graph intake orchestrator
+ * Atlas Phase 5A — Microsoft Graph intake orchestrator (Checkpoint 2 hardened)
  * ----------------------------------------------------------------------------
- * Ties graph-client (transport) and graph-intake-correlation (rules) together
- * with:
- *   * a Postgres-backed cross-isolate lease so two Workers cannot poll the
- *     same mailbox concurrently;
- *   * delta-cursor pagination whose durable persistence never advances past
- *     an unprocessed page;
- *   * idempotent submission creation and intake-message persistence;
- *   * safe operational failure recording (auth-class error backoff);
- *   * privacy-safe audit events (no PII, no delta link, no tokens).
+ * Fenced Postgres-backed leases, atomic new-submission ingest via RPC,
+ * durable resumable page checkpoint, breaker state independent of the poll
+ * anchor, honored 429 Retry-After, checked audit/alert writes, PII-safe
+ * error paths, and a canonical message-id contract shared with graph-client.
  *
- * The public entry points are:
- *   * `runGraphIntakeCycle(env, ctx)` — called from scheduled() every minute
- *     when ATLAS_GRAPH_INTAKE_ENABLED === "true".
- *   * `handleGraphPollNow(env, user)` — the narrow admin, non-prod poll
- *     endpoint that uses the same implementation.
- *
- * The bulk of the file is written against an injectable `IntakeDeps`
- * interface so tests exercise it without a live Supabase.
+ * The pure logic is factored so tests can drive it with an in-memory admin
+ * fake that only speaks the small handful of table/RPC calls this file uses.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { adminClient, audit, json, jsonError, type AtlasUser } from "./auth";
-import { graphIntakeEnabled, graphIntakeMailboxes, type Env } from "./config";
+import { graphIntakeEnabled, graphIntakeMailboxes, type Env } from "./config.js";
 import {
   acquireGraphToken,
+  canonicalMessageId,
   fetchDeltaPage,
   fetchInternetMessageHeaders,
   GraphError,
@@ -34,41 +23,36 @@ import {
   type GraphAccessToken,
   type GraphClientDeps,
   type GraphMessage,
-} from "./graph-client";
+} from "./graph-client.js";
 import {
   correlate,
   type CorrelationLookups,
   type CorrelationOutcome,
   type OpenSubmissionRef,
-} from "./graph-intake-correlation";
-import { buildAlert } from "./phase8-core";
-import { logOperationError } from "./phase6-hardening";
+} from "./graph-intake-correlation.js";
+import { buildAlert } from "./phase8-core.js";
 
-// A dedicated system-actor UUID for submissions created by the intake poller.
-// atlas_submissions.created_by is NOT NULL and carries no FK to auth.users,
-// so a well-known reserved UUID is a safe system-ownership marker. Not a real
-// user; used only for created_by on Phase 5A email-created submissions and as
-// a stable actor tag in audit rows the poller writes.
+// System-actor UUID kept for atlas_submissions.created_by (NOT NULL, no FK).
+// audit rows written by the poller use actor = NULL because atlas_audit_logs
+// treats NULL actor as "system/cron" and we must not fabricate human identity.
 export const ATLAS_INTAKE_SYSTEM_ACTOR_ID = "00000000-0000-0000-0000-00005a1a5a1a";
 
-/**
- * Lease duration. Above this a stale lease is considered abandoned and can
- * be reclaimed by another Worker isolate. Chosen well above a typical delta
- * poll (< 10 s) so a fast concurrent invocation cannot preempt a live one.
- */
 export const POLL_LEASE_STALE_MS = 5 * 60_000;
-
-/** Persistent-failure threshold above which the poller stops calling Graph. */
 export const CIRCUIT_BREAKER_FAILURES = 10;
-
-/** Circuit-breaker cooldown once tripped. */
 export const CIRCUIT_BREAKER_COOLDOWN_MS = 15 * 60_000;
-
-/** Maximum pages fetched per poll — a defensive bound against runaway delta. */
+/**
+ * Per-tick page budget. Reaching this cap does NOT lose data — the last
+ * successful nextLink is persisted as `in_round_next_link` and the next tick
+ * resumes from it. See handleResumableEnd().
+ */
 export const MAX_DELTA_PAGES_PER_POLL = 50;
 
+// ---------------------------------------------------------------------------
+// Injection surfaces
+// ---------------------------------------------------------------------------
+
 export interface IntakeDeps {
-  /** Injected fetch for Graph. */
+  /** Injected fetch / clock for Graph. */
   graph?: GraphClientDeps;
   /** Injected clock. */
   now?: () => number;
@@ -77,6 +61,11 @@ export interface IntakeDeps {
    * one extra Graph GET per message that reached it. Defaults to true.
    */
   attemptReplyHeaders?: boolean;
+  /**
+   * Optional lease-id generator (tests inject predictable IDs). Defaults to
+   * crypto.randomUUID().
+   */
+  generateLeaseId?: () => string;
 }
 
 export interface PollResult {
@@ -88,20 +77,22 @@ export interface PollResult {
   needsReview: number;
   newSubmissions: number;
   removedEvents: number;
-  status: "ok" | "skipped_disabled" | "skipped_locked" | "skipped_breaker" | "failed";
+  status:
+    | "ok"
+    | "ok_resumable"
+    | "skipped_disabled"
+    | "skipped_locked"
+    | "skipped_breaker"
+    | "skipped_throttled"
+    | "skipped_lease_lost"
+    | "failed";
   errorCode?: string;
 }
 
 // ---------------------------------------------------------------------------
-// PII-safe hashing for audit metadata
+// PII-safe hash for audit metadata
 // ---------------------------------------------------------------------------
 
-/**
- * SHA-256 hex hash used to fingerprint identifiers in audit metadata without
- * storing the underlying string. Non-reversible, collision-resistant enough
- * to correlate poll runs referencing the same message without exposing the
- * value itself.
- */
 export async function safeHash(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -112,141 +103,202 @@ export async function safeHash(value: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Small helpers to project a Graph message into DB row shape
+// PII-safe error logging
 // ---------------------------------------------------------------------------
 
-interface IntakeRowInsert {
-  submission_id: string;
-  source: "email";
-  mailbox: string;
-  graph_message_id: string;
-  internet_message_id: string | null;
-  conversation_id: string | null;
-  sender_name: string | null;
-  sender_address: string | null;
-  recipients: unknown;
-  subject: string | null;
-  body_preview: string | null;
-  received_at: string | null;
-  has_attachments: boolean;
-  processing_state: "processed" | "needs_review";
-}
-
-function projectRecipients(
-  message: GraphMessage,
-): Array<{ role: "to" | "cc"; name: string | null; address: string | null }> {
-  const out: Array<{ role: "to" | "cc"; name: string | null; address: string | null }> = [];
-  for (const r of message.toRecipients ?? []) {
-    out.push({
-      role: "to",
-      name: r?.emailAddress?.name ?? null,
-      address: r?.emailAddress?.address ?? null,
-    });
-  }
-  for (const r of message.ccRecipients ?? []) {
-    out.push({
-      role: "cc",
-      name: r?.emailAddress?.name ?? null,
-      address: r?.emailAddress?.address ?? null,
-    });
-  }
-  return out;
-}
-
-function buildIntakeRow(input: {
-  mailbox: string;
-  message: GraphMessage;
-  submissionId: string;
-  processingState: "processed" | "needs_review";
-}): IntakeRowInsert {
-  const m = input.message;
-  return {
-    submission_id: input.submissionId,
-    source: "email",
-    mailbox: input.mailbox,
-    graph_message_id: m.id,
-    internet_message_id: m.internetMessageId ?? null,
-    conversation_id: m.conversationId ?? null,
-    sender_name: m.from?.emailAddress?.name ?? null,
-    sender_address: m.from?.emailAddress?.address ?? null,
-    recipients: projectRecipients(m),
-    subject: m.subject ?? null,
-    body_preview: m.bodyPreview ?? null,
-    received_at: m.receivedDateTime ?? null,
-    has_attachments: Boolean(m.hasAttachments),
-    processing_state: input.processingState,
-  };
+/**
+ * Whitelisted logger. Only fixed classified codes reach console — never
+ * anything that could carry sender, subject, body preview, or Supabase's
+ * echo of the failed row.
+ */
+function logIntakeError(params: {
+  code: string;
+  mailboxHash?: string;
+  intakeMessageIdHash?: string;
+  submissionIdHash?: string;
+}): void {
+  console.error("atlas_graph_intake_error", {
+    code: params.code,
+    mailbox_hash: params.mailboxHash ?? null,
+    intake_message_id_hash: params.intakeMessageIdHash ?? null,
+    submission_id_hash: params.submissionIdHash ?? null,
+    ts: new Date().toISOString(),
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Postgres-backed lease + delta-state operations
+// Checked audit writer — surfaces failure so callers can abort a poll before
+// the delta cursor advances.
+// ---------------------------------------------------------------------------
+
+async function auditChecked(
+  admin: SupabaseClient,
+  params: {
+    submissionId: string | null;
+    action: string;
+    metadata: Record<string, unknown>;
+  },
+): Promise<void> {
+  const { error } = await admin.from("atlas_audit_logs").insert({
+    submission_id: params.submissionId,
+    action: params.action,
+    // Phase 5A: system/cron audit lines use actor = null per Atlas convention.
+    actor: null,
+    metadata_json: params.metadata,
+  });
+  if (error) {
+    // Do not include the Supabase error.message — it can echo bind values.
+    throw new IntakeAuditError(params.action);
+  }
+}
+
+class IntakeAuditError extends Error {
+  code = "intake_audit_failed";
+  constructor(action: string) {
+    super(`intake_audit_failed:${action}`);
+    this.name = "IntakeAuditError";
+  }
+}
+
+async function insertAlertChecked(
+  admin: SupabaseClient,
+  payload: Parameters<typeof buildAlert>[0],
+): Promise<void> {
+  const { error } = await admin.from("atlas_operational_alerts").insert(buildAlert(payload));
+  if (error) throw new IntakeAlertError();
+}
+class IntakeAlertError extends Error {
+  code = "intake_alert_failed";
+  constructor() {
+    super("intake_alert_failed");
+    this.name = "IntakeAlertError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// State model
 // ---------------------------------------------------------------------------
 
 interface GraphStateRow {
   mailbox: string;
   delta_link: string | null;
+  in_round_next_link: string | null;
   last_polled_at: string | null;
   last_success_at: string | null;
   last_error: string | null;
   consecutive_failures: number;
   poll_in_flight_since: string | null;
+  lease_id: string | null;
+  breaker_opened_at: string | null;
+  last_failure_at: string | null;
+  next_attempt_after: string | null;
 }
 
-/**
- * Acquire the mailbox poll lease atomically.
- *
- * The row is created on first observation (delta_link null). The UPDATE only
- * succeeds if either the previous lease is null or older than the staleness
- * cutoff — this is the CAS guarantee that keeps two isolates from polling
- * the same mailbox simultaneously.
- */
+// ---------------------------------------------------------------------------
+// Lease acquire / release via RPC (fenced by lease_id)
+// ---------------------------------------------------------------------------
+
+interface AcquireResult {
+  kind: "acquired" | "locked" | "throttled" | "breaker_open";
+  row?: GraphStateRow;
+  leaseId?: string;
+}
+
 export async function acquireMailboxLease(
   admin: SupabaseClient,
   mailbox: string,
   nowMs: number,
-): Promise<GraphStateRow | null> {
+  deps: IntakeDeps = {},
+): Promise<AcquireResult> {
+  const leaseId = (deps.generateLeaseId ?? crypto.randomUUID.bind(crypto))();
   const nowIso = new Date(nowMs).toISOString();
   const staleCutoffIso = new Date(nowMs - POLL_LEASE_STALE_MS).toISOString();
 
-  // Ensure the row exists. Upsert-style; if the row already exists we skip
-  // the insert error.
-  await admin
-    .from("atlas_intake_graph_state")
-    .insert({ mailbox, consecutive_failures: 0 })
-    .then(() => undefined, () => undefined);
-
-  // CAS: only claim when nobody holds the lease or the previous one is stale.
-  const { data } = await admin
-    .from("atlas_intake_graph_state")
-    .update({ poll_in_flight_since: nowIso, last_polled_at: nowIso })
-    .eq("mailbox", mailbox)
-    .or(`poll_in_flight_since.is.null,poll_in_flight_since.lt.${staleCutoffIso}`)
-    .select("mailbox, delta_link, last_polled_at, last_success_at, last_error, consecutive_failures, poll_in_flight_since")
-    .maybeSingle();
-
-  return (data as GraphStateRow | null) ?? null;
+  const { data, error } = await admin.rpc("atlas_intake_acquire_lease", {
+    p_mailbox: mailbox,
+    p_stale_cutoff_iso: staleCutoffIso,
+    p_new_lease_id: leaseId,
+    p_now: nowIso,
+  });
+  if (error) {
+    throw new Error("intake_lease_acquire_failed");
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as GraphStateRow | undefined;
+  if (!row) {
+    // Distinguish throttled/breaker/locked so operators see the right status.
+    // We can only tell them apart from a read; do a cheap follow-up SELECT.
+    const { data: current } = await admin
+      .from("atlas_intake_graph_state")
+      .select("mailbox, next_attempt_after, breaker_opened_at, poll_in_flight_since, consecutive_failures, last_polled_at, last_success_at")
+      .eq("mailbox", mailbox)
+      .maybeSingle();
+    if (current?.next_attempt_after && Date.parse(current.next_attempt_after) > nowMs) {
+      return { kind: "throttled" };
+    }
+    if (current?.breaker_opened_at) {
+      const opened = Date.parse(current.breaker_opened_at);
+      if (Number.isFinite(opened) && opened + CIRCUIT_BREAKER_COOLDOWN_MS > nowMs) {
+        return { kind: "breaker_open" };
+      }
+    }
+    return { kind: "locked" };
+  }
+  // Post-acquire breaker check: if the breaker is open and cooldown not yet
+  // elapsed, release immediately without a Graph call. Uses breaker_opened_at
+  // — never last_polled_at — so acquisition cannot move the cooldown anchor.
+  if (row.breaker_opened_at) {
+    const opened = Date.parse(row.breaker_opened_at);
+    if (Number.isFinite(opened) && opened + CIRCUIT_BREAKER_COOLDOWN_MS > nowMs) {
+      await releaseLease(admin, mailbox, leaseId, {}, {});
+      return { kind: "breaker_open" };
+    }
+  }
+  return { kind: "acquired", row, leaseId };
 }
 
-export async function releaseMailboxLease(
+interface ReleaseState {
+  deltaLink?: string | null;
+  inRoundNextLink?: string | null;
+  lastError?: string | null;
+  consecutiveFailures?: number;
+  lastSuccessAt?: string | null;
+  lastFailureAt?: string | null;
+  breakerOpenedAt?: string | null;
+  breakerProvided?: boolean;
+  nextAttemptAfter?: string | null;
+  nextAttemptProvided?: boolean;
+}
+
+async function releaseLease(
   admin: SupabaseClient,
   mailbox: string,
-  update: {
-    deltaLink?: string | null;
-    lastError?: string | null;
-    consecutiveFailures?: number;
-    lastSuccessAt?: string | null;
-  },
-): Promise<void> {
-  const patch: Record<string, unknown> = { poll_in_flight_since: null };
-  if (update.deltaLink !== undefined) patch.delta_link = update.deltaLink;
-  if (update.lastError !== undefined) patch.last_error = update.lastError;
-  if (update.consecutiveFailures !== undefined) patch.consecutive_failures = update.consecutiveFailures;
-  if (update.lastSuccessAt !== undefined) patch.last_success_at = update.lastSuccessAt;
-  await admin.from("atlas_intake_graph_state").update(patch).eq("mailbox", mailbox);
+  expectedLeaseId: string,
+  state: ReleaseState,
+  _flags: unknown,
+): Promise<{ ok: boolean }> {
+  const { data, error } = await admin.rpc("atlas_intake_release_lease", {
+    p_mailbox: mailbox,
+    p_expected_lease_id: expectedLeaseId,
+    p_delta_link: state.deltaLink ?? null,
+    p_delta_link_provided: state.deltaLink !== undefined,
+    p_in_round_next_link: state.inRoundNextLink ?? null,
+    p_in_round_provided: state.inRoundNextLink !== undefined,
+    p_last_error: state.lastError ?? null,
+    p_consecutive_failures: state.consecutiveFailures ?? null,
+    p_last_success_at: state.lastSuccessAt ?? null,
+    p_last_failure_at: state.lastFailureAt ?? null,
+    p_breaker_opened_at: state.breakerOpenedAt ?? null,
+    p_breaker_provided: Boolean(state.breakerProvided),
+    p_next_attempt_after: state.nextAttemptAfter ?? null,
+    p_next_attempt_provided: Boolean(state.nextAttemptProvided),
+  });
+  if (error) return { ok: false };
+  const row = (Array.isArray(data) ? data[0] : data) as { mailbox?: string } | undefined;
+  return { ok: Boolean(row?.mailbox) };
 }
 
 // ---------------------------------------------------------------------------
-// Correlation lookups against Supabase
+// Correlation lookups
 // ---------------------------------------------------------------------------
 
 function buildLookups(admin: SupabaseClient): CorrelationLookups {
@@ -276,8 +328,8 @@ function buildLookups(admin: SupabaseClient): CorrelationLookups {
         .select("submission_id, atlas_submissions!inner(id, pipeline_stage)")
         .eq("conversation_id", conversationId);
       const rows = (data ?? []) as Array<{ submission_id: string; atlas_submissions?: { pipeline_stage?: string | null } | null }>;
-      const out: OpenSubmissionRef[] = [];
       const seen = new Set<string>();
+      const out: OpenSubmissionRef[] = [];
       for (const row of rows) {
         if (seen.has(row.submission_id)) continue;
         seen.add(row.submission_id);
@@ -301,106 +353,183 @@ function buildLookups(admin: SupabaseClient): CorrelationLookups {
 }
 
 // ---------------------------------------------------------------------------
-// Submission creation and intake persistence
+// Message projection
 // ---------------------------------------------------------------------------
 
-async function createIntakeSubmission(
-  admin: SupabaseClient,
-  now: string,
-): Promise<string | null> {
-  // Server owns every ownership/state field. Nothing from email content leaks
-  // into created_by, assigned_to, pipeline_stage or queue_status.
-  const { data, error } = await admin
-    .from("atlas_submissions")
-    .insert({
-      created_by: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
-      source_type: "email",
-      status: "new",
-      queue_status: "new",
-      pipeline_stage: "new",
-      received_at: now,
-      last_pipeline_stage_changed_at: now,
-      priority: "normal",
-      next_action: "Review intake",
-    })
-    .select("id")
-    .single();
-  if (error || !data) {
-    logOperationError({
-      endpoint: "graph_intake",
-      operation: "create_email_submission",
-      code: "create_failed",
-      status: 500,
-      errorName: error?.message,
+function projectRecipients(
+  message: GraphMessage,
+): Array<{ role: "to" | "cc"; name: string | null; address: string | null }> {
+  const out: Array<{ role: "to" | "cc"; name: string | null; address: string | null }> = [];
+  for (const r of message.toRecipients ?? []) {
+    out.push({
+      role: "to",
+      name: r?.emailAddress?.name ?? null,
+      address: r?.emailAddress?.address ?? null,
     });
-    return null;
   }
-  return String(data.id);
+  for (const r of message.ccRecipients ?? []) {
+    out.push({
+      role: "cc",
+      name: r?.emailAddress?.name ?? null,
+      address: r?.emailAddress?.address ?? null,
+    });
+  }
+  return out;
 }
 
-/**
- * Insert an intake row idempotently. The two dedup UNIQUE indexes catch the
- * race where two Workers see the same message before either has committed —
- * the loser's INSERT fails with a unique-violation and we treat it as a
- * duplicate no-op.
- */
-async function persistIntakeRow(
+/** Parse Graph's ISO-8601 receivedDateTime; null if invalid. */
+function parseReceivedAt(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const ms = Date.parse(String(raw));
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+interface IngestFields {
+  mailbox: string;
+  graphMessageId: string;
+  internetMessageId: string | null;
+  conversationId: string | null;
+  senderName: string | null;
+  senderAddress: string | null;
+  recipients: unknown;
+  subject: string | null;
+  bodyPreview: string | null;
+  receivedAt: string | null;
+  hasAttachments: boolean;
+  processingState: "processed" | "needs_review";
+}
+
+function projectFields(mailbox: string, message: GraphMessage, processingState: "processed" | "needs_review"): IngestFields {
+  return {
+    mailbox,
+    graphMessageId: message.id,
+    internetMessageId: canonicalMessageId(message.internetMessageId ?? null),
+    conversationId: message.conversationId ?? null,
+    senderName: message.from?.emailAddress?.name ?? null,
+    senderAddress: message.from?.emailAddress?.address ?? null,
+    recipients: projectRecipients(message),
+    subject: message.subject ?? null,
+    bodyPreview: message.bodyPreview ?? null,
+    receivedAt: parseReceivedAt(message.receivedDateTime),
+    hasAttachments: Boolean(message.hasAttachments),
+    processingState,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Atomic ingest via RPC
+// ---------------------------------------------------------------------------
+
+interface IngestNewResult {
+  outcome: "created" | "duplicate_internet_message_id" | "duplicate_graph_message_id";
+  submissionId: string;
+  intakeMessageId: string;
+}
+
+async function ingestNewEmail(
   admin: SupabaseClient,
-  row: IntakeRowInsert,
-): Promise<{ id: string } | null> {
-  const { data, error } = await admin
-    .from("atlas_submission_intake_messages")
-    .insert(row)
-    .select("id")
-    .single();
-  if (!error && data) return { id: String(data.id) };
-  // Unique-violation is expected under concurrent polls — swallow safely.
-  const code = ((error as unknown as { code?: string })?.code ?? "").toString();
-  if (code === "23505") return null;
-  logOperationError({
-    endpoint: "graph_intake",
-    operation: "persist_intake_row",
-    code: "intake_insert_failed",
-    status: 500,
-    errorName: error?.message,
+  fields: IngestFields,
+): Promise<IngestNewResult> {
+  const { data, error } = await admin.rpc("atlas_intake_ingest_new_email", {
+    p_system_actor_id: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
+    p_source_type: "email",
+    p_pipeline_stage: "new",
+    p_queue_status: "new",
+    p_status: "new",
+    p_priority: "normal",
+    p_next_action: "Review intake",
+    p_received_at: fields.receivedAt,
+    p_mailbox: fields.mailbox,
+    p_graph_message_id: fields.graphMessageId,
+    p_internet_message_id: fields.internetMessageId,
+    p_conversation_id: fields.conversationId,
+    p_sender_name: fields.senderName,
+    p_sender_address: fields.senderAddress,
+    p_recipients: fields.recipients,
+    p_subject: fields.subject,
+    p_body_preview: fields.bodyPreview,
+    p_has_attachments: fields.hasAttachments,
+    p_processing_state: fields.processingState,
   });
-  return null;
+  if (error) throw new IntakeDbError("intake_ingest_new_failed");
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { outcome: string; submission_id: string; intake_message_id: string }
+    | undefined;
+  if (!row) throw new IntakeDbError("intake_ingest_new_returned_no_row");
+  return {
+    outcome: row.outcome as IngestNewResult["outcome"],
+    submissionId: String(row.submission_id),
+    intakeMessageId: String(row.intake_message_id),
+  };
+}
+
+interface AttachResult {
+  outcome: "attached" | "duplicate_internet_message_id" | "duplicate_graph_message_id";
+  intakeMessageId: string;
+}
+
+async function attachIntakeMessage(
+  admin: SupabaseClient,
+  submissionId: string,
+  fields: IngestFields,
+): Promise<AttachResult> {
+  const { data, error } = await admin.rpc("atlas_intake_attach_message", {
+    p_submission_id: submissionId,
+    p_mailbox: fields.mailbox,
+    p_graph_message_id: fields.graphMessageId,
+    p_internet_message_id: fields.internetMessageId,
+    p_conversation_id: fields.conversationId,
+    p_sender_name: fields.senderName,
+    p_sender_address: fields.senderAddress,
+    p_recipients: fields.recipients,
+    p_subject: fields.subject,
+    p_body_preview: fields.bodyPreview,
+    p_received_at: fields.receivedAt,
+    p_has_attachments: fields.hasAttachments,
+    p_processing_state: fields.processingState,
+  });
+  if (error) throw new IntakeDbError("intake_attach_failed");
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { outcome: string; intake_message_id: string }
+    | undefined;
+  if (!row) throw new IntakeDbError("intake_attach_returned_no_row");
+  return {
+    outcome: row.outcome as AttachResult["outcome"],
+    intakeMessageId: String(row.intake_message_id),
+  };
+}
+
+/** Distinguish DB-side failures from other error classes for the caller. */
+class IntakeDbError extends Error {
+  code: string;
+  constructor(code: string) {
+    super(code);
+    this.name = "IntakeDbError";
+    this.code = code;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Per-message processing
 // ---------------------------------------------------------------------------
 
-interface ProcessMessageArgs {
+interface ProcessMessageOutcome {
+  kind: "duplicate" | "attach" | "needs_review" | "new_submission" | "removed";
+}
+
+async function processSingleMessage(args: {
   admin: SupabaseClient;
-  env: Env;
   mailbox: string;
   message: GraphMessage;
   token: GraphAccessToken;
   deps: IntakeDeps;
-}
-
-interface ProcessMessageOutcome {
-  kind: "duplicate" | "attach" | "needs_review" | "new_submission" | "removed";
-  intakeId?: string;
-}
-
-async function processSingleMessage(args: ProcessMessageArgs): Promise<ProcessMessageOutcome> {
-  const { admin, env, mailbox, message, token, deps } = args;
+}): Promise<ProcessMessageOutcome> {
+  const { admin, mailbox, message, token, deps } = args;
   if (isRemovedEvent(message)) return { kind: "removed" };
   if (!message.id) return { kind: "removed" };
 
   const lookups = buildLookups(admin);
-  // Reply headers require one extra request. Defer until Rules 1..4 have not
-  // matched, but the correlate() call needs the values upfront to preserve
-  // ordering — perform the fetch only when the message has neither an already
-  // seen id nor a conversation match (checked below via a light pre-pass).
-  //
-  // To keep correlate() a pure function we simply attempt to fetch the
-  // headers ahead of time; the small extra Graph call is scoped by the
-  // enabled feature flag and the fact that we only process brand-new
-  // messages here (Rule 1/2 duplicates are re-tested by correlate() itself
-  // and short-circuit before the parent-message lookup runs).
   let parentMessageIds: string[] = [];
   if (deps.attemptReplyHeaders !== false) {
     try {
@@ -419,125 +548,106 @@ async function processSingleMessage(args: ProcessMessageArgs): Promise<ProcessMe
     }
   }
 
+  const canonicalInternetId = canonicalMessageId(message.internetMessageId ?? null);
   const outcome: CorrelationOutcome = await correlate(
     {
       mailbox,
       graphMessageId: message.id,
-      internetMessageId: message.internetMessageId ?? null,
+      internetMessageId: canonicalInternetId,
       conversationId: message.conversationId ?? null,
       parentMessageIds,
     },
     lookups,
   );
 
-  const nowIso = new Date((deps.now ?? Date.now)()).toISOString();
+  const mailboxHash = await safeHash(mailbox);
+  const graphIdHash = await safeHash(message.id);
 
-  if (outcome.kind === "duplicate") {
-    return { kind: "duplicate" };
-  }
+  if (outcome.kind === "duplicate") return { kind: "duplicate" };
 
   if (outcome.kind === "attach") {
-    const row = buildIntakeRow({
-      mailbox,
-      message,
-      submissionId: outcome.submissionId,
-      processingState: "processed",
-    });
-    const inserted = await persistIntakeRow(admin, row);
-    if (!inserted) return { kind: "duplicate" };
-    const graphIdHash = await safeHash(message.id);
-    await audit(env, {
+    const fields = projectFields(mailbox, message, "processed");
+    const attach = await attachIntakeMessage(admin, outcome.submissionId, fields);
+    if (attach.outcome !== "attached") return { kind: "duplicate" };
+    await auditChecked(admin, {
       submissionId: outcome.submissionId,
       action: "intake_message_correlated",
-      actorId: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
       metadata: {
-        intake_message_id: inserted.id,
+        intake_message_id: attach.intakeMessageId,
         correlation_rule_matched: outcome.rule,
         graph_message_id_hash: graphIdHash,
+        mailbox_hash: mailboxHash,
       },
     });
-    return { kind: "attach", intakeId: inserted.id };
+    return { kind: "attach" };
   }
 
   if (outcome.kind === "needs_review") {
-    // A safe intake-review container: a new submission that is intentionally
-    // pipeline_stage='new' and carries no fabricated correlation. Candidate
-    // ids are only recorded in the audit metadata for operator triage.
-    const reviewSubmissionId = await createIntakeSubmission(admin, nowIso);
-    if (!reviewSubmissionId) return { kind: "duplicate" };
-    const row = buildIntakeRow({
-      mailbox,
-      message,
-      submissionId: reviewSubmissionId,
-      processingState: "needs_review",
-    });
-    const inserted = await persistIntakeRow(admin, row);
-    if (!inserted) return { kind: "duplicate" };
-    const graphIdHash = await safeHash(message.id);
-    await audit(env, {
-      submissionId: reviewSubmissionId,
-      action: "intake_correlation_needs_review",
-      actorId: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
+    const fields = projectFields(mailbox, message, "needs_review");
+    const ingested = await ingestNewEmail(admin, fields);
+    if (ingested.outcome !== "created") return { kind: "duplicate" };
+    // Alert must persist — needs-review without alert is silently unsafe.
+    await insertAlertChecked(admin, {
+      alertType: "intake_correlation_needs_review",
+      severity: "warning",
+      title: "Ambiguous intake correlation",
+      message: "An email matched more than one open case. Operator review is required.",
+      relatedSubmissionId: ingested.submissionId,
       metadata: {
-        intake_message_id: inserted.id,
+        intake_message_id: ingested.intakeMessageId,
+        candidate_count: outcome.candidateSubmissionIds.length,
+        rule: outcome.rule,
+      },
+    });
+    await auditChecked(admin, {
+      submissionId: ingested.submissionId,
+      action: "intake_correlation_needs_review",
+      metadata: {
+        intake_message_id: ingested.intakeMessageId,
         correlation_rule_matched: outcome.rule,
         graph_message_id_hash: graphIdHash,
+        mailbox_hash: mailboxHash,
         candidate_submission_ids: outcome.candidateSubmissionIds,
       },
     });
-    // Also register an operational alert; message text is bland.
-    await admin.from("atlas_operational_alerts").insert(
-      buildAlert({
-        alertType: "intake_correlation_needs_review",
-        severity: "warning",
-        title: "Ambiguous intake correlation",
-        message: "An email matched more than one open case. Operator review is required.",
-        relatedSubmissionId: reviewSubmissionId,
-        metadata: {
-          intake_message_id: inserted.id,
-          candidate_count: outcome.candidateSubmissionIds.length,
-          rule: outcome.rule,
-        },
-      }),
-    );
-    return { kind: "needs_review", intakeId: inserted.id };
+    return { kind: "needs_review" };
   }
 
-  // outcome.kind === "new_submission"
-  const submissionId = await createIntakeSubmission(admin, nowIso);
-  if (!submissionId) return { kind: "duplicate" };
-  const row = buildIntakeRow({
-    mailbox,
-    message,
-    submissionId,
-    processingState: "processed",
-  });
-  const inserted = await persistIntakeRow(admin, row);
-  if (!inserted) return { kind: "duplicate" };
-  const graphIdHash = await safeHash(message.id);
-  await audit(env, {
-    submissionId,
+  // new_submission
+  const fields = projectFields(mailbox, message, "processed");
+  const ingested = await ingestNewEmail(admin, fields);
+  if (ingested.outcome !== "created") return { kind: "duplicate" };
+  await auditChecked(admin, {
+    submissionId: ingested.submissionId,
     action: "submission_created_from_email",
-    actorId: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
     metadata: {
-      intake_message_id: inserted.id,
+      intake_message_id: ingested.intakeMessageId,
       correlation_rule_matched: outcome.rule,
       graph_message_id_hash: graphIdHash,
-      mailbox_hash: await safeHash(mailbox),
+      mailbox_hash: mailboxHash,
     },
   });
-  await audit(env, {
-    submissionId,
+  await auditChecked(admin, {
+    submissionId: ingested.submissionId,
     action: "intake_message_recorded",
-    actorId: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
-    metadata: { intake_message_id: inserted.id },
+    metadata: { intake_message_id: ingested.intakeMessageId, mailbox_hash: mailboxHash },
   });
-  return { kind: "new_submission", intakeId: inserted.id };
+  return { kind: "new_submission" };
 }
 
 // ---------------------------------------------------------------------------
 // Poll driver
 // ---------------------------------------------------------------------------
+
+/**
+ * Choose the starting cursor for this tick. Precedence:
+ *   1. in_round_next_link (mid-round checkpoint from a previous partial tick)
+ *   2. delta_link         (the durable cursor of the last completed round)
+ *   3. initial delta URL  (first-ever poll for this mailbox)
+ */
+function chooseStartCursor(row: GraphStateRow, mailbox: string): string {
+  return row.in_round_next_link ?? row.delta_link ?? initialDeltaUrl(mailbox);
+}
 
 export async function pollMailbox(
   env: Env,
@@ -558,41 +668,28 @@ export async function pollMailbox(
     status: "failed",
   };
 
-  const lease = await acquireMailboxLease(admin, mailbox, nowFn());
-  if (!lease) {
-    result.status = "skipped_locked";
-    return result;
-  }
-
-  // Circuit breaker: once we've hit the failure threshold, refuse to hammer
-  // Graph until the cooldown expires. Uses last_polled_at as the anchor — the
-  // lease acquisition above already updated it.
-  if (lease.consecutive_failures >= CIRCUIT_BREAKER_FAILURES) {
-    const lastSuccess = lease.last_success_at ? Date.parse(lease.last_success_at) : 0;
-    const anchor = lastSuccess || (lease.last_polled_at ? Date.parse(lease.last_polled_at) : 0);
-    if (anchor && nowFn() - anchor < CIRCUIT_BREAKER_COOLDOWN_MS) {
-      await releaseMailboxLease(admin, mailbox, {});
-      result.status = "skipped_breaker";
-      return result;
-    }
-  }
+  const acquired = await acquireMailboxLease(admin, mailbox, nowFn(), deps);
+  if (acquired.kind === "locked") { result.status = "skipped_locked"; return result; }
+  if (acquired.kind === "throttled") { result.status = "skipped_throttled"; return result; }
+  if (acquired.kind === "breaker_open") { result.status = "skipped_breaker"; return result; }
+  const lease = acquired.row!;
+  const leaseId = acquired.leaseId!;
+  const mailboxHash = await safeHash(mailbox);
 
   let token: GraphAccessToken;
   try {
     token = await acquireGraphToken(env, deps.graph);
   } catch (err) {
-    await recordFailure(admin, mailbox, lease.consecutive_failures, err, env);
+    await recordFailure(admin, mailbox, mailboxHash, leaseId, lease, err, nowFn());
     result.status = "failed";
     result.errorCode = err instanceof GraphError ? err.code : "graph_token_failed";
     return result;
   }
 
-  // Cursor bootstrap: reuse the persisted deltaLink, otherwise start from the
-  // initial delta URL. deltaLink is treated as sensitive operational state —
-  // never logged.
-  let cursor: string | null = lease.delta_link ?? initialDeltaUrl(mailbox);
+  let cursor: string | null = chooseStartCursor(lease, mailbox);
   let finalDeltaLink: string | null = null;
-  let processingHadFailure = false;
+  let pageBudgetExhausted = false;
+  let lastNextLink: string | null = null;
 
   try {
     while (cursor && result.pagesFetched < MAX_DELTA_PAGES_PER_POLL) {
@@ -601,9 +698,8 @@ export async function pollMailbox(
         page = await fetchDeltaPage(cursor, token, deps.graph);
       } catch (err) {
         if (err instanceof GraphError && err.deltaTokenExpired) {
-          // Reset cursor and try again from the beginning — but only for this
-          // poll cycle. Do NOT persist the reset yet; if the subsequent
-          // fetches fail we must retain a safe state.
+          // Restart from the initial URL for this run only. The persisted
+          // cursor is only overwritten on success.
           cursor = initialDeltaUrl(mailbox);
           continue;
         }
@@ -617,52 +713,112 @@ export async function pollMailbox(
           result.removedEvents += 1;
           continue;
         }
-        try {
-          const outcome = await processSingleMessage({ admin, env, mailbox, message, token, deps });
-          if (outcome.kind === "duplicate") result.duplicates += 1;
-          else if (outcome.kind === "attach") result.attached += 1;
-          else if (outcome.kind === "needs_review") result.needsReview += 1;
-          else if (outcome.kind === "new_submission") result.newSubmissions += 1;
-          else if (outcome.kind === "removed") result.removedEvents += 1;
-        } catch (err) {
-          // A per-message failure must not advance the durable cursor. Record
-          // and abort the poll so the next tick retries the same batch.
-          processingHadFailure = true;
-          logOperationError({
-            endpoint: "graph_intake",
-            operation: "process_message",
-            code: "intake_process_failed",
-            status: 500,
-            errorName: err instanceof Error ? err.name : "unknown",
-          });
-          throw err;
-        }
+        const outcome = await processSingleMessage({ admin, mailbox, message, token, deps });
+        if (outcome.kind === "duplicate") result.duplicates += 1;
+        else if (outcome.kind === "attach") result.attached += 1;
+        else if (outcome.kind === "needs_review") result.needsReview += 1;
+        else if (outcome.kind === "new_submission") result.newSubmissions += 1;
+        else if (outcome.kind === "removed") result.removedEvents += 1;
       }
 
       cursor = page.nextLink;
-      if (page.deltaLink) {
-        finalDeltaLink = page.deltaLink;
+      lastNextLink = page.nextLink;
+      if (page.deltaLink) finalDeltaLink = page.deltaLink;
+      if (result.pagesFetched >= MAX_DELTA_PAGES_PER_POLL && page.nextLink) {
+        pageBudgetExhausted = true;
       }
     }
 
-    // Only advance the durable delta cursor after every page in the round has
-    // processed successfully.
-    if (processingHadFailure) {
-      throw new Error("intake_processing_failed");
+    const nowIso = new Date(nowFn()).toISOString();
+    if (finalDeltaLink) {
+      // Full round complete — durable cursor advances; in-round checkpoint clears.
+      const release = await releaseLease(admin, mailbox, leaseId, {
+        deltaLink: finalDeltaLink,
+        inRoundNextLink: null,
+        lastError: null,
+        consecutiveFailures: 0,
+        lastSuccessAt: nowIso,
+        breakerOpenedAt: null,
+        breakerProvided: true,
+        nextAttemptAfter: null,
+        nextAttemptProvided: true,
+      }, {});
+      if (!release.ok) {
+        // Lease was reclaimed by another isolate. Do NOT declare success; the
+        // other worker will make forward progress.
+        result.status = "skipped_lease_lost";
+        result.errorCode = "lease_lost";
+        return result;
+      }
+      await auditChecked(admin, {
+        submissionId: null,
+        action: "graph_poll_success",
+        metadata: {
+          mailbox_hash: mailboxHash,
+          pages: result.pagesFetched,
+          messages: result.messagesConsidered,
+          duplicates: result.duplicates,
+          attached: result.attached,
+          needs_review: result.needsReview,
+          new_submissions: result.newSubmissions,
+          removed_events: result.removedEvents,
+          resumable: false,
+        },
+      });
+      result.status = "ok";
+      return result;
     }
 
-    await releaseMailboxLease(admin, mailbox, {
-      deltaLink: finalDeltaLink ?? lease.delta_link ?? null,
+    if (pageBudgetExhausted && lastNextLink) {
+      // Resumable partial tick: persist the intermediate checkpoint. Delta
+      // cursor is unchanged; next tick starts from lastNextLink.
+      const release = await releaseLease(admin, mailbox, leaseId, {
+        inRoundNextLink: lastNextLink,
+        lastError: null,
+        consecutiveFailures: 0,
+        lastSuccessAt: nowIso,
+        breakerOpenedAt: null,
+        breakerProvided: true,
+        nextAttemptAfter: null,
+        nextAttemptProvided: true,
+      }, {});
+      if (!release.ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
+      await auditChecked(admin, {
+        submissionId: null,
+        action: "graph_poll_success",
+        metadata: {
+          mailbox_hash: mailboxHash,
+          pages: result.pagesFetched,
+          messages: result.messagesConsidered,
+          duplicates: result.duplicates,
+          attached: result.attached,
+          needs_review: result.needsReview,
+          new_submissions: result.newSubmissions,
+          removed_events: result.removedEvents,
+          resumable: true,
+        },
+      });
+      result.status = "ok_resumable";
+      return result;
+    }
+
+    // No pages fetched at all (e.g. empty inbox on a fresh delta) — still a
+    // healthy release with no cursor change.
+    const release = await releaseLease(admin, mailbox, leaseId, {
       lastError: null,
       consecutiveFailures: 0,
-      lastSuccessAt: new Date(nowFn()).toISOString(),
-    });
-    await audit(env, {
+      lastSuccessAt: nowIso,
+      breakerOpenedAt: null,
+      breakerProvided: true,
+      nextAttemptAfter: null,
+      nextAttemptProvided: true,
+    }, {});
+    if (!release.ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
+    await auditChecked(admin, {
       submissionId: null,
       action: "graph_poll_success",
-      actorId: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
       metadata: {
-        mailbox_hash: await safeHash(mailbox),
+        mailbox_hash: mailboxHash,
         pages: result.pagesFetched,
         messages: result.messagesConsidered,
         duplicates: result.duplicates,
@@ -670,39 +826,69 @@ export async function pollMailbox(
         needs_review: result.needsReview,
         new_submissions: result.newSubmissions,
         removed_events: result.removedEvents,
+        resumable: false,
       },
     });
     result.status = "ok";
     return result;
   } catch (err) {
-    await recordFailure(admin, mailbox, lease.consecutive_failures, err, env);
+    await recordFailure(admin, mailbox, mailboxHash, leaseId, lease, err, nowFn());
     result.status = "failed";
-    result.errorCode = err instanceof GraphError ? err.code : "intake_processing_failed";
+    result.errorCode = classifyError(err);
     return result;
   }
+}
+
+function classifyError(err: unknown): string {
+  if (err instanceof GraphError) return err.code;
+  if (err instanceof IntakeAuditError) return err.code;
+  if (err instanceof IntakeAlertError) return err.code;
+  if (err instanceof IntakeDbError) return err.code;
+  if (err instanceof Error && err.message === "intake_processing_failed") return err.message;
+  return "intake_processing_failed";
 }
 
 async function recordFailure(
   admin: SupabaseClient,
   mailbox: string,
-  previousFailures: number,
+  mailboxHash: string,
+  leaseId: string,
+  lease: GraphStateRow,
   err: unknown,
-  env: Env,
+  nowMs: number,
 ): Promise<void> {
-  const nextFailures = previousFailures + 1;
-  const code =
-    err instanceof GraphError ? err.code :
-    err instanceof Error ? "intake_processing_failed" :
-    "graph_error";
-  await releaseMailboxLease(admin, mailbox, {
+  const nextFailures = (lease.consecutive_failures ?? 0) + 1;
+  const code = classifyError(err);
+  logIntakeError({ code, mailboxHash });
+
+  const nowIso = new Date(nowMs).toISOString();
+  const throttled = err instanceof GraphError && err.status === 429;
+  const retryAfterSec = throttled ? err.retryAfterSeconds ?? 60 : null;
+  const nextAttemptIso = retryAfterSec != null
+    ? new Date(nowMs + retryAfterSec * 1000).toISOString()
+    : null;
+
+  // Open the breaker when we cross the threshold. Reuse the existing anchor
+  // if the breaker is already open (do not push cooldown further).
+  const breakerJustOpened =
+    nextFailures >= CIRCUIT_BREAKER_FAILURES && !lease.breaker_opened_at;
+  const breakerOpenedAtIso = breakerJustOpened ? nowIso : (lease.breaker_opened_at ?? null);
+
+  await releaseLease(admin, mailbox, leaseId, {
     lastError: code,
     consecutiveFailures: nextFailures,
-  });
-  // Auth-class failures and reaching the breaker warrant an operational alert
-  // — the transient warning of a single 5xx does not.
+    lastFailureAt: nowIso,
+    breakerOpenedAt: breakerOpenedAtIso,
+    breakerProvided: breakerJustOpened || Boolean(lease.breaker_opened_at),
+    nextAttemptAfter: nextAttemptIso,
+    nextAttemptProvided: retryAfterSec != null,
+  }, {});
+
   const alertClass =
     err instanceof GraphError && (err.status === 401 || err.status === 403 || err.status === 404);
-  if (alertClass || nextFailures >= CIRCUIT_BREAKER_FAILURES) {
+  if (alertClass || breakerJustOpened) {
+    // Alert insertion best-effort here: a failure recording an alert must not
+    // itself trigger unbounded log noise.
     await admin.from("atlas_operational_alerts").insert(
       buildAlert({
         alertType: alertClass ? "graph_intake_auth_failure" : "graph_intake_failure_repeated",
@@ -712,37 +898,76 @@ async function recordFailure(
           ? "Atlas could not authenticate to Microsoft Graph. Check the intake app configuration."
           : "Atlas has recorded many consecutive Graph intake failures; the poller is temporarily paused.",
         metadata: {
-          mailbox_hash: await safeHash(mailbox),
+          mailbox_hash: mailboxHash,
           consecutive_failures: nextFailures,
           error_code: code,
         },
       }),
-    );
+    ).then(() => undefined, () => undefined);
   }
-  await audit(env, {
-    submissionId: null,
-    action: "graph_poll_failed",
-    actorId: ATLAS_INTAKE_SYSTEM_ACTOR_ID,
-    metadata: {
-      mailbox_hash: await safeHash(mailbox),
-      error_code: code,
-      consecutive_failures: nextFailures,
-    },
-  });
+
+  // Best-effort failure audit (already the failure path — logging here is
+  // enough if the audit table itself is misbehaving).
+  await admin
+    .from("atlas_audit_logs")
+    .insert({
+      submission_id: null,
+      action: "graph_poll_failed",
+      actor: null,
+      metadata_json: {
+        mailbox_hash: mailboxHash,
+        error_code: code,
+        consecutive_failures: nextFailures,
+      },
+    })
+    .then(() => undefined, () => undefined);
 }
 
 // ---------------------------------------------------------------------------
-// Scheduled entry + admin poll endpoint
+// Scheduled entry (dependency-injected admin)
 // ---------------------------------------------------------------------------
 
-export async function runGraphIntakeCycle(env: Env, deps: IntakeDeps = {}): Promise<PollResult[]> {
+/**
+ * Run one full Graph intake cycle for every configured mailbox. `admin` is the
+ * privileged Supabase client — callers building for production compose it via
+ * adminClient(env) in the module that owns that runtime dependency
+ * (graph-intake-endpoints.ts). Behavioural tests pass an in-memory fake.
+ *
+ * When the feature flag is off, or the mailbox list is missing/malformed, this
+ * function performs NO Graph work.
+ */
+export async function runGraphIntakeCycle(
+  env: Env,
+  admin: SupabaseClient,
+  deps: IntakeDeps = {},
+): Promise<PollResult[]> {
   if (!graphIntakeEnabled(env)) return [];
   const mailboxes = graphIntakeMailboxes(env);
-  if (mailboxes.length === 0) return [];
-  const admin = adminClient(env);
+  if (mailboxes.length === 0) {
+    try {
+      const { data: existing } = await admin
+        .from("atlas_operational_alerts")
+        .select("id")
+        .eq("alert_type", "graph_intake_misconfigured")
+        .in("status", ["open", "acknowledged"])
+        .limit(1)
+        .maybeSingle();
+      if (!existing?.id) {
+        await admin.from("atlas_operational_alerts").insert(
+          buildAlert({
+            alertType: "graph_intake_misconfigured",
+            severity: "warning",
+            title: "Graph intake is enabled but no mailboxes are configured",
+            message: "Set ATLAS_GRAPH_MAILBOXES_JSON to a JSON array of mailboxes, or disable ATLAS_GRAPH_INTAKE_ENABLED.",
+          }),
+        );
+      }
+    } catch {
+      /* alert insertion failure must not block scheduled() */
+    }
+    return [];
+  }
   const results: PollResult[] = [];
-  // Sequential per-mailbox is fine at once-per-minute cadence: keeps rate
-  // pressure on Graph gentle and simplifies the audit trail.
   for (const mailbox of mailboxes) {
     const result = await pollMailbox(env, admin, mailbox, deps);
     results.push(result);
@@ -750,83 +975,10 @@ export async function runGraphIntakeCycle(env: Env, deps: IntakeDeps = {}): Prom
   return results;
 }
 
-export async function handleGraphPollNow(
-  env: Env,
-  user: AtlasUser,
-  deps: IntakeDeps = {},
-): Promise<Response> {
-  if (user.role !== "admin") {
-    return jsonError("permission_denied", 403, "Only administrators may trigger an on-demand intake poll.");
-  }
-  // Non-production only. Production activation belongs to the later live
-  // integration checkpoint.
-  if (env.ATLAS_ENV === "production") {
-    return jsonError("permission_denied", 403, "Manual intake polling is disabled in production.");
-  }
-  if (!graphIntakeEnabled(env)) {
-    return jsonError("validation_failed", 400, "Graph intake is not enabled in this environment.");
-  }
-  const results = await runGraphIntakeCycle(env, deps);
-  // Response body contains counts only. No mailbox identifiers, no subjects,
-  // no delta link, no tokens.
-  return json({
-    ok: true,
-    polls: results.map((result) => ({
-      status: result.status,
-      pages_fetched: result.pagesFetched,
-      messages_considered: result.messagesConsidered,
-      duplicates: result.duplicates,
-      attached: result.attached,
-      needs_review: result.needsReview,
-      new_submissions: result.newSubmissions,
-      removed_events: result.removedEvents,
-      error_code: result.errorCode ?? null,
-    })),
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Intake message read endpoint
-// ---------------------------------------------------------------------------
-
-export async function handleListSubmissionIntakeMessages(
-  submissionId: string,
-  env: Env,
-  // Access is gated by canAccessSubmission upstream. user is accepted here so
-  // future scoping decisions (e.g. broker-specific projections) can be added
-  // without changing the router signature.
-  _user: AtlasUser,
-): Promise<Response> {
-  const admin = adminClient(env);
-  const { data, error } = await admin
-    .from("atlas_submission_intake_messages")
-    .select(
-      "id, source, sender_name, sender_address, subject, body_preview, received_at, has_attachments, ingested_at, processing_state",
-    )
-    .eq("submission_id", submissionId)
-    .order("received_at", { ascending: true })
-    .limit(500);
-  if (error) return jsonError("internal_error", 500, "Could not load intake messages.");
-  const rows = (data ?? []) as Array<Record<string, unknown>>;
-  // Broker sees the same content shape as staff for their own submission —
-  // access is already gated in the router by canAccessSubmission. We
-  // deliberately do NOT expose Graph internals (mailbox, message id,
-  // internet_message_id, conversation_id) here to anyone.
-  return json({
-    ok: true,
-    intake_messages: rows.map((row) => ({
-      id: row.id,
-      source: row.source,
-      sender: {
-        name: row.sender_name ?? null,
-        address: row.sender_address ?? null,
-      },
-      subject: row.subject ?? null,
-      body_preview: row.body_preview ?? null,
-      received_at: row.received_at ?? null,
-      has_attachments: row.has_attachments ?? false,
-      ingested_at: row.ingested_at ?? null,
-      processing_state: row.processing_state ?? null,
-    })),
-  });
-}
+// Test-only exports — pollMailbox is already exported.
+export const __testables = {
+  auditChecked,
+  releaseLease,
+  ingestNewEmail,
+  attachIntakeMessage,
+};
