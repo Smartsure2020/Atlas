@@ -1,0 +1,35 @@
+name = "atlas-worker-staging"
+main = "src/index.ts"
+compatibility_date = "2026-06-24"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ATLAS_DOC_RETENTION_DAYS = "7"
+ATLAS_ENV = "staging"
+ATLAS_CLEANUP_APPROVED = "false"
+ATLAS_DOCUMENT_PIPELINE_MODE = "legacy"
+ATLAS_DOCUMENT_PROVIDER = "azure"
+ATLAS_HYBRID_MAX_TEXT_FASTPATH_PAGES = "40"
+ATLAS_EXPLANATION_MODE = "deterministic"
+ATLAS_EMAIL_MODE = "template"
+ATLAS_SHADOW_SAMPLE_PERCENT = "0"
+ATLAS_LEGACY_FALLBACK_DISABLED = "false"
+ATLAS_STRICT_ACCESS_SCOPING = "true"
+
+[[queues.producers]]
+binding = "ATLAS_SHADOW_QUEUE"
+queue = "atlas-shadow-pipeline-staging"
+
+[[queues.consumers]]
+queue = "atlas-shadow-pipeline-staging"
+max_batch_size = 5
+max_batch_timeout = 5
+max_retries = 4
+dead_letter_queue = "atlas-shadow-pipeline-staging-dlq"
+
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1

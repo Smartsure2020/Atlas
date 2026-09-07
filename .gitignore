@@ -13,5 +13,5 @@ worker/.dev.vars
 worker/.dry-run/
 supabase/.temp/
 
-# Local-only staging wrangler override (do NOT commit staging secrets)
-worker/wrangler.staging.toml
+# Phase 4 live-staging validator artefacts (never commit)
+.test-artifacts/

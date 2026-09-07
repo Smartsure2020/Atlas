@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/assert-safe-dev-env.mjs",
     "dev": "vite",
     "build": "tsc -b && node scripts/build.mjs",
     "preview": "vite preview",
