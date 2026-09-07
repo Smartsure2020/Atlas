@@ -98,6 +98,11 @@ import {
 import { buildHealthBody } from "./phase7-core";
 import { emailsForUserIds } from "./user-directory";
 import { runBackgroundMaintenance } from "./phase4-background";
+import {
+  handleGraphPollNow,
+  handleListSubmissionIntakeMessages,
+  runGraphIntakeCycle,
+} from "./graph-intake";
 import { beginJob } from "./phase7-jobs";
 import { canAccessSubmission, canViewAllSubmissions, scopedSubmissionOr } from "./access-scope";
 import { handleShadowQueueBatch, type ShadowQueueMessage } from "./shadow-queue";
@@ -146,6 +151,11 @@ export default {
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runBackgroundMaintenance(env).catch((error) => {
       console.error("atlas_background_maintenance_failed", { error_name: (error as Error)?.name });
+    }));
+    // Phase 5A Graph intake — fails closed on missing flag / config. When
+    // disabled this call returns immediately and performs no Graph requests.
+    ctx.waitUntil(runGraphIntakeCycle(env).catch((error) => {
+      console.error("atlas_graph_intake_failed", { error_name: (error as Error)?.name });
     }));
   },
   /**
@@ -250,6 +260,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       }
       if (pathname === "/api/admin/cleanup/candidates" && request.method === "GET") {
         return handleListCleanupCandidates(env, user);
+      }
+      if (pathname === "/api/intake/graph/poll-now" && request.method === "POST") {
+        return handleGraphPollNow(env, user);
       }
 
       {
@@ -377,6 +390,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         }
         if (sub === "/audit" && request.method === "GET") {
           return handleGetAuditTimeline(id, env, user);
+        }
+        if (sub === "/intake-messages" && request.method === "GET") {
+          return handleListSubmissionIntakeMessages(id, env, user);
         }
         if (sub === "/pilot" && request.method === "PATCH") {
           if (user.role === "broker") return jsonError("permission_denied", 403, "Pilot controls are not available for your role.");
