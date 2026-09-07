@@ -77,6 +77,10 @@ import {
   handleGetAssignmentHistory,
 } from "./assignment-endpoints";
 import {
+  handleGetSubmissionQuick,
+  handleGetWorkload,
+} from "./pipeline-endpoints";
+import {
   handleCanary,
   handleCancelJob,
   handleConfirmCleanupCandidate,
@@ -226,6 +230,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         }
         return handleGetManagerStats(request, env, user);
       }
+      if (pathname === "/api/pipeline/workload" && request.method === "GET") {
+        return handleGetWorkload(env, user);
+      }
       if (pathname === "/api/admin/system-status" && request.method === "GET") {
         return handleSystemStatus(env, user);
       }
@@ -280,6 +287,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         }
         if (!sub && request.method === "GET") {
           return handleGetSubmission(id, env, user);
+        }
+        if (sub === "/quick" && request.method === "GET") {
+          return handleGetSubmissionQuick(id, env, user);
         }
         if (sub === "/extract" && request.method === "POST") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot run extraction.");

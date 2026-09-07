@@ -25,6 +25,9 @@ const listPilotIssuesMock = vi.fn();
 const createPilotIssueMock = vi.fn();
 const updatePilotIssueMock = vi.fn();
 const listSubmissionsMock = vi.fn();
+const getPipelineWorkloadMock = vi.fn();
+const getSubmissionQuickMock = vi.fn();
+const createSubmissionMock = vi.fn();
 
 vi.mock("../lib/atlas", () => ({
   getSubmission: (...a: unknown[]) => getSubmissionMock(...a),
@@ -35,6 +38,9 @@ vi.mock("../lib/atlas", () => ({
   createPilotIssue: (...a: unknown[]) => createPilotIssueMock(...a),
   updatePilotIssue: (...a: unknown[]) => updatePilotIssueMock(...a),
   listSubmissions: (...a: unknown[]) => listSubmissionsMock(...a),
+  getPipelineWorkload: (...a: unknown[]) => getPipelineWorkloadMock(...a),
+  getSubmissionQuick: (...a: unknown[]) => getSubmissionQuickMock(...a),
+  createSubmission: (...a: unknown[]) => createSubmissionMock(...a),
 }));
 
 const getRecommendationMock = vi.fn();
@@ -133,7 +139,7 @@ describe("AppShell (broker)", () => {
   it("shows Work queue and hides Insurers, Manager overview, Processing & alerts", () => {
     renderShell("broker");
     const sidebar = screen.getByRole("navigation", { name: /primary/i });
-    expect(within(sidebar).getByRole("button", { name: /work queue/i })).toBeInTheDocument();
+    expect(within(sidebar).getByRole("button", { name: /quote pipeline/i })).toBeInTheDocument();
     expect(within(sidebar).queryByRole("button", { name: /insurers/i })).toBeNull();
     expect(within(sidebar).queryByRole("button", { name: /manager overview/i })).toBeNull();
     expect(within(sidebar).queryByRole("button", { name: /processing & alerts/i })).toBeNull();
@@ -142,7 +148,7 @@ describe("AppShell (broker)", () => {
   it("shows all groups for a manager (control case)", () => {
     renderShell("manager");
     const sidebar = screen.getByRole("navigation", { name: /primary/i });
-    expect(within(sidebar).getByRole("button", { name: /work queue/i })).toBeInTheDocument();
+    expect(within(sidebar).getByRole("button", { name: /quote pipeline/i })).toBeInTheDocument();
     expect(within(sidebar).getByRole("button", { name: /insurers/i })).toBeInTheDocument();
     expect(within(sidebar).getByRole("button", { name: /manager overview/i })).toBeInTheDocument();
     expect(within(sidebar).getByRole("button", { name: /processing & alerts/i })).toBeInTheDocument();
@@ -154,7 +160,7 @@ describe("AppShell (broker)", () => {
 // ---------------------------------------------------------------------------
 
 describe("WorkQueue (broker)", () => {
-  it("enables the New submission button for broker", async () => {
+  it("shows Quick capture / Full intake actions for broker", async () => {
     listSubmissionsMock.mockResolvedValue({ ok: true, submissions: [] });
     const onNew = vi.fn();
     render(
@@ -166,13 +172,15 @@ describe("WorkQueue (broker)", () => {
         onOpen={() => {}}
       />
     );
-    await screen.findByText(/work queue is empty/i);
-    const buttons = screen.getAllByRole("button", { name: /new submission/i });
-    // At least one enabled control (header + empty-state)
-    expect(buttons.some((b) => !(b as HTMLButtonElement).disabled)).toBe(true);
+    await screen.findByText(/quote pipeline is empty/i);
+    // At least one Quick capture control is present + enabled.
+    const captures = screen.getAllByRole("button", { name: /^Quick capture$/i });
+    expect(captures.some((b) => !(b as HTMLButtonElement).disabled)).toBe(true);
+    // Full intake action is present.
+    expect(screen.getAllByRole("button", { name: /^Full intake$/i }).length).toBeGreaterThan(0);
   });
 
-  it("disables the New submission button for readonly (control case)", async () => {
+  it("readonly has ZERO creation actions — no Quick capture, no Full intake, no New submission", async () => {
     listSubmissionsMock.mockResolvedValue({ ok: true, submissions: [] });
     render(
       <WorkQueue
@@ -183,9 +191,12 @@ describe("WorkQueue (broker)", () => {
         onOpen={() => {}}
       />
     );
-    await screen.findByText(/work queue is empty/i);
-    const headerBtn = screen.getAllByRole("button", { name: /new submission/i })[0];
-    expect(headerBtn).toBeDisabled();
+    await screen.findByText(/quote pipeline is empty/i);
+    expect(screen.queryByRole("button", { name: /^Quick capture$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Full intake$/i })).toBeNull();
+    // The disabled "New submission" placeholder from earlier iterations was
+    // removed on the CEO's closeout — readonly must not even see the CTA.
+    expect(screen.queryByRole("button", { name: /new submission/i })).toBeNull();
   });
 });
 

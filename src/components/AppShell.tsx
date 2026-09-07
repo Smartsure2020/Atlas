@@ -69,7 +69,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "Work",
     items: [
-      { section: "queue", label: "Work queue", icon: "queue", route: { name: "queue" } },
+      { section: "queue", label: "Quote pipeline", icon: "queue", route: { name: "queue" } },
     ],
   },
   {
