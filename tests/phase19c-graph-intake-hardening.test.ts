@@ -349,6 +349,250 @@ test("lazy headers: known duplicate + header endpoint 503 → duplicate succeeds
 });
 
 // ---------------------------------------------------------------------------
+// CHECKPOINT 8 — fail-closed reply-header correlation
+// ---------------------------------------------------------------------------
+//
+// When Rules 1–4 miss and Atlas has to consult internetMessageHeaders for
+// Rule 5, only 404/410 count as "no headers to read" (benign absence). Every
+// other Graph/header-fetch failure must abort the poll rather than let the
+// message fall through to Rule 6 (new_submission), otherwise a transient
+// header endpoint 401/403/429/5xx would misclassify a real reply as a brand
+// new case.
+//
+// The tests below reuse a minimal fake `admin` that answers "no match" to
+// every Rules-1–4 lookup so the header path is guaranteed to be reached.
+
+function passThroughAdmin(
+  rpc: (n: string, a: Record<string, unknown>) => Promise<{ data: unknown; error: unknown }>,
+  state: FakeState,
+) {
+  // Rules 1–4 lookups always miss so the header path is guaranteed to be
+  // exercised. atlas_intake_graph_state is served from the shared FakeState
+  // so the orchestrator's post-acquire-failure classification SELECT can
+  // distinguish throttled / breaker / locked.
+  const empty = { data: null as Record<string, unknown> | null, error: null };
+  const emptyArr = { data: [] as Array<Record<string, unknown>>, error: null };
+  return {
+    from(table: string) {
+      if (table === "atlas_intake_graph_state") {
+        // Support select().eq("mailbox", x).maybeSingle() used to read the
+        // full state row after an acquire returns empty.
+        return {
+          select: () => ({
+            eq: (_col: string, value: unknown) => ({
+              maybeSingle: async () => {
+                const row = state.graphState.find((r) => r.mailbox === value) ?? null;
+                return { data: row as Record<string, unknown> | null, error: null };
+              },
+              limit: () => ({ maybeSingle: async () => {
+                const row = state.graphState.find((r) => r.mailbox === value) ?? null;
+                return { data: row as Record<string, unknown> | null, error: null };
+              } }),
+            }),
+          }),
+        };
+      }
+      // Every other table returns nothing (Rules 1–4 lookups short-circuit
+      // as "no match" and Rule 5 header path is guaranteed to run).
+      const leaf = {
+        maybeSingle: async () => empty,
+        limit: () => ({ maybeSingle: async () => empty }),
+        then: (cb: (v: unknown) => unknown) => Promise.resolve(cb(emptyArr)),
+      };
+      const eqLevel: { eq: () => typeof eqLevel; limit: () => typeof leaf; maybeSingle: () => Promise<typeof empty> } = {
+        eq: () => eqLevel,
+        limit: () => leaf,
+        maybeSingle: async () => empty,
+      };
+      return {
+        select: () => ({
+          eq: () => eqLevel,
+          in: () => ({ then: (cb: (v: unknown) => unknown) => Promise.resolve(cb(emptyArr)) }),
+        }),
+        insert: () => ({ then: (cb: (v: unknown) => unknown) => Promise.resolve(cb(empty)) }),
+      };
+    },
+    rpc,
+  } as unknown;
+}
+
+function messageWithoutMatches(id: string) {
+  // Message that will miss Rules 1–4 in the pass-through fake:
+  //   * no matching graph_message_id
+  //   * no matching internet_message_id
+  //   * no matching conversation
+  return {
+    id,
+    internetMessageId: `im-${id}`,
+    conversationId: null,
+    from: { emailAddress: { address: "a@a" } },
+    receivedDateTime: new Date().toISOString(),
+  };
+}
+
+test("header 503 after Rules 1–4 miss → poll fails, no submission, no cursor advance", async () => {
+  const state = newFakeState();
+  const { rpc } = makeFakeAdmin(state);
+  const admin = passThroughAdmin(rpc, state);
+  const routeHeaders503 = (c: FetchCall) => c.url.includes("/messages/m503") ? jsonResponse(503, {}) : null;
+  const routeDelta = (c: FetchCall) => c.url.startsWith("https://graph.microsoft.com/") && !c.url.includes("/oauth2/") && c.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [messageWithoutMatches("m503")], "@odata.deltaLink": "https://graph.microsoft.com/end" })
+    : null;
+  const { fetchImpl, calls } = makeFetchMock([tokenRoute, routeHeaders503, routeDelta]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl } });
+  eq(result.status, "failed", "poll failed");
+  eq(result.errorCode, "graph_server_error", "classified server error");
+  eq(result.newSubmissions, 0, "no new submissions");
+  eq(result.attached, 0, "no attaches");
+  eq(result.needsReview, 0, "no needs_review");
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.delta_link, null, "delta cursor did not advance");
+  eq(row.in_round_next_link, null, "no partial checkpoint written");
+  // Confirm the header endpoint really was reached (i.e. Rules 1–4 missed).
+  const headerHits = calls.filter((c) => c.url.includes("/messages/m503") && !c.url.includes("delta"));
+  assert(headerHits.length >= 1, "header endpoint was called");
+});
+
+test("header 429 Retry-After after Rules 1–4 miss → next_attempt_after populated; next tick within window skipped; after window OK", async () => {
+  const state = newFakeState();
+  const { rpc } = makeFakeAdmin(state);
+  const admin = passThroughAdmin(rpc, state);
+  const t0 = 5_000_000;
+  const routeHeaders429 = (c: FetchCall) => c.url.includes("/messages/m429") ? jsonResponse(429, {}, { "Retry-After": "120" }) : null;
+  const routeDeltaMsg = (c: FetchCall) => c.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [messageWithoutMatches("m429")], "@odata.deltaLink": "https://graph.microsoft.com/end" })
+    : null;
+  const routeDeltaEmpty = (c: FetchCall) => c.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [], "@odata.deltaLink": "https://graph.microsoft.com/end2" })
+    : null;
+
+  const first = makeFetchMock([tokenRoute, routeHeaders429, routeDeltaMsg]);
+  const r1 = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl: first.fetchImpl }, now: () => t0 });
+  eq(r1.status, "failed", "first tick failed");
+  eq(r1.errorCode, "graph_throttled", "classified throttled");
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  assert(typeof row.next_attempt_after === "string" && Date.parse(row.next_attempt_after as string) === t0 + 120_000,
+    "next_attempt_after = now + 120s");
+
+  // Within the Retry-After window — no Graph traffic.
+  const second = makeFetchMock([tokenRoute, routeHeaders429, routeDeltaEmpty]);
+  const r2 = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl: second.fetchImpl }, now: () => t0 + 60_000 });
+  eq(r2.status, "skipped_throttled", "throttled");
+  const graphHits = second.calls.filter((c) => c.url.includes("graph.microsoft.com") && !c.url.includes("/oauth2/"));
+  eq(graphHits.length, 0, "no Graph calls within window");
+
+  // After the window — allowed to poll (empty delta round).
+  const third = makeFetchMock([tokenRoute, routeDeltaEmpty]);
+  const r3 = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl: third.fetchImpl }, now: () => t0 + 121_000 });
+  eq(r3.status, "ok", "allowed after Retry-After expiry");
+});
+
+test("header 401 after Rules 1–4 miss → poll fails; no submission; cursor unchanged", async () => {
+  const state = newFakeState();
+  const { rpc } = makeFakeAdmin(state);
+  const admin = passThroughAdmin(rpc, state);
+  const routeHeaders401 = (c: FetchCall) => c.url.includes("/messages/m401") ? jsonResponse(401, {}) : null;
+  const routeDelta = (c: FetchCall) => c.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [messageWithoutMatches("m401")], "@odata.deltaLink": "https://graph.microsoft.com/end" })
+    : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeHeaders401, routeDelta]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl } });
+  eq(result.status, "failed", "failed");
+  eq(result.errorCode, "graph_unauthorized", "classified unauthorized");
+  eq(result.newSubmissions, 0, "no submission created");
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.delta_link, null, "cursor unchanged");
+});
+
+test("header 403 after Rules 1–4 miss → poll fails; no submission; cursor unchanged", async () => {
+  const state = newFakeState();
+  const { rpc } = makeFakeAdmin(state);
+  const admin = passThroughAdmin(rpc, state);
+  const routeHeaders403 = (c: FetchCall) => c.url.includes("/messages/m403") ? jsonResponse(403, {}) : null;
+  const routeDelta = (c: FetchCall) => c.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [messageWithoutMatches("m403")], "@odata.deltaLink": "https://graph.microsoft.com/end" })
+    : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeHeaders403, routeDelta]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl } });
+  eq(result.status, "failed", "failed");
+  eq(result.errorCode, "graph_forbidden", "classified forbidden");
+  eq(result.newSubmissions, 0, "no submission created");
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.delta_link, null, "cursor unchanged");
+});
+
+test("header transport failure after Rules 1–4 miss → classified graph_header_fetch_failed; no PII in logs", async () => {
+  const state = newFakeState();
+  const { rpc } = makeFakeAdmin(state);
+  const admin = passThroughAdmin(rpc, state);
+  // fetchImpl throws a non-Graph transport error for the header URL only.
+  const routeDeltaOk = (c: FetchCall) => c.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [messageWithoutMatches("m-net")], "@odata.deltaLink": "https://graph.microsoft.com/end" })
+    : null;
+  const originalFetchImpl: typeof fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    if (url.includes("/messages/m-net") && !url.includes("delta")) {
+      throw new TypeError("SECRET-NETWORK-ERROR-CANARY p5a-canary-sender@example.invalid");
+    }
+    const tokenRes = tokenRoute({ url });
+    if (tokenRes) return tokenRes;
+    const deltaRes = routeDeltaOk({ url });
+    if (deltaRes) return deltaRes;
+    return new Response("{}", { status: 500 });
+  }) as typeof fetch;
+
+  const originalErr = console.error;
+  const captured: string[] = [];
+  console.error = ((...args: unknown[]) => { captured.push(JSON.stringify(args)); }) as typeof console.error;
+  let result;
+  try {
+    result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl: originalFetchImpl } });
+  } finally {
+    console.error = originalErr;
+  }
+  eq(result.status, "failed", "failed");
+  eq(result.errorCode, "graph_header_fetch_failed", "classified graph_header_fetch_failed");
+  eq(result.newSubmissions, 0, "no submission created");
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.delta_link, null, "cursor unchanged");
+  // No raw exception text may reach logs.
+  const joined = captured.join("\n");
+  assert(!joined.includes("SECRET-NETWORK-ERROR-CANARY"), "raw exception text not logged");
+  assert(!joined.includes("p5a-canary-sender@example.invalid"), "sender canary not logged");
+  assert(!joined.includes("/messages/m-net"), "URL not logged");
+});
+
+test("header 404 after Rules 1–4 miss → benign absence; Rule 6 creates a new submission", async () => {
+  const state = newFakeState();
+  const { rpc } = makeFakeAdmin(state);
+  const admin = passThroughAdmin(rpc, state);
+  const routeHeaders404 = (c: FetchCall) => c.url.includes("/messages/m404") ? jsonResponse(404, {}) : null;
+  const routeDelta = (c: FetchCall) => c.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [messageWithoutMatches("m404")], "@odata.deltaLink": "https://graph.microsoft.com/end" })
+    : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeHeaders404, routeDelta]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl } });
+  eq(result.status, "ok", "poll ok");
+  eq(result.newSubmissions, 1, "one new submission (Rule 6)");
+});
+
+test("header 410 after Rules 1–4 miss → benign absence; Rule 6 creates a new submission", async () => {
+  const state = newFakeState();
+  const { rpc } = makeFakeAdmin(state);
+  const admin = passThroughAdmin(rpc, state);
+  // 410 with a non-syncStateNotFound body so it counts as a plain 410 that
+  // the header client interprets as benign absence (not a delta reset).
+  const routeHeaders410 = (c: FetchCall) => c.url.includes("/messages/m410") ? jsonResponse(410, {}) : null;
+  const routeDelta = (c: FetchCall) => c.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [messageWithoutMatches("m410")], "@odata.deltaLink": "https://graph.microsoft.com/end" })
+    : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeHeaders410, routeDelta]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl } });
+  eq(result.status, "ok", "poll ok");
+  eq(result.newSubmissions, 1, "one new submission (Rule 6)");
+});
+
+// ---------------------------------------------------------------------------
 // FINDING #7 — bounded 410 reset
 // ---------------------------------------------------------------------------
 

@@ -574,6 +574,18 @@ async function processSingleMessage(args: {
   }
 
   // Rules 1–4 miss. NOW try the reply-header rule.
+  //
+  // Fail-closed semantics (Checkpoint 8):
+  //   * 404/410 on the header endpoint mean "no headers to read" — a genuinely
+  //     benign absence. `parentMessageIds` stays empty and Rule 6 is allowed
+  //     to run so the message is still ingested as a new case.
+  //   * EVERY OTHER failure (401, 403, 429, 5xx, unknown GraphError, URL
+  //     origin-validation rejection, transport error, ...) means we cannot
+  //     deterministically decide Rule 5. Rethrowing preserves the classified
+  //     error, propagates through the outer catch, and prevents the durable
+  //     delta cursor from advancing. Critically this also lets a 429's
+  //     `retryAfterSeconds` reach `recordFailure` so `next_attempt_after`
+  //     gets populated.
   let outcome: CorrelationOutcome = initialOutcome;
   if (deps.attemptReplyHeaders !== false) {
     let parentMessageIds: string[] = [];
@@ -585,12 +597,23 @@ async function processSingleMessage(args: {
       ];
       parentMessageIds = ids.filter((v, i, arr) => v && arr.indexOf(v) === i);
     } catch (err) {
-      // 404/410 on the header endpoint is a benign "no headers"; every other
-      // Graph error means we cannot deterministically decide Rule 5. In that
-      // case skip Rule 5 and fall through to Rule 6 (new submission) — the
-      // message is still ingested, just as a new case rather than a reply.
-      if (!(err instanceof GraphError && (err.status === 404 || err.status === 410))) {
+      if (err instanceof GraphError && (err.status === 404 || err.status === 410)) {
+        // Benign absence — treat as "no headers", allow Rule 6.
         parentMessageIds = [];
+      } else if (err instanceof GraphError) {
+        // Classified Graph failure (401/403/429/5xx/redirect/origin/unknown):
+        // rethrow so the poll's outer catch runs recordFailure() with the
+        // preserved status / code / retryAfterSeconds / deltaTokenExpired.
+        throw err;
+      } else {
+        // Non-Graph transport / unknown error — wrap into a safe classified
+        // GraphError so no raw exception text, URL, mailbox, or message id
+        // can leak into logs or reach the caller.
+        throw new GraphError({
+          status: 0,
+          code: "graph_header_fetch_failed",
+          message: "graph_header_fetch_failed",
+        });
       }
     }
     if (parentMessageIds.length > 0) {
