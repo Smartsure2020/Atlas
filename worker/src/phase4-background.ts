@@ -389,11 +389,21 @@ async function candidateExists(
 
 async function detectCleanupCandidates(env: Env, admin: ReturnType<typeof adminClient>) {
   const now = new Date().toISOString();
-  const [clientDocs, insurerDocs, clientObjects, insurerObjects] = await Promise.all([
+  const [clientDocs, insurerDocs, clientObjects, insurerObjects, phase5bRefs] = await Promise.all([
     admin.from("atlas_documents").select("id, submission_id, file_name, storage_path, expires_at, status").eq("status", "active").lt("expires_at", now).limit(500),
     admin.from("atlas_insurer_documents").select("id, insurer_id, file_name, storage_path, processing_status").limit(500),
     listStoragePaths(admin, CLIENT_DOCS_BUCKET),
     listStoragePaths(admin, INSURER_DOCS_BUCKET),
+    // Phase 5B references: any attachment tracking row in a resumable /
+    // active state carries a legitimate reservation on its storage_path.
+    // Even before atlas_documents exists, a Phase 5B path in state
+    // downloading/uploaded/ingested must NOT be classified as orphan.
+    admin
+      .from("atlas_intake_graph_attachments")
+      .select("storage_path")
+      .in("state", ["downloading", "uploaded", "ingested"])
+      .not("storage_path", "is", null)
+      .limit(5000),
   ]);
 
   for (const doc of clientDocs.data ?? []) {
@@ -412,8 +422,17 @@ async function detectCleanupCandidates(env: Env, admin: ReturnType<typeof adminC
 
   const clientRefs = new Set((clientDocs.data ?? []).map((doc) => doc.storage_path));
   const allClientRefs = await admin.from("atlas_documents").select("storage_path").limit(5000);
+  const phase5bRefSet = new Set(
+    ((phase5bRefs.data ?? []) as Array<{ storage_path?: string | null }>)
+      .map((r) => r.storage_path)
+      .filter((p): p is string => typeof p === "string" && p.length > 0),
+  );
   for (const path of clientObjects) {
     if (clientRefs.has(path) || (allClientRefs.data ?? []).some((row) => row.storage_path === path)) continue;
+    // Phase 5B legitimately owns storage paths BEFORE atlas_documents is
+    // created. A Phase 5B path in an active/resumable state is a genuine
+    // reservation, not an orphan.
+    if (phase5bRefSet.has(path)) continue;
     if (await candidateExists(admin, CLIENT_DOCS_BUCKET, path)) continue;
     await admin.from("atlas_cleanup_candidates").insert({
       candidate_type: "orphan_storage_path",
@@ -454,6 +473,39 @@ async function processApprovedCleanup(env: Env, admin: ReturnType<typeof adminCl
       const { data: doc } = await admin.from("atlas_documents").select("status").eq("id", candidate.document_id).maybeSingle();
       if (doc?.status === "active") {
         await admin.from("atlas_cleanup_candidates").update({ status: "dismissed", error_code: "active_document_protected", error_message: "Active documents are never deleted by cleanup." }).eq("id", candidate.id);
+        continue;
+      }
+    }
+    // Deletion-time revalidation. A candidate flagged as an orphan may have
+    // acquired a legitimate reference between detection and approval —
+    // atlas_documents.storage_path (any bucket) or, for atlas-client-docs,
+    // atlas_intake_graph_attachments.storage_path in an active/resumable
+    // Phase 5B state. Refuse the delete and dismiss with a safe classified
+    // reason rather than trust the stale candidate row.
+    if (candidate.candidate_type === "orphan_storage_path") {
+      const { data: docRef } = await admin
+        .from("atlas_documents")
+        .select("id")
+        .eq("storage_path", candidate.storage_path)
+        .limit(1)
+        .maybeSingle();
+      let attRef: { id?: string | null } | null = null;
+      if (candidate.storage_bucket === CLIENT_DOCS_BUCKET) {
+        const { data } = await admin
+          .from("atlas_intake_graph_attachments")
+          .select("id")
+          .eq("storage_path", candidate.storage_path)
+          .in("state", ["downloading", "uploaded", "ingested"])
+          .limit(1)
+          .maybeSingle();
+        attRef = (data as { id?: string | null } | null) ?? null;
+      }
+      if (docRef?.id || attRef?.id) {
+        await admin.from("atlas_cleanup_candidates").update({
+          status: "dismissed",
+          error_code: "storage_path_now_referenced",
+          error_message: "Path has an active reference and must not be deleted.",
+        }).eq("id", candidate.id);
         continue;
       }
     }

@@ -231,13 +231,28 @@ test("nextRetryAt: retryAfterSeconds propagates when retryable", () => {
   eq(at, "2026-01-01T00:00:42.000Z", "42s honored");
 });
 
-test("nextRetryAt: retryAfterSeconds clamped to RETRY_AFTER_MAX_SECONDS", () => {
+test("nextRetryAt: Retry-After 120s is honored verbatim (never shortened)", () => {
   const nowIso = "2026-01-01T00:00:00.000Z";
-  const huge = 10 * 60 * 60; // 10 hours
+  const at = nextRetryAt({ retryCount: 0, retryable: true, retryAfterSeconds: 120, nowIso });
+  const delta = (Date.parse(at ?? "") - Date.parse(nowIso)) / 1000;
+  assert(delta >= 120, `expected >= 120s, got ${delta}`);
+});
+
+test("nextRetryAt: Retry-After 3600s is honored verbatim (never shortened to 30min)", () => {
+  const nowIso = "2026-01-01T00:00:00.000Z";
+  const at = nextRetryAt({ retryCount: 0, retryable: true, retryAfterSeconds: 3600, nowIso });
+  const delta = (Date.parse(at ?? "") - Date.parse(nowIso)) / 1000;
+  assert(delta >= 3600, `expected >= 3600s, got ${delta}`);
+  // Defensive: also NOT the old 1800s ceiling.
+  assert(delta !== 1800, "must not be the old 1800s clamp");
+});
+
+test("nextRetryAt: pathological Retry-After above 24h is clamped defensively", () => {
+  const nowIso = "2026-01-01T00:00:00.000Z";
+  const huge = 72 * 60 * 60; // 3 days
   const at = nextRetryAt({ retryCount: 0, retryable: true, retryAfterSeconds: huge, nowIso });
-  const asMs = Date.parse(at ?? "");
-  const deltaSec = Math.round((asMs - Date.parse(nowIso)) / 1000);
-  eq(deltaSec, RETRY_AFTER_MAX_SECONDS, "clamped");
+  const delta = (Date.parse(at ?? "") - Date.parse(nowIso)) / 1000;
+  eq(delta, RETRY_AFTER_MAX_SECONDS, "clamped to 24h ceiling");
 });
 
 test("nextRetryAt: retryAfterSeconds ignored when not retryable", () => {

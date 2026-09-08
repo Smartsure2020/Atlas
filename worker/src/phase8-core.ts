@@ -21,13 +21,22 @@ const NON_RETRYABLE_CODES = new Set([
   "graph_attachment_gone",
   "graph_message_gone_before_attachment_discovery",
   "graph_delta_reset_failed",
+  "graph_attachment_page_limit",
   "discovery_missing_intake_id",
   "discovery_intake_missing_graph_ids",
   "ingest_missing_attachment_id",
   "attachment_hash_changed",
+  "attachment_content_invalid",
   "size_mismatch",
   "graph_config_missing",
   "graph_token_malformed",
+  // set_planned_path reason-suffixed classifications. Only 'racing_writer'
+  // is retryable (see RETRYABLE below); everything else here is a
+  // structural mismatch that should not spin the queue.
+  "set_planned_path_storage_path_conflict",
+  "set_planned_path_unexpected_state",
+  "set_planned_path_storage_path_required",
+  "set_planned_path_unknown",
 ]);
 
 const RETRYABLE_CODES = new Set([
@@ -69,6 +78,14 @@ const RETRYABLE_CODES = new Set([
   "mark_uploaded_failed",
   "create_document_failed",
   "graph_unauthorized",
+  // Phase 5B Checkpoint 4: DB uncertainty must fail closed on the RPC
+  // level and retry via atlas_jobs rather than complete the job.
+  "attachment_load_failed",
+  "attachment_claim_failed",
+  "attachment_state_persist_failed",
+  "attachment_claim_conflict",
+  "set_planned_path_failed",
+  "set_planned_path_racing_writer",
 ]);
 
 export function isRetryableError(code: string | null | undefined): boolean {
@@ -78,8 +95,14 @@ export function isRetryableError(code: string | null | undefined): boolean {
   return /^anthropic_5\d\d$/.test(code) || /^http_5\d\d$/.test(code) || /^scanner_http_5\d\d$/.test(code);
 }
 
-/** Upper clamp on any caller-supplied Retry-After (in seconds). */
-export const RETRY_AFTER_MAX_SECONDS = 30 * 60;
+/**
+ * Absolute defensive ceiling on any caller-supplied Retry-After (in
+ * seconds). Set high enough that a legitimate upstream directive is never
+ * shortened — 24 hours matches the maximum documented by Microsoft Graph.
+ * A value ABOVE this is treated as malformed (see clamp below); the
+ * ceiling never truncates a valid short/medium directive.
+ */
+export const RETRY_AFTER_MAX_SECONDS = 24 * 60 * 60;
 
 export function nextRetryAt(params: {
   retryCount: number;
@@ -88,10 +111,11 @@ export function nextRetryAt(params: {
   maxRetries?: number;
   /**
    * Optional upstream Retry-After hint (in seconds). When provided AND the
-   * failure is retryable AND retries remain, the returned time honors the
-   * hint (clamped to a sensible ceiling) instead of the default step
-   * schedule. Phase 5B uses this to propagate Microsoft Graph 429 semantics
-   * through the atlas_jobs retry clock.
+   * failure is retryable AND retries remain, the returned time is at least
+   * `now + retryAfterSeconds`. Microsoft Graph's guidance is to wait at
+   * least the number of seconds specified; we honor that directive without
+   * shortening it. The defensive ceiling only applies to values that would
+   * otherwise be treated as malformed (e.g. > 24h or non-finite).
    */
   retryAfterSeconds?: number | null;
 }): string | null {
@@ -102,7 +126,10 @@ export function nextRetryAt(params: {
   if (typeof params.retryAfterSeconds === "number"
       && Number.isFinite(params.retryAfterSeconds)
       && params.retryAfterSeconds > 0) {
-    const seconds = Math.min(RETRY_AFTER_MAX_SECONDS, Math.max(1, Math.trunc(params.retryAfterSeconds)));
+    // Preserve Microsoft Graph's Retry-After verbatim (rounded up to whole
+    // seconds), only clamping absurdly large values that would otherwise
+    // freeze the queue indefinitely.
+    const seconds = Math.min(RETRY_AFTER_MAX_SECONDS, Math.max(1, Math.ceil(params.retryAfterSeconds)));
     return new Date(now + seconds * 1000).toISOString();
   }
   const minutes = params.retryCount <= 0 ? 5 : 30;

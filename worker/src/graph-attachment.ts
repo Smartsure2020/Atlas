@@ -39,6 +39,7 @@ import {
   type GraphClientDeps,
 } from "./graph-client.js";
 import { ATLAS_INTAKE_SYSTEM_ACTOR_ID, safeHash } from "./graph-intake.js";
+import { isRetryableError } from "./phase8-core.js";
 
 const CLIENT_DOCS_BUCKET = "atlas-client-docs";
 
@@ -228,13 +229,19 @@ export async function handleGraphAttachmentDiscoveryJob(
   try {
     metadata = await listMessageAttachments(mailbox, graphMessageId, token, deps.graph);
   } catch (err) {
-    // GraphError is already classified. Rethrow so the outer executor can
-    // decide retryability (respecting Retry-After for 429s via failJob's
-    // extended plumbing).
     if (err instanceof GraphError) {
-      // 404 on the message endpoint is not a retryable 404: the message is
-      // gone before we got to discover its attachments. Do not confuse this
-      // with a Phase 5A @removed event.
+      // 404 on the message endpoint means the message is gone BEFORE we
+      // discovered its attachments. Reclassify to the Phase 5B-specific
+      // non-retryable code so operator logs and retry policy agree. Do NOT
+      // conflate with a Phase 5A @removed event — the intake row already
+      // exists durably and stays put.
+      if (err.status === 404) {
+        throw new GraphError({
+          status: 404,
+          code: "graph_message_gone_before_attachment_discovery",
+          message: "graph_message_gone_before_attachment_discovery",
+        });
+      }
       throw err;
     }
     throw new GraphError({
@@ -312,6 +319,21 @@ interface AttachmentRowSnapshot {
   duplicate_of_attachment_id: string | null;
 }
 
+/**
+ * Cheap deterministic PDF signature check. Bytes must begin with `%PDF-`.
+ * A malware-clean scan run is still required afterwards; this is only a
+ * defence-in-depth guard against a Graph payload that trivially isn't a PDF.
+ */
+function looksLikePdf(bytes: ArrayBuffer): boolean {
+  if (bytes.byteLength < 5) return false;
+  const head = new Uint8Array(bytes, 0, 5);
+  return head[0] === 0x25 // '%'
+      && head[1] === 0x50 // 'P'
+      && head[2] === 0x44 // 'D'
+      && head[3] === 0x46 // 'F'
+      && head[4] === 0x2d; // '-'
+}
+
 async function bytesSha256Hex(bytes: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest))
@@ -319,22 +341,41 @@ async function bytesSha256Hex(bytes: ArrayBuffer): Promise<string> {
     .join("");
 }
 
-function buildStoragePath(row: AttachmentRowSnapshot): string {
-  const safe = safeAttachmentFilename(row.filename);
-  return `${row.submission_id}/graph/${row.id}-${safe}`;
+/**
+ * Deterministic storage path — ID only.
+ *
+ * Filename is NOT embedded (Checkpoint 4 §12): the attachment's original
+ * name lives on atlas_intake_graph_attachments.filename and, once ingested,
+ * on atlas_documents.file_name, both behind RLS. An operational locator
+ * that ends up in cleanup metadata, logs, and (via the malware pipeline)
+ * downstream alerts must not carry it.
+ */
+function buildStoragePath(row: Pick<AttachmentRowSnapshot, "submission_id" | "id">): string {
+  return `${row.submission_id}/graph/${row.id}.pdf`;
 }
 
 async function loadAttachmentRow(
   admin: SupabaseClient,
   attachmentId: string,
 ): Promise<AttachmentRowSnapshot | null> {
-  const { data } = await admin
+  const { data, error } = await admin
     .from("atlas_intake_graph_attachments")
     .select(
       "id, intake_message_id, submission_id, mailbox, graph_message_id, graph_attachment_id, filename, mime_type, size_bytes, state, storage_path, sha256, duplicate_of_attachment_id",
     )
     .eq("id", attachmentId)
     .maybeSingle();
+  // Fail closed on DB errors — a query error is uncertainty, NOT proof of
+  // absence. Only (data === null AND error === null) means the row is
+  // genuinely gone. Anything else must throw a retryable classified error
+  // so atlas_jobs retries rather than silently completing the job.
+  if (error) {
+    throw new GraphError({
+      status: 0,
+      code: "attachment_load_failed",
+      message: "attachment_load_failed",
+    });
+  }
   return (data as AttachmentRowSnapshot | null) ?? null;
 }
 
@@ -343,10 +384,17 @@ async function claimAttachment(
   attachmentId: string,
   expectedState: string,
 ): Promise<AttachmentRowSnapshot | null> {
-  const { data } = await admin.rpc("atlas_intake_attachment_claim", {
+  const { data, error } = await admin.rpc("atlas_intake_attachment_claim", {
     p_id: attachmentId,
     p_expected_state: expectedState,
   });
+  if (error) {
+    throw new GraphError({
+      status: 0,
+      code: "attachment_claim_failed",
+      message: "attachment_claim_failed",
+    });
+  }
   const row = (Array.isArray(data) ? data[0] : data) as AttachmentRowSnapshot | undefined;
   return row ?? null;
 }
@@ -358,12 +406,69 @@ async function failAttachment(
   nextState: "pending" | "downloading" | "failed_permanent",
   errorCode: string,
 ): Promise<void> {
-  await admin.rpc("atlas_intake_attachment_fail", {
+  const { error } = await admin.rpc("atlas_intake_attachment_fail", {
     p_id: attachmentId,
     p_expected_state: expectedState,
     p_next_state: nextState,
     p_error_code: errorCode,
   });
+  if (error) {
+    // A failed state-transition write is worse than a spurious retry: we do
+    // not know what the on-disk attachment state is. Surface a retryable
+    // error so atlas_jobs runs the whole ingest again cleanly.
+    throw new GraphError({
+      status: 0,
+      code: "attachment_state_persist_failed",
+      message: "attachment_state_persist_failed",
+    });
+  }
+}
+
+/**
+ * Decide the next attachment state after a Graph/token failure. Retryable
+ * codes return the row to `pending` so a future job attempt picks it up
+ * from the top; non-retryable codes go straight to `failed_permanent` so a
+ * subsequent retry can never resurrect an inherently doomed row.
+ *
+ * Uses the shared phase8-core classifier so attachment state and
+ * atlas_jobs retryability always agree.
+ */
+function nextStateFor(code: string): "pending" | "failed_permanent" {
+  return isRetryableError(code) ? "pending" : "failed_permanent";
+}
+
+/**
+ * Persist the deterministic storage_path on the tracking row BEFORE the
+ * storage upload is issued, so cleanup detection sees the reference before
+ * the object exists.
+ */
+async function setPlannedStoragePath(
+  admin: SupabaseClient,
+  attachmentId: string,
+  storagePath: string,
+): Promise<void> {
+  const { data, error } = await admin.rpc("atlas_intake_attachment_set_planned_path", {
+    p_id: attachmentId,
+    p_expected_state: "downloading",
+    p_storage_path: storagePath,
+  });
+  if (error) {
+    throw new GraphError({
+      status: 0,
+      code: "set_planned_path_failed",
+      message: "set_planned_path_failed",
+    });
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { ok?: boolean; reason?: string }
+    | undefined;
+  if (!row?.ok) {
+    throw new GraphError({
+      status: 0,
+      code: `set_planned_path_${row?.reason ?? "unknown"}`,
+      message: `set_planned_path_${row?.reason ?? "unknown"}`,
+    });
+  }
 }
 
 export async function handleGraphAttachmentIngestJob(
@@ -406,9 +511,21 @@ export async function handleGraphAttachmentIngestJob(
   if (row.state === "pending") {
     const claimed = await claimAttachment(admin, attachmentId, "pending");
     if (!claimed) {
-      // Another isolate claimed it, or the row moved on. Re-read and reflect.
-      row = await loadAttachmentRow(admin, attachmentId);
-      if (!row) return { outcome: "ingest_missing" };
+      // No row returned means the state fence didn't match. Re-read.
+      const refreshed = await loadAttachmentRow(admin, attachmentId);
+      if (!refreshed) return { outcome: "ingest_missing" };
+      row = refreshed;
+      // If the row is STILL pending, that's a genuine race (another isolate
+      // moved on, or a claim RPC that returned no row despite fence
+      // matching). Never report success — surface a retryable conflict so
+      // atlas_jobs runs again cleanly.
+      if (row.state === "pending") {
+        throw new GraphError({
+          status: 0,
+          code: "attachment_claim_conflict",
+          message: "attachment_claim_conflict",
+        });
+      }
     } else {
       row = claimed;
     }
@@ -416,16 +533,27 @@ export async function handleGraphAttachmentIngestJob(
 
   const submissionIdHash = await safeHash(row.submission_id);
 
-  if (row.state === "downloading" && (!row.sha256 || !row.storage_path)) {
-    // Fresh (or resumed pre-upload) path: download → hash → register →
-    // upload → mark_uploaded.
+  if (row.state === "downloading") {
+    // Resume the download/hash/upload path. Same-row same-SHA registration
+    // is idempotent, so a crash after hash+persist still resolves correctly:
+    //   * A retry re-downloads the bytes (we don't cache them in memory
+    //     across worker attempts).
+    //   * The SHA is recomputed and passed to register_hash — the RPC
+    //     returns 'owner' idempotently for a matching same-row same-SHA
+    //     replay and fails closed ('attachment_hash_changed') if a
+    //     different-SHA claim appears against an already-hashed row.
+    //   * The deterministic storage_path is derived from ID only (no
+    //     filename); if the row already has one persisted, we reuse it
+    //     verbatim.
     let token;
     try {
       token = await acquireGraphToken(env, deps.graph);
     } catch (err) {
       const code = err instanceof GraphError ? err.code : "graph_token_failed";
       logAttachmentError({ code, jobId: job.id, attachmentId, submissionIdHash });
-      await failAttachment(admin, row.id, "downloading", "pending", code);
+      // Retryability decision uses the SHARED classifier so attachment
+      // state and atlas_jobs retryability always agree.
+      await failAttachment(admin, row.id, "downloading", nextStateFor(code), code);
       throw err;
     }
 
@@ -437,15 +565,26 @@ export async function handleGraphAttachmentIngestJob(
         row.graph_attachment_id,
         token,
         deps.graph,
+        attachmentMaxBytes(env),
       );
     } catch (err) {
-      const code = err instanceof GraphError ? err.code : "graph_bytes_failed";
+      // Preserve Graph-level classification but map 404/403 to Phase 5B's
+      // specific ingest codes so retryability and logs are unambiguous.
+      let code = err instanceof GraphError ? err.code : "graph_bytes_failed";
+      if (err instanceof GraphError) {
+        if (err.status === 404) code = "graph_attachment_gone";
+        else if (err.status === 403) code = "graph_forbidden";
+      }
       logAttachmentError({ code, jobId: job.id, attachmentId, submissionIdHash });
-      const permanent = err instanceof GraphError && (err.status === 404 || err.status === 403);
-      await failAttachment(admin, row.id, "downloading",
-        permanent ? "failed_permanent" : "pending",
-        permanent ? (err.status === 404 ? "graph_attachment_gone" : "graph_forbidden") : code,
-      );
+      await failAttachment(admin, row.id, "downloading", nextStateFor(code), code);
+      if (err instanceof GraphError && (err.status === 404 || err.status === 403)) {
+        throw new GraphError({
+          status: err.status,
+          code,
+          message: code,
+          retryAfterSeconds: err.retryAfterSeconds,
+        });
+      }
       throw err;
     }
 
@@ -453,6 +592,15 @@ export async function handleGraphAttachmentIngestJob(
     if (bytes.byteLength > maxBytes) {
       logAttachmentError({ code: "size_mismatch", jobId: job.id, attachmentId, submissionIdHash });
       await failAttachment(admin, row.id, "downloading", "failed_permanent", "size_mismatch");
+      return { outcome: "ingest_skipped", attachmentState: "failed_permanent" };
+    }
+
+    // Optional defence-in-depth (Checkpoint 4 §20): a plausible %PDF- header
+    // must appear at byte 0. Existing manual uploads bypass this because the
+    // Worker never sees their bytes; Phase 5B does, so it enforces it here.
+    if (!looksLikePdf(bytes)) {
+      logAttachmentError({ code: "attachment_content_invalid", jobId: job.id, attachmentId, submissionIdHash });
+      await failAttachment(admin, row.id, "downloading", "failed_permanent", "attachment_content_invalid");
       return { outcome: "ingest_skipped", attachmentState: "failed_permanent" };
     }
 
@@ -478,9 +626,6 @@ export async function handleGraphAttachmentIngestJob(
       },
     );
     if (hashErr) {
-      // Fail-closed classification: 'attachment_hash_changed' comes back as
-      // an RPC exception message. Any Postgres error here is treated as
-      // non-retryable to prevent looping.
       const code = String((hashErr as { message?: string }).message ?? "hash_register_failed");
       const changed = code.includes("attachment_hash_changed");
       logAttachmentError({
@@ -515,12 +660,21 @@ export async function handleGraphAttachmentIngestJob(
       };
     }
 
-    // Owner path: upload bytes to the deterministic path, then mark_uploaded.
-    // Refresh the row so we have the freshly-persisted sha256 for path derivation.
-    row = await loadAttachmentRow(admin, attachmentId);
-    if (!row) return { outcome: "ingest_missing" };
+    // Owner path. Reload the row so we can safely reuse a previously
+    // persisted storage_path (crash-recovery resume).
+    const refreshed = await loadAttachmentRow(admin, attachmentId);
+    if (!refreshed) return { outcome: "ingest_missing" };
+    row = refreshed;
 
-    const storagePath = buildStoragePath(row);
+    const storagePath = row.storage_path ?? buildStoragePath(row);
+    // Persist the planned path BEFORE any storage.upload call so cleanup
+    // detection cannot classify our newly-uploaded object as an orphan.
+    // Idempotent under retry (same path → 'idempotent_noop'); refuses to
+    // overwrite a different path.
+    if (row.storage_path !== storagePath) {
+      await setPlannedStoragePath(admin, row.id, storagePath);
+    }
+
     const { error: uploadErr } = await admin.storage
       .from(CLIENT_DOCS_BUCKET)
       .upload(storagePath, bytes, {
@@ -570,8 +724,9 @@ export async function handleGraphAttachmentIngestJob(
         message: `mark_uploaded_${markRow?.reason ?? "unknown"}`,
       });
     }
-    row = await loadAttachmentRow(admin, attachmentId);
-    if (!row) return { outcome: "ingest_missing" };
+    const reread = await loadAttachmentRow(admin, attachmentId);
+    if (!reread) return { outcome: "ingest_missing" };
+    row = reread;
   }
 
   // At this point row.state must be 'uploaded' — either fresh, resumed from

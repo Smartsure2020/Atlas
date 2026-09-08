@@ -443,9 +443,30 @@ function normaliseAttachmentType(raw: unknown): GraphAttachmentMetadata["attachm
 }
 
 /**
- * List attachment metadata for one message. Never fetches bytes. Returns an
- * empty array when Graph reports none. Throws a classified GraphError on any
- * non-2xx (401/403/404/410/429/5xx/redirect/off-origin) or malformed payload.
+ * Bounded page limits for attachment metadata listing. Conservative safety
+ * bounds: a single message with more than a few dozen attachments already
+ * exceeds normal Atlas underwriting; > 500 or > 20 pages is treated as a
+ * pathological input that must fail closed rather than be silently
+ * truncated.
+ */
+export const ATTACHMENT_LIST_MAX_PAGES = 20;
+export const ATTACHMENT_LIST_MAX_ROWS  = 500;
+
+/**
+ * List attachment metadata for one message. Follows @odata.nextLink through
+ * a bounded number of pages. Every nextLink is re-validated through the
+ * exact-origin allowlist (so a poisoned Graph response cannot redirect the
+ * bearer token off-domain). Bytes are NEVER fetched here.
+ *
+ * Fails closed on:
+ *   * any non-2xx from Graph (rethrown with retryable/non-retryable
+ *     classification from graphErrorFromResponse);
+ *   * malformed payload;
+ *   * more than ATTACHMENT_LIST_MAX_PAGES pages or ATTACHMENT_LIST_MAX_ROWS
+ *     accumulated rows (throws graph_attachment_page_limit — non-retryable
+ *     so the queue does not spin on the same pathological message);
+ *   * a mid-list transport failure — the entire list fails atomically; the
+ *     caller must NOT commit a partial enumeration.
  */
 export async function listMessageAttachments(
   mailbox: string,
@@ -453,63 +474,99 @@ export async function listMessageAttachments(
   token: GraphAccessToken,
   deps: GraphClientDeps = {},
 ): Promise<GraphAttachmentMetadata[]> {
-  const res = await fetchWithAllowlist(
-    GRAPH_ATTACHMENT_LIST_URL_FN(mailbox, messageId),
-    {
-      method: "GET",
-      headers: { Authorization: `Bearer ${token.token}`, Accept: "application/json" },
-    },
-    deps,
-  );
-  if (!res.ok) throw await graphErrorFromResponse(res);
-  const payload = (await res.json().catch(() => null)) as {
-    value?: Array<{
-      id?: string;
-      name?: string | null;
-      contentType?: string | null;
-      size?: number | null;
-      isInline?: boolean | null;
-      contentId?: string | null;
-      "@odata.type"?: string;
-    }>;
-  } | null;
-  if (!payload || !Array.isArray(payload.value)) {
-    throw new GraphError({
-      status: 0,
-      code: "graph_attachment_list_malformed",
-      message: "graph_attachment_list_malformed",
-    });
-  }
   const out: GraphAttachmentMetadata[] = [];
-  for (const row of payload.value) {
-    if (!row || typeof row.id !== "string" || row.id.length === 0) {
-      // A malformed row would poison discovery. Refuse the whole page.
+  let url: string | null = GRAPH_ATTACHMENT_LIST_URL_FN(mailbox, messageId);
+  let pageCount = 0;
+  while (url) {
+    if (pageCount >= ATTACHMENT_LIST_MAX_PAGES) {
+      throw new GraphError({
+        status: 0,
+        code: "graph_attachment_page_limit",
+        message: "graph_attachment_page_limit",
+      });
+    }
+    // Every URL that carries the bearer token passes the exact-origin
+    // allowlist — including server-returned nextLinks.
+    const res = await fetchWithAllowlist(
+      url,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token.token}`, Accept: "application/json" },
+      },
+      deps,
+    );
+    if (!res.ok) throw await graphErrorFromResponse(res);
+    const payload = (await res.json().catch(() => null)) as {
+      value?: Array<{
+        id?: string;
+        name?: string | null;
+        contentType?: string | null;
+        size?: number | null;
+        isInline?: boolean | null;
+        contentId?: string | null;
+        "@odata.type"?: string;
+      }>;
+      "@odata.nextLink"?: string;
+    } | null;
+    if (!payload || !Array.isArray(payload.value)) {
       throw new GraphError({
         status: 0,
         code: "graph_attachment_list_malformed",
         message: "graph_attachment_list_malformed",
       });
     }
-    out.push({
-      id: row.id,
-      name: typeof row.name === "string" ? row.name : null,
-      contentType: typeof row.contentType === "string" ? row.contentType : null,
-      size: typeof row.size === "number" && Number.isFinite(row.size) ? row.size : null,
-      isInline: row.isInline === true,
-      contentId: typeof row.contentId === "string" ? row.contentId : null,
-      attachmentType: normaliseAttachmentType(row["@odata.type"]),
-    });
+    for (const row of payload.value) {
+      if (!row || typeof row.id !== "string" || row.id.length === 0) {
+        throw new GraphError({
+          status: 0,
+          code: "graph_attachment_list_malformed",
+          message: "graph_attachment_list_malformed",
+        });
+      }
+      out.push({
+        id: row.id,
+        name: typeof row.name === "string" ? row.name : null,
+        contentType: typeof row.contentType === "string" ? row.contentType : null,
+        size: typeof row.size === "number" && Number.isFinite(row.size) ? row.size : null,
+        isInline: row.isInline === true,
+        contentId: typeof row.contentId === "string" ? row.contentId : null,
+        attachmentType: normaliseAttachmentType(row["@odata.type"]),
+      });
+      if (out.length > ATTACHMENT_LIST_MAX_ROWS) {
+        throw new GraphError({
+          status: 0,
+          code: "graph_attachment_page_limit",
+          message: "graph_attachment_page_limit",
+        });
+      }
+    }
+    pageCount += 1;
+    const nextLink = typeof payload["@odata.nextLink"] === "string" ? payload["@odata.nextLink"] : null;
+    if (!nextLink) {
+      url = null;
+    } else {
+      // Validate BEFORE assigning: if the origin is off-Graph we throw
+      // rather than issue a token-bearing request. assertAllowedGraphUrl
+      // raises a classified GraphError; the whole listing then fails
+      // atomically (no partial discovery commit).
+      assertAllowedGraphUrl(nextLink);
+      url = nextLink;
+    }
   }
   return out;
 }
 
 /**
- * Fetch raw attachment bytes via `/attachments/{id}/$value`. Returns an
- * ArrayBuffer whose length must be re-validated by the caller against the
- * configured maximum before it enters storage.
+ * Fetch raw attachment bytes via `/attachments/{id}/$value`.
  *
- * Never used for `referenceAttachment` (would point off-Microsoft) and never
- * for `itemAttachment` (embedded item, not a byte payload).
+ * If `maxBytes` is provided AND a valid Content-Length response header
+ * exceeds it, the request is failed with `size_mismatch` BEFORE the body
+ * is consumed — a malformed upstream response cannot force an unbounded
+ * allocation. The caller must still re-validate the actual byte length
+ * after reading, because Content-Length is advisory.
+ *
+ * Never used for `referenceAttachment` (would point off-Microsoft) and
+ * never for `itemAttachment` (embedded item, not a byte payload).
  */
 export async function fetchAttachmentBytes(
   mailbox: string,
@@ -517,6 +574,7 @@ export async function fetchAttachmentBytes(
   attachmentId: string,
   token: GraphAccessToken,
   deps: GraphClientDeps = {},
+  maxBytes?: number,
 ): Promise<ArrayBuffer> {
   const res = await fetchWithAllowlist(
     GRAPH_ATTACHMENT_VALUE_URL_FN(mailbox, messageId, attachmentId),
@@ -530,6 +588,21 @@ export async function fetchAttachmentBytes(
     deps,
   );
   if (!res.ok) throw await graphErrorFromResponse(res);
+  if (typeof maxBytes === "number" && Number.isFinite(maxBytes) && maxBytes > 0) {
+    const rawLen = res.headers.get("Content-Length");
+    if (rawLen) {
+      const n = Number(rawLen);
+      if (Number.isFinite(n) && n > maxBytes) {
+        // Refuse the body up-front rather than allocating for a response
+        // that will be rejected downstream anyway.
+        throw new GraphError({
+          status: res.status,
+          code: "size_mismatch",
+          message: "size_mismatch",
+        });
+      }
+    }
+  }
   return await res.arrayBuffer();
 }
 

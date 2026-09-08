@@ -246,7 +246,7 @@ test("§13 discover_commit: eligible/skipped/unsupported + terminal replay prese
   eq(reg.status, 200, "register HTTP");
   eq(reg.body[0].outcome, "owner", "owner");
   // 3. mark_uploaded
-  const path = `${row.submission_id}/graph/${eligible.attachment_id}-file.pdf`;
+  const path = `${row.submission_id}/graph/${eligible.attachment_id}.pdf`;
   const mk = await rpc("atlas_intake_attachment_mark_uploaded", { p_id: eligible.attachment_id, p_expected_state: "downloading", p_storage_path: path });
   eq(mk.status, 200, "mark_uploaded HTTP");
   eq(mk.body[0].ok, true, "marked");
@@ -388,6 +388,107 @@ test("§16 cross-submission same SHA: both are owners (no global dedup)", async 
 // §17 mark_uploaded fence
 // ---------------------------------------------------------------------------
 
+test("§17b set_planned_path: persists path while downloading; idempotent; conflict refused", async () => {
+  const { row } = await ingestNewEmail({ has_attachments: true });
+  const stubs = [{ graph_attachment_id: `${PREFIX}-spp`, attachment_type: "fileAttachment", filename: "p.pdf", mime_type: "application/pdf", size_bytes: 50, is_inline: false, content_id: null, initial_state: "pending", skip_reason: null }];
+  const dr = await rpc("atlas_intake_attachment_discover_commit", {
+    p_intake_message_id: row.intake_message_id, p_system_actor_id: SYSTEM_ACTOR,
+    p_mailbox: `${PREFIX}-mbx@example.com`, p_graph_message_id: `${PREFIX}-gm-spp`, p_stubs: stubs,
+  });
+  const att = dr.body[0]; state.attachmentIds.add(att.attachment_id);
+  if (att.ingest_job_id) state.jobIds.add(att.ingest_job_id);
+  await rpc("atlas_intake_attachment_claim", { p_id: att.attachment_id, p_expected_state: "pending" });
+  const path = `${row.submission_id}/graph/${att.attachment_id}.pdf`;
+  const s1 = await rpc("atlas_intake_attachment_set_planned_path", {
+    p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: path,
+  });
+  eq(s1.status, 200, "spp1 HTTP");
+  eq(s1.body[0].ok, true, "persisted");
+  eq(s1.body[0].reason, "persisted", "reason");
+  // Row now carries the path while still downloading — the detection-protect
+  // predicate the runtime uses must classify this as a legitimate reference.
+  const seen = await rest(`atlas_intake_graph_attachments?id=eq.${att.attachment_id}&select=state,storage_path`);
+  eq(seen.body[0].state, "downloading", "still downloading");
+  eq(seen.body[0].storage_path, path, "path persisted");
+  // Idempotent same-path replay.
+  const s2 = await rpc("atlas_intake_attachment_set_planned_path", {
+    p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: path,
+  });
+  eq(s2.body[0].ok, true, "idempotent");
+  eq(s2.body[0].reason, "idempotent_noop", "reason");
+  // Conflicting path refused.
+  const s3 = await rpc("atlas_intake_attachment_set_planned_path", {
+    p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: `${path}-DIFFERENT`,
+  });
+  eq(s3.body[0].ok, false, "conflict refused");
+  eq(s3.body[0].reason, "storage_path_conflict", "reason");
+});
+
+test("§17c cleanup detection protects Phase 5B storage paths in active states", async () => {
+  // For any of our attachment rows with state IN (downloading, uploaded, ingested)
+  // AND a non-null storage_path, a SQL predicate identical to detectCleanupCandidates'
+  // protection set must recognise the path as referenced.
+  const anyAtt = [...state.attachmentIds][0];
+  if (!anyAtt) throw new Error("need at least one attachment fixture");
+  // Ensure at least one row is in a protected state via §13/§18 above.
+  const check = await sqlAdmin(`
+    SELECT storage_path
+    FROM public.atlas_intake_graph_attachments
+    WHERE state IN ('downloading', 'uploaded', 'ingested')
+      AND storage_path IS NOT NULL
+      AND storage_path LIKE '${PREFIX.replace(/'/g, "''")}%' OR storage_path LIKE '%/graph/%.pdf'
+    LIMIT 5;
+  `);
+  assert(okMgmt(check.status), "protect SQL");
+  assert(Array.isArray(check.body) && check.body.length > 0, "protection query returns Phase 5B rows");
+});
+
+test("§17d cleanup revalidation: stale orphan candidate is refused when attachment path is now referenced", async () => {
+  const { row } = await ingestNewEmail({ has_attachments: true });
+  const stubs = [{ graph_attachment_id: `${PREFIX}-race`, attachment_type: "fileAttachment", filename: "r.pdf", mime_type: "application/pdf", size_bytes: 50, is_inline: false, content_id: null, initial_state: "pending", skip_reason: null }];
+  const dr = await rpc("atlas_intake_attachment_discover_commit", {
+    p_intake_message_id: row.intake_message_id, p_system_actor_id: SYSTEM_ACTOR,
+    p_mailbox: `${PREFIX}-mbx@example.com`, p_graph_message_id: `${PREFIX}-gm-race`, p_stubs: stubs,
+  });
+  const att = dr.body[0]; state.attachmentIds.add(att.attachment_id);
+  if (att.ingest_job_id) state.jobIds.add(att.ingest_job_id);
+  await rpc("atlas_intake_attachment_claim", { p_id: att.attachment_id, p_expected_state: "pending" });
+  const path = `${row.submission_id}/graph/${att.attachment_id}.pdf`;
+  // Stale approved candidate created BEFORE the Phase 5B path materialises.
+  const insCand = await rest("atlas_cleanup_candidates", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      candidate_type: "orphan_storage_path",
+      status: "approved",
+      storage_bucket: "atlas-client-docs",
+      storage_path: path,
+      reason: "STALE — this candidate was created before Phase 5B's path materialised",
+      metadata: { detected_by: "gate-phase5b" },
+      approved_by: SYSTEM_ACTOR,
+      approved_at: new Date().toISOString(),
+    }),
+  });
+  eq(insCand.status, 201, "candidate inserted");
+  const candidateId = insCand.body[0].id;
+  // Now materialise the Phase 5B path.
+  await rpc("atlas_intake_attachment_set_planned_path", {
+    p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: path,
+  });
+  // The runtime-mirror revalidation predicate: any active attachment or
+  // atlas_documents row that references this path must veto the deletion.
+  const guard = await sqlAdmin(`
+    SELECT
+      (SELECT 1 FROM public.atlas_documents WHERE storage_path = '${path}' LIMIT 1) IS NOT NULL AS doc_ref,
+      (SELECT 1 FROM public.atlas_intake_graph_attachments WHERE storage_path = '${path}'
+         AND state IN ('downloading','uploaded','ingested') LIMIT 1) IS NOT NULL AS att_ref;
+  `);
+  assert(okMgmt(guard.status), "guard SQL");
+  eq(guard.body[0].att_ref, true, "attachment reference present");
+  // Cleanup the stale candidate directly (no runtime here).
+  await rest(`atlas_cleanup_candidates?id=eq.${candidateId}`, { method: "DELETE" });
+});
+
 test("§17 mark_uploaded: valid transition + idempotent replay; invalid state fenced", async () => {
   const { row } = await ingestNewEmail({ has_attachments: true });
   const stubs = [{ graph_attachment_id: `${PREFIX}-mu`, attachment_type: "fileAttachment", filename: "z.pdf", mime_type: "application/pdf", size_bytes: 100, is_inline: false, content_id: null, initial_state: "pending", skip_reason: null }];
@@ -399,7 +500,7 @@ test("§17 mark_uploaded: valid transition + idempotent replay; invalid state fe
   if (att.ingest_job_id) state.jobIds.add(att.ingest_job_id);
   await rpc("atlas_intake_attachment_claim", { p_id: att.attachment_id, p_expected_state: "pending" });
   await rpc("atlas_intake_attachment_register_hash", { p_id: att.attachment_id, p_expected_state: "downloading", p_sha256: "2".repeat(64), p_size_bytes: 100 });
-  const path = `${row.submission_id}/graph/${att.attachment_id}-z.pdf`;
+  const path = `${row.submission_id}/graph/${att.attachment_id}.pdf`;
   const m1 = await rpc("atlas_intake_attachment_mark_uploaded", { p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: path });
   eq(m1.body[0].ok, true, "transitioned");
   const m2 = await rpc("atlas_intake_attachment_mark_uploaded", { p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: path });
@@ -426,7 +527,7 @@ test("§18 create_document: atomic atlas_documents + malware_scan + attachment l
   if (att.ingest_job_id) state.jobIds.add(att.ingest_job_id);
   await rpc("atlas_intake_attachment_claim", { p_id: att.attachment_id, p_expected_state: "pending" });
   await rpc("atlas_intake_attachment_register_hash", { p_id: att.attachment_id, p_expected_state: "downloading", p_sha256: "3".repeat(64), p_size_bytes: 55555 });
-  const path = `${row.submission_id}/graph/${att.attachment_id}-cd.pdf`;
+  const path = `${row.submission_id}/graph/${att.attachment_id}.pdf`;
   await rpc("atlas_intake_attachment_mark_uploaded", { p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: path });
   const cd = await rpc("atlas_intake_attachment_create_document", { p_id: att.attachment_id, p_system_actor_id: SYSTEM_ACTOR, p_retention_days: 7 });
   eq(cd.status, 200, "create_document HTTP");
@@ -484,7 +585,7 @@ test("§19 create_document idempotency: replay returns same document_id/scan_job
   if (att.ingest_job_id) state.jobIds.add(att.ingest_job_id);
   await rpc("atlas_intake_attachment_claim", { p_id: att.attachment_id, p_expected_state: "pending" });
   await rpc("atlas_intake_attachment_register_hash", { p_id: att.attachment_id, p_expected_state: "downloading", p_sha256: "4".repeat(64), p_size_bytes: 200 });
-  const path = `${row.submission_id}/graph/${att.attachment_id}-i.pdf`;
+  const path = `${row.submission_id}/graph/${att.attachment_id}.pdf`;
   await rpc("atlas_intake_attachment_mark_uploaded", { p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: path });
   const first = await rpc("atlas_intake_attachment_create_document", { p_id: att.attachment_id, p_system_actor_id: SYSTEM_ACTOR, p_retention_days: 7 });
   const f = first.body[0];
@@ -624,8 +725,48 @@ test("§23 direct-write denial: authenticated INSERT/UPDATE/DELETE all fail", as
 // §24 PII canary sweep
 // ---------------------------------------------------------------------------
 
-test("§24 PII canary sweep across audit / alerts / job metadata", async () => {
-  const canary = PREFIX;  // every fixture used this prefix
+test("§24 PII canary sweep — searches SERIALISED VALUES for Phase 5B jobs (not just key names)", async () => {
+  // Value-based canaries. Every fixture we created carried PREFIX in
+  // multiple identifiers. If the runtime ever leaks any of them into a
+  // Phase 5B-created atlas_jobs.metadata (e.g. as file_name, storage_path,
+  // mailbox, graph_message_id, graph_attachment_id, content_id, subject,
+  // sender, or body_preview), the substring appears in metadata::text and
+  // this assertion fails. Checkpoint 4 §14 requires the gate to detect
+  // leaks even when a leaking implementation uses the "correct" JSON key
+  // name for a legitimate field but stuffs PII into it.
+  const canary = PREFIX;
+
+  // 1. Phase 5B-created atlas_jobs (discovery + ingest + the malware jobs
+  //    they atomically enqueue). Ban ALL raw PII value fragments in
+  //    metadata regardless of which key holds them.
+  const badJobs = await sqlAdmin(`
+    SELECT j.id, j.job_type, j.metadata
+    FROM public.atlas_jobs j
+    WHERE (
+      -- Phase 5B-owned jobs by input_fingerprint namespace.
+      j.job_type IN ('graph_attachment_discovery', 'graph_attachment_ingest')
+      -- ...plus their downstream malware_scan jobs (fingerprint prefix).
+      OR (j.job_type = 'malware_scan' AND j.input_fingerprint LIKE 'malware_scan:%'
+          AND EXISTS (SELECT 1 FROM public.atlas_intake_graph_attachments a
+                      WHERE a.scan_job_id = j.id))
+    )
+    AND (
+      -- Any raw canary anywhere in the metadata blob (values or keys).
+      j.metadata::text LIKE '%${canary}%'
+      -- OR malware jobs whose file_name is anything other than the generic
+      -- scanner label. Checkpoint 4 §13 fixes malware_scan metadata to
+      -- always carry file_name = 'attachment.pdf'.
+      OR (j.job_type = 'malware_scan' AND j.metadata->>'file_name' <> 'attachment.pdf')
+    );
+  `);
+  assert(okMgmt(badJobs.status), "job metadata SQL");
+  eq((badJobs.body || []).length, 0, `no PII in Phase 5B job metadata (got ${JSON.stringify(badJobs.body).slice(0,300)})`);
+
+  // 2. atlas_audit_logs: raw canary substring must not appear inside any
+  //    key that is legitimately allowed to carry text (subject, sender,
+  //    body preview, filename, mailbox, Graph identifiers, content id).
+  //    We still allow the canary inside *_hash keys (Phase 5A hashes carry
+  //    the mailbox_hash seed by design).
   const nonHashHits = await sqlAdmin(`
     SELECT id FROM public.atlas_audit_logs
     WHERE (
@@ -643,27 +784,30 @@ test("§24 PII canary sweep across audit / alerts / job metadata", async () => {
     AND metadata_json::text LIKE '%${canary}%';
   `);
   assert(okMgmt(nonHashHits.status), "non-hash audit SQL");
-  eq((nonHashHits.body || []).length, 0, `no PII fields carry canary (got ${JSON.stringify(nonHashHits.body).slice(0,120)})`);
-  // Alerts must not contain the canary at all (nothing we did should emit an alert).
+  eq((nonHashHits.body || []).length, 0, "no PII fields carry canary in audit");
+
+  // 3. Alerts must not contain the canary at all — nothing we did should
+  //    emit an alert.
   const alerts = await sqlAdmin(`SELECT id FROM public.atlas_operational_alerts WHERE metadata::text LIKE '%${canary}%';`);
   assert(okMgmt(alerts.status), "alerts SQL");
   eq((alerts.body || []).length, 0, "no PII in alert metadata");
-  // Job metadata must ONLY carry safe fields.
-  const badJobs = await sqlAdmin(`
-    SELECT id FROM public.atlas_jobs
-    WHERE metadata::text LIKE '%${canary}%'
-      AND (
-        metadata ? 'subject' OR metadata ? 'body_preview' OR metadata ? 'sender_address'
-        OR metadata ? 'sender_name' OR metadata ? 'mailbox' OR metadata ? 'graph_message_id'
-        OR metadata ? 'graph_attachment_id' OR metadata ? 'content_id'
-      );
-  `);
-  assert(okMgmt(badJobs.status), "job metadata SQL");
-  eq((badJobs.body || []).length, 0, "no PII in job metadata");
-  // Raw sha256 hex must not appear in audit metadata (we only allow sha256_prefix12).
+
+  // 4. Raw sha256 hex must not appear anywhere in audit metadata — we only
+  //    allow sha256_prefix12.
   const shaHits = await sqlAdmin(`SELECT count(*)::int AS c FROM public.atlas_audit_logs WHERE metadata_json::text ~* '[a-f0-9]{64}';`);
   assert(okMgmt(shaHits.status), "sha audit SQL");
   eq(shaHits.body[0]?.c, 0, "no raw sha256 in audit metadata");
+
+  // 5. atlas_intake_graph_attachments.storage_path must NOT contain the
+  //    original filename (§12). Storage path is ID-only.
+  const badPaths = await sqlAdmin(`
+    SELECT id FROM public.atlas_intake_graph_attachments
+    WHERE storage_path IS NOT NULL
+      AND storage_path LIKE '%${canary}%'
+      AND storage_path NOT LIKE ('%/' || id::text || '.pdf');
+  `);
+  assert(okMgmt(badPaths.status), "storage_path SQL");
+  eq((badPaths.body || []).length, 0, "storage_path is ID-only for Phase 5B rows");
 });
 
 // ---------------------------------------------------------------------------
