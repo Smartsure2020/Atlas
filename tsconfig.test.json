@@ -50,6 +50,10 @@
     "worker/src/hybrid-usability.ts",
     "worker/src/parser-local-pdf.ts",
     "worker/src/hybrid-orchestrator.ts",
+    "worker/src/graph-client.ts",
+    "worker/src/graph-intake-correlation.ts",
+    "worker/src/graph-intake.ts",
+    "worker/src/config.ts",
     "src/lib/review-edit.ts",
     "src/lib/upload.ts",
     "scripts/benchmark-pipeline.ts"

@@ -98,6 +98,22 @@ export interface Env {
   // Set to "true" to disable the emergency legacy fallback in hybrid mode.
   ATLAS_LEGACY_FALLBACK_DISABLED?: string;
 
+  // --- Microsoft Graph intake (Phase 5A — email intake, READ ONLY) ---
+  // Opt-in. When unset or not "true", the scheduled handler performs NO Graph
+  // work and NO token acquisition. Missing Graph configuration must NOT break
+  // normal Atlas Worker operation while intake is disabled.
+  ATLAS_GRAPH_INTAKE_ENABLED?: string;
+  // Isolated Graph-intake tenant/app credentials. Do NOT reuse the interactive
+  // sign-in credentials (AZURE_*) — those are user-delegated for Atlas sign-in.
+  // The intake poller uses a separate application-permission (client
+  // credentials) principal, restricted to Mail.Read on the configured mailboxes.
+  ATLAS_GRAPH_TENANT_ID?: string;
+  ATLAS_GRAPH_CLIENT_ID?: string;
+  ATLAS_GRAPH_CLIENT_SECRET?: string;
+  // JSON string array of mailboxes to poll, e.g. '["intake@example.com"]'.
+  // Empty/absent => intake is effectively disabled even if the flag is on.
+  ATLAS_GRAPH_MAILBOXES_JSON?: string;
+
   // Cloudflare Queue binding for shadow-pipeline processing.
   //
   // Populated only after the operator runs the wrangler commands documented in
@@ -159,4 +175,34 @@ export function retentionDays(env: Env): number {
 
 export function strictAccessScoping(env: Env): boolean {
   return env.ATLAS_STRICT_ACCESS_SCOPING === "true" || env.ATLAS_ENV === "production";
+}
+
+/**
+ * Phase 5A — Graph intake feature flag.
+ *
+ * Fails CLOSED. Missing / unset / anything-but-"true" means the poller does
+ * not run: no token acquisition, no Graph request, no state mutation. Every
+ * other Atlas capability remains unaffected regardless of Graph configuration.
+ */
+export function graphIntakeEnabled(env: Env): boolean {
+  return env.ATLAS_GRAPH_INTAKE_ENABLED === "true";
+}
+
+/**
+ * Parse the configured mailbox list. Returns [] on absent / malformed input so
+ * a mis-configured flag never triggers a poll for an unintended mailbox.
+ */
+export function graphIntakeMailboxes(env: Env): string[] {
+  const raw = env.ATLAS_GRAPH_MAILBOXES_JSON;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((v): v is string => typeof v === "string")
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+  } catch {
+    return [];
+  }
 }
