@@ -548,8 +548,13 @@ test("all six Phase 5A RPCs exist and are all service-role-only", async () => {
   for (const e of expected) {
     assert(rpcs.includes(e), `RPC ${e} exposed via service_role`);
   }
-  // No unexpected atlas_intake_* RPCs.
+  // No unexpected atlas_intake_* RPCs. Phase 5B (0032/0033) introduces
+  // atlas_intake_attachment_* RPCs (discover_commit, claim, register_hash,
+  // mark_uploaded, create_document, mark_skipped, fail); those are validated
+  // by scripts/gate-phase5b-postgres.mjs and are intentionally excluded from
+  // this Phase 5A enumeration.
   for (const got of rpcs) {
+    if (got.startsWith("atlas_intake_attachment_")) continue;
     assert(expected.has(got), `unexpected RPC exposed: ${got}`);
   }
 });
