@@ -16,6 +16,11 @@ import { handleExtract } from "./extract-endpoint";
 import { handleRunRecommendation } from "./recommendation-endpoints";
 import { handleRunQuoteReview } from "./quote-review-endpoints";
 import { handleProcessInsurerDoc } from "./insurer-endpoints";
+import {
+  handleGraphAttachmentDiscoveryJob,
+  handleGraphAttachmentIngestJob,
+} from "./graph-attachment";
+import { GraphError } from "./graph-client";
 
 const CLIENT_DOCS_BUCKET = "atlas-client-docs";
 const INSURER_DOCS_BUCKET = "atlas-insurer-docs";
@@ -168,6 +173,28 @@ async function processJob(env: Env, job: JobRow): Promise<void> {
         }).eq("id", job.document_id);
       }
       await failJob(admin, job.id, { errorCode, errorMessage: "Upload malware scan failed." });
+    }
+    return;
+  }
+
+  // Phase 5B: attachment discovery + ingest processors. Retry authority is
+  // owned by atlas_jobs; failure here NEVER mutates the Phase 5A delta cursor.
+  if (job.job_type === "graph_attachment_discovery" || job.job_type === "graph_attachment_ingest") {
+    try {
+      if (job.job_type === "graph_attachment_discovery") {
+        await handleGraphAttachmentDiscoveryJob(env, admin, { id: job.id, metadata: job.metadata });
+      } else {
+        await handleGraphAttachmentIngestJob(env, admin, { id: job.id, metadata: job.metadata });
+      }
+      await completeJob(admin, job.id, { metadata: null });
+    } catch (error) {
+      const graphErr = error instanceof GraphError ? error : null;
+      const errorCode = graphErr?.code ?? (error as Error)?.message ?? "attachment_processing_failed";
+      await failJob(admin, job.id, {
+        errorCode,
+        errorMessage: `Phase 5B attachment ${job.job_type} failed.`,
+        retryAfterSeconds: graphErr?.retryAfterSeconds ?? null,
+      });
     }
     return;
   }

@@ -40,6 +40,23 @@ const GRAPH_HEADERS_URL_FN = (mailbox: string, messageId: string) =>
   `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}` +
   `?$select=internetMessageHeaders`;
 
+// Phase 5B — metadata listing only. $select excludes `contentBytes` so this
+// call is bounded, and `@odata.type` is included in the response envelope
+// without needing to be listed here.
+const GRAPH_ATTACHMENT_LIST_URL_FN = (mailbox: string, messageId: string) =>
+  `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/attachments` +
+  `?$select=id,name,contentType,size,isInline,contentId`;
+
+// Phase 5B — raw byte fetch. /$value returns unstructured octet-stream.
+const GRAPH_ATTACHMENT_VALUE_URL_FN = (
+  mailbox: string,
+  messageId: string,
+  attachmentId: string,
+) =>
+  `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}` +
+  `/messages/${encodeURIComponent(messageId)}` +
+  `/attachments/${encodeURIComponent(attachmentId)}/$value`;
+
 /** Injection surface for tests. Kept minimal on purpose. */
 export interface GraphClientDeps {
   /**
@@ -392,6 +409,128 @@ function parseMessageIdList(raw: string): string[] {
     if (canon) out.push(canon);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5B — attachment metadata + raw-byte fetches
+// ---------------------------------------------------------------------------
+
+/**
+ * One attachment metadata entry as returned by Graph's list endpoint.
+ * `attachmentType` is derived from `@odata.type` and normalised to the three
+ * supported forms plus `unknown` for anything else. Bytes are NEVER present
+ * here — the metadata list uses `$select` that excludes `contentBytes`.
+ */
+export interface GraphAttachmentMetadata {
+  id: string;
+  name: string | null;
+  contentType: string | null;
+  size: number | null;
+  isInline: boolean;
+  contentId: string | null;
+  attachmentType: "fileAttachment" | "itemAttachment" | "referenceAttachment" | "unknown";
+}
+
+const ATTACHMENT_TYPE_MAP: Record<string, GraphAttachmentMetadata["attachmentType"]> = {
+  "#microsoft.graph.fileAttachment": "fileAttachment",
+  "#microsoft.graph.itemAttachment": "itemAttachment",
+  "#microsoft.graph.referenceAttachment": "referenceAttachment",
+};
+
+function normaliseAttachmentType(raw: unknown): GraphAttachmentMetadata["attachmentType"] {
+  if (typeof raw !== "string") return "unknown";
+  return ATTACHMENT_TYPE_MAP[raw] ?? "unknown";
+}
+
+/**
+ * List attachment metadata for one message. Never fetches bytes. Returns an
+ * empty array when Graph reports none. Throws a classified GraphError on any
+ * non-2xx (401/403/404/410/429/5xx/redirect/off-origin) or malformed payload.
+ */
+export async function listMessageAttachments(
+  mailbox: string,
+  messageId: string,
+  token: GraphAccessToken,
+  deps: GraphClientDeps = {},
+): Promise<GraphAttachmentMetadata[]> {
+  const res = await fetchWithAllowlist(
+    GRAPH_ATTACHMENT_LIST_URL_FN(mailbox, messageId),
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token.token}`, Accept: "application/json" },
+    },
+    deps,
+  );
+  if (!res.ok) throw await graphErrorFromResponse(res);
+  const payload = (await res.json().catch(() => null)) as {
+    value?: Array<{
+      id?: string;
+      name?: string | null;
+      contentType?: string | null;
+      size?: number | null;
+      isInline?: boolean | null;
+      contentId?: string | null;
+      "@odata.type"?: string;
+    }>;
+  } | null;
+  if (!payload || !Array.isArray(payload.value)) {
+    throw new GraphError({
+      status: 0,
+      code: "graph_attachment_list_malformed",
+      message: "graph_attachment_list_malformed",
+    });
+  }
+  const out: GraphAttachmentMetadata[] = [];
+  for (const row of payload.value) {
+    if (!row || typeof row.id !== "string" || row.id.length === 0) {
+      // A malformed row would poison discovery. Refuse the whole page.
+      throw new GraphError({
+        status: 0,
+        code: "graph_attachment_list_malformed",
+        message: "graph_attachment_list_malformed",
+      });
+    }
+    out.push({
+      id: row.id,
+      name: typeof row.name === "string" ? row.name : null,
+      contentType: typeof row.contentType === "string" ? row.contentType : null,
+      size: typeof row.size === "number" && Number.isFinite(row.size) ? row.size : null,
+      isInline: row.isInline === true,
+      contentId: typeof row.contentId === "string" ? row.contentId : null,
+      attachmentType: normaliseAttachmentType(row["@odata.type"]),
+    });
+  }
+  return out;
+}
+
+/**
+ * Fetch raw attachment bytes via `/attachments/{id}/$value`. Returns an
+ * ArrayBuffer whose length must be re-validated by the caller against the
+ * configured maximum before it enters storage.
+ *
+ * Never used for `referenceAttachment` (would point off-Microsoft) and never
+ * for `itemAttachment` (embedded item, not a byte payload).
+ */
+export async function fetchAttachmentBytes(
+  mailbox: string,
+  messageId: string,
+  attachmentId: string,
+  token: GraphAccessToken,
+  deps: GraphClientDeps = {},
+): Promise<ArrayBuffer> {
+  const res = await fetchWithAllowlist(
+    GRAPH_ATTACHMENT_VALUE_URL_FN(mailbox, messageId, attachmentId),
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token.token}`,
+        Accept: "application/octet-stream",
+      },
+    },
+    deps,
+  );
+  if (!res.ok) throw await graphErrorFromResponse(res);
+  return await res.arrayBuffer();
 }
 
 // Referenced for stable module-graph presence in checked builds; harmless.

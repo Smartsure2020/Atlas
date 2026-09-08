@@ -12,6 +12,22 @@ const NON_RETRYABLE_CODES = new Set([
   "matrix_empty",
   "unchanged_input",
   "permission_denied",
+  // Phase 5B — non-retryable Graph / configuration failures. 403 is a
+  // persistent scope/permission issue; 404 message/attachment is permanent
+  // upstream deletion; a size mismatch means metadata lied and the row is
+  // structurally invalid; a changed hash on an owned row means we would be
+  // silently rewriting a claim.
+  "graph_forbidden",
+  "graph_attachment_gone",
+  "graph_message_gone_before_attachment_discovery",
+  "graph_delta_reset_failed",
+  "discovery_missing_intake_id",
+  "discovery_intake_missing_graph_ids",
+  "ingest_missing_attachment_id",
+  "attachment_hash_changed",
+  "size_mismatch",
+  "graph_config_missing",
+  "graph_token_malformed",
 ]);
 
 const RETRYABLE_CODES = new Set([
@@ -33,6 +49,26 @@ const RETRYABLE_CODES = new Set([
   "anthropic_504",
   "scan_source_unavailable",
   "scanner_unavailable",
+  // Phase 5B — retryable Graph / transport / storage / DB paths.
+  "graph_throttled",
+  "graph_server_error",
+  "graph_token_failed",
+  "graph_bytes_failed",
+  "graph_url_invalid",
+  "graph_url_origin_disallowed",
+  "graph_url_userinfo_disallowed",
+  "graph_unexpected_redirect",
+  "graph_attachment_list_malformed",
+  "graph_header_fetch_failed",
+  "discovery_transport_failed",
+  "discovery_commit_failed",
+  "discovery_intake_load_failed",
+  "storage_upload_failed",
+  "sha256_failed",
+  "hash_register_failed",
+  "mark_uploaded_failed",
+  "create_document_failed",
+  "graph_unauthorized",
 ]);
 
 export function isRetryableError(code: string | null | undefined): boolean {
@@ -42,16 +78,33 @@ export function isRetryableError(code: string | null | undefined): boolean {
   return /^anthropic_5\d\d$/.test(code) || /^http_5\d\d$/.test(code) || /^scanner_http_5\d\d$/.test(code);
 }
 
+/** Upper clamp on any caller-supplied Retry-After (in seconds). */
+export const RETRY_AFTER_MAX_SECONDS = 30 * 60;
+
 export function nextRetryAt(params: {
   retryCount: number;
   nowIso?: string;
   retryable: boolean;
   maxRetries?: number;
+  /**
+   * Optional upstream Retry-After hint (in seconds). When provided AND the
+   * failure is retryable AND retries remain, the returned time honors the
+   * hint (clamped to a sensible ceiling) instead of the default step
+   * schedule. Phase 5B uses this to propagate Microsoft Graph 429 semantics
+   * through the atlas_jobs retry clock.
+   */
+  retryAfterSeconds?: number | null;
 }): string | null {
   if (!params.retryable) return null;
   const max = params.maxRetries ?? 2;
   if (params.retryCount >= max) return null;
   const now = Date.parse(params.nowIso ?? new Date().toISOString());
+  if (typeof params.retryAfterSeconds === "number"
+      && Number.isFinite(params.retryAfterSeconds)
+      && params.retryAfterSeconds > 0) {
+    const seconds = Math.min(RETRY_AFTER_MAX_SECONDS, Math.max(1, Math.trunc(params.retryAfterSeconds)));
+    return new Date(now + seconds * 1000).toISOString();
+  }
   const minutes = params.retryCount <= 0 ? 5 : 30;
   return new Date(now + minutes * 60 * 1000).toISOString();
 }
