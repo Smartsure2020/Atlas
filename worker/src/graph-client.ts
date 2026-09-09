@@ -287,21 +287,37 @@ export async function acquireGraphToken(
   // The token endpoint is a well-known static Microsoft URL. redirect:"manual"
   // matches the delta path: any 3xx here is a misconfiguration, not a normal
   // OAuth response.
-  const res = await fetchImpl(GRAPH_TOKEN_URL_FN(tenant), {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-    redirect: "manual",
-  });
+  //
+  // Any raw transport exception (fetch network failure, TypeError from the
+  // runtime, etc.) is normalised to a classified GraphError so downstream
+  // failJob/atlas_jobs.retry state never receives arbitrary runtime text
+  // that could leak the token endpoint URL, tenant id, client id, or the
+  // client secret embedded in the request body.
+  let res: Response;
+  try {
+    res = await fetchImpl(GRAPH_TOKEN_URL_FN(tenant), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      redirect: "manual",
+    });
+  } catch (err) {
+    if (err instanceof GraphError) throw err;
+    throw new GraphError({
+      status: 0,
+      code: "graph_token_failed",
+      message: "graph_token_failed",
+    });
+  }
   if (res.status >= 300 && res.status < 400) {
     throw new GraphError({ status: res.status, code: "graph_unexpected_redirect", message: "graph_unexpected_redirect" });
   }
   if (!res.ok) throw await graphErrorFromResponse(res);
-  const payload = (await res.json()) as {
+  const payload = (await res.json().catch(() => null)) as {
     access_token?: string;
     expires_in?: number;
-  };
-  if (!payload.access_token) {
+  } | null;
+  if (!payload || !payload.access_token) {
     throw new GraphError({
       status: 500,
       code: "graph_token_malformed",

@@ -1397,6 +1397,106 @@ test("cp4: non-PDF bytes → attachment_content_invalid (defence-in-depth)", asy
   eq(state.documents.length, 0, "no document");
 });
 
+// =======================================================================
+// CHECKPOINT 5 — raw-transport classification + cleanup helper coverage
+// =======================================================================
+
+// --- Raw transport exceptions become classified GraphError ---
+
+test("cp5: token fetch throws TypeError → ingest fails with GraphError(graph_token_failed) (no raw text leak)", async () => {
+  const state = newState();
+  const storageCalls: StorageCall[] = [];
+  const admin = makeAdmin(state, storageCalls);
+  const { intakeId, submissionId } = seedIntake(state);
+  const attId = seedAttachment(state, intakeId, submissionId);
+  // Simulate a low-level fetch failure (TypeError: fetch failed) on the
+  // token endpoint. Must NOT propagate as-is.
+  const fetchImpl = (async (input: URL | RequestInfo) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    if (url.includes("/oauth2/v2.0/token")) throw new TypeError("fetch failed to " + url);
+    return jsonResponse(500, {});
+  }) as typeof fetch;
+  let caught: unknown = null;
+  try {
+    await handleGraphAttachmentIngestJob(
+      ENV, admin as never, { id: "j1", metadata: { attachment_id: attId } }, { graph: { fetchImpl } },
+    );
+  } catch (err) { caught = err; }
+  assert(caught instanceof GraphError, "GraphError thrown (not raw TypeError)");
+  eq((caught as GraphError).code, "graph_token_failed", "classified");
+  // The classified message must NOT contain the raw URL/tenant.
+  const msg = (caught as GraphError).message;
+  assert(!msg.includes("tenant"), "no tenant in message");
+  assert(!msg.includes("login.microsoftonline.com"), "no URL in message");
+  eq(msg, "graph_token_failed", "bland classified message");
+});
+
+test("cp5: /$value fetch throws TypeError → ingest fails with GraphError(graph_bytes_failed) (no raw text leak)", async () => {
+  const state = newState();
+  const storageCalls: StorageCall[] = [];
+  const admin = makeAdmin(state, storageCalls);
+  const { intakeId, submissionId } = seedIntake(state);
+  const attId = seedAttachment(state, intakeId, submissionId);
+  const fetchImpl = (async (input: URL | RequestInfo) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    if (url.includes("/oauth2/v2.0/token")) return jsonResponse(200, { access_token: "TOK", expires_in: 3600 });
+    if (url.endsWith("/$value")) throw new TypeError("ECONNRESET " + url);
+    return jsonResponse(500, {});
+  }) as typeof fetch;
+  let caught: unknown = null;
+  try {
+    await handleGraphAttachmentIngestJob(
+      ENV, admin as never, { id: "j1", metadata: { attachment_id: attId } }, { graph: { fetchImpl } },
+    );
+  } catch (err) { caught = err; }
+  assert(caught instanceof GraphError, "GraphError thrown (not raw TypeError)");
+  eq((caught as GraphError).code, "graph_bytes_failed", "classified");
+  eq((caught as GraphError).message, "graph_bytes_failed", "bland classified message");
+  // Attachment state is recoverable (retryable).
+  eq((state.attachments.find((r) => r.id === attId)!).state, "pending", "pending after transient");
+});
+
+test("cp5: discovery token fetch TypeError → GraphError(graph_token_failed)", async () => {
+  const state = newState();
+  const storageCalls: StorageCall[] = [];
+  const admin = makeAdmin(state, storageCalls);
+  const { intakeId } = seedIntake(state);
+  const fetchImpl = (async (input: URL | RequestInfo) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    if (url.includes("/oauth2/v2.0/token")) throw new TypeError("network down");
+    return jsonResponse(500, {});
+  }) as typeof fetch;
+  let caught: unknown = null;
+  try {
+    await handleGraphAttachmentDiscoveryJob(
+      ENV, admin as never, { id: "d1", metadata: { intake_message_id: intakeId } }, { graph: { fetchImpl } },
+    );
+  } catch (err) { caught = err; }
+  assert(caught instanceof GraphError, "GraphError thrown");
+  eq((caught as GraphError).code, "graph_token_failed", "classified");
+});
+
+test("cp5: discovery list page fetch TypeError → GraphError(discovery_transport_failed)", async () => {
+  const state = newState();
+  const storageCalls: StorageCall[] = [];
+  const admin = makeAdmin(state, storageCalls);
+  const { intakeId } = seedIntake(state);
+  const fetchImpl = (async (input: URL | RequestInfo) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    if (url.includes("/oauth2/v2.0/token")) return jsonResponse(200, { access_token: "TOK", expires_in: 3600 });
+    if (url.includes("/attachments")) throw new TypeError("DNS lookup failed");
+    return jsonResponse(500, {});
+  }) as typeof fetch;
+  let caught: unknown = null;
+  try {
+    await handleGraphAttachmentDiscoveryJob(
+      ENV, admin as never, { id: "d1", metadata: { intake_message_id: intakeId } }, { graph: { fetchImpl } },
+    );
+  } catch (err) { caught = err; }
+  assert(caught instanceof GraphError, "GraphError thrown");
+  eq((caught as GraphError).code, "discovery_transport_failed", "classified");
+});
+
 // -----------------------------------------------------------------------
 // Classifier sanity — proves the migration matches the worker's decision.
 // -----------------------------------------------------------------------

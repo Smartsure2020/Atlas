@@ -96,13 +96,23 @@ export function isRetryableError(code: string | null | undefined): boolean {
 }
 
 /**
- * Absolute defensive ceiling on any caller-supplied Retry-After (in
- * seconds). Set high enough that a legitimate upstream directive is never
- * shortened — 24 hours matches the maximum documented by Microsoft Graph.
- * A value ABOVE this is treated as malformed (see clamp below); the
- * ceiling never truncates a valid short/medium directive.
+ * Retry-After semantics:
+ *   * A finite positive value is honored verbatim (rounded up to whole
+ *     seconds); next_retry_at is ALWAYS ≥ now + retryAfterSeconds.
+ *     Atlas never schedules an earlier retry than the upstream directive.
+ *   * A non-finite / non-positive / representationally-unsafe value is
+ *     treated as malformed and disables automatic retry (returns null) so
+ *     the failure surfaces to operators for manual triage rather than
+ *     being silently shortened.
+ *
+ * The historical upper clamp is removed on Checkpoint 5 §14: shortening a
+ * valid Retry-After even from 24h → less would still be an early retry
+ * that violates Microsoft Graph's contract.
  */
-export const RETRY_AFTER_MAX_SECONDS = 24 * 60 * 60;
+// Ceiling on the number of milliseconds we can safely add to `Date.now()`
+// without overflowing Date's representable range. A retry request that
+// would exceed this is refused as malformed.
+export const RETRY_AFTER_MAX_SAFE_MS = Number.MAX_SAFE_INTEGER;
 
 export function nextRetryAt(params: {
   retryCount: number;
@@ -113,9 +123,9 @@ export function nextRetryAt(params: {
    * Optional upstream Retry-After hint (in seconds). When provided AND the
    * failure is retryable AND retries remain, the returned time is at least
    * `now + retryAfterSeconds`. Microsoft Graph's guidance is to wait at
-   * least the number of seconds specified; we honor that directive without
-   * shortening it. The defensive ceiling only applies to values that would
-   * otherwise be treated as malformed (e.g. > 24h or non-finite).
+   * least the number of seconds specified; we honor that directive
+   * VERBATIM and never shorten it. A non-finite / non-positive /
+   * unsafely-large value returns null (no automatic retry).
    */
   retryAfterSeconds?: number | null;
 }): string | null {
@@ -123,15 +133,22 @@ export function nextRetryAt(params: {
   const max = params.maxRetries ?? 2;
   if (params.retryCount >= max) return null;
   const now = Date.parse(params.nowIso ?? new Date().toISOString());
-  if (typeof params.retryAfterSeconds === "number"
-      && Number.isFinite(params.retryAfterSeconds)
-      && params.retryAfterSeconds > 0) {
-    // Preserve Microsoft Graph's Retry-After verbatim (rounded up to whole
-    // seconds), only clamping absurdly large values that would otherwise
-    // freeze the queue indefinitely.
-    const seconds = Math.min(RETRY_AFTER_MAX_SECONDS, Math.max(1, Math.ceil(params.retryAfterSeconds)));
-    return new Date(now + seconds * 1000).toISOString();
+
+  if (params.retryAfterSeconds != null) {
+    // Malformed: null-checked above; must be finite, positive, and safely
+    // representable as a Date offset. Otherwise refuse automatic retry —
+    // never shorten a valid upstream directive.
+    if (!Number.isFinite(params.retryAfterSeconds) || params.retryAfterSeconds <= 0) {
+      return null;
+    }
+    const seconds = Math.max(1, Math.ceil(params.retryAfterSeconds));
+    const ms = seconds * 1000;
+    if (!Number.isFinite(ms) || ms > RETRY_AFTER_MAX_SAFE_MS - now) {
+      return null;
+    }
+    return new Date(now + ms).toISOString();
   }
+
   const minutes = params.retryCount <= 0 ? 5 : 30;
   return new Date(now + minutes * 60 * 1000).toISOString();
 }

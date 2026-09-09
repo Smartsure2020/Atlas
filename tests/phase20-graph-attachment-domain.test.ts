@@ -17,7 +17,6 @@ import {
 import {
   nextRetryAt,
   isRetryableError,
-  RETRY_AFTER_MAX_SECONDS,
 } from "../worker/src/phase8-core.js";
 import type { GraphAttachmentMetadata } from "../worker/src/graph-client.js";
 
@@ -247,12 +246,30 @@ test("nextRetryAt: Retry-After 3600s is honored verbatim (never shortened to 30m
   assert(delta !== 1800, "must not be the old 1800s clamp");
 });
 
-test("nextRetryAt: pathological Retry-After above 24h is clamped defensively", () => {
+test("nextRetryAt: Retry-After 86400s is honored verbatim (never shortened)", () => {
   const nowIso = "2026-01-01T00:00:00.000Z";
-  const huge = 72 * 60 * 60; // 3 days
-  const at = nextRetryAt({ retryCount: 0, retryable: true, retryAfterSeconds: huge, nowIso });
+  const at = nextRetryAt({ retryCount: 0, retryable: true, retryAfterSeconds: 86400, nowIso });
   const delta = (Date.parse(at ?? "") - Date.parse(nowIso)) / 1000;
-  eq(delta, RETRY_AFTER_MAX_SECONDS, "clamped to 24h ceiling");
+  assert(delta >= 86400, `expected >= 86400s, got ${delta}`);
+});
+
+test("nextRetryAt: Retry-After 172800s (48h) is honored verbatim, NOT shortened", () => {
+  const nowIso = "2026-01-01T00:00:00.000Z";
+  const at = nextRetryAt({ retryCount: 0, retryable: true, retryAfterSeconds: 172800, nowIso });
+  const delta = (Date.parse(at ?? "") - Date.parse(nowIso)) / 1000;
+  assert(delta >= 172800, `expected >= 172800s, got ${delta}`);
+  // Defensive: also NOT the removed 24h ceiling.
+  assert(delta !== 86400, "must not be shortened to 24h");
+});
+
+test("nextRetryAt: non-finite Retry-After returns null (no early retry)", () => {
+  const at = nextRetryAt({ retryCount: 0, retryable: true, retryAfterSeconds: Number.POSITIVE_INFINITY });
+  eq(at, null, "infinity refused");
+});
+
+test("nextRetryAt: negative Retry-After returns null (no early retry)", () => {
+  const at = nextRetryAt({ retryCount: 0, retryable: true, retryAfterSeconds: -5 });
+  eq(at, null, "negative refused");
 });
 
 test("nextRetryAt: retryAfterSeconds ignored when not retryable", () => {

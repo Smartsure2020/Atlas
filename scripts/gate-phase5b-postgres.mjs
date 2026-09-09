@@ -424,23 +424,64 @@ test("§17b set_planned_path: persists path while downloading; idempotent; confl
   eq(s3.body[0].reason, "storage_path_conflict", "reason");
 });
 
-test("§17c cleanup detection protects Phase 5B storage paths in active states", async () => {
-  // For any of our attachment rows with state IN (downloading, uploaded, ingested)
-  // AND a non-null storage_path, a SQL predicate identical to detectCleanupCandidates'
-  // protection set must recognise the path as referenced.
-  const anyAtt = [...state.attachmentIds][0];
-  if (!anyAtt) throw new Error("need at least one attachment fixture");
-  // Ensure at least one row is in a protected state via §13/§18 above.
+test("§17c cleanup detection protects the EXACT Phase 5B storage paths we created (all four active states)", async () => {
+  // Look up the exact rows this run created. Broken parenthesization in the
+  // previous version could have satisfied the assertion via unrelated rows
+  // in staging — this test now scopes strictly to our own attachmentIds.
+  const ids = [...state.attachmentIds];
+  if (ids.length === 0) throw new Error("need at least one attachment fixture");
+  const idList = ids.map((v) => `'${v}'`).join(",");
   const check = await sqlAdmin(`
-    SELECT storage_path
+    SELECT id, state::text AS state, storage_path
     FROM public.atlas_intake_graph_attachments
-    WHERE state IN ('downloading', 'uploaded', 'ingested')
-      AND storage_path IS NOT NULL
-      AND storage_path LIKE '${PREFIX.replace(/'/g, "''")}%' OR storage_path LIKE '%/graph/%.pdf'
-    LIMIT 5;
+    WHERE id IN (${idList})
+      AND state IN ('pending', 'downloading', 'uploaded', 'ingested')
+      AND storage_path IS NOT NULL;
   `);
   assert(okMgmt(check.status), "protect SQL");
-  assert(Array.isArray(check.body) && check.body.length > 0, "protection query returns Phase 5B rows");
+  assert(Array.isArray(check.body) && check.body.length > 0,
+    `protection query must return at least one of our exact fixture rows in an active state (got ${JSON.stringify(check.body).slice(0,200)})`);
+  for (const r of check.body) {
+    assert(["pending","downloading","uploaded","ingested"].includes(r.state), `state should be active (got ${r.state})`);
+    assert(String(r.storage_path).length > 0, "storage_path populated");
+  }
+});
+
+test("§17e cleanup protection includes pending + storage_path (Checkpoint 5 §7)", async () => {
+  // A Phase 5B attachment may legitimately be state='pending' AND
+  // storage_path IS NOT NULL after a retryable storage upload failure —
+  // the deterministic path is still reserved by that row and MUST NOT be
+  // classified as orphan.
+  const { row } = await ingestNewEmail({ has_attachments: true });
+  const stubs = [{ graph_attachment_id: `${PREFIX}-pend`, attachment_type: "fileAttachment", filename: "p.pdf", mime_type: "application/pdf", size_bytes: 50, is_inline: false, content_id: null, initial_state: "pending", skip_reason: null }];
+  const dr = await rpc("atlas_intake_attachment_discover_commit", {
+    p_intake_message_id: row.intake_message_id, p_system_actor_id: SYSTEM_ACTOR,
+    p_mailbox: `${PREFIX}-mbx@example.com`, p_graph_message_id: `${PREFIX}-gm-pend`, p_stubs: stubs,
+  });
+  const att = dr.body[0]; state.attachmentIds.add(att.attachment_id);
+  if (att.ingest_job_id) state.jobIds.add(att.ingest_job_id);
+  await rpc("atlas_intake_attachment_claim", { p_id: att.attachment_id, p_expected_state: "pending" });
+  const path = `${row.submission_id}/graph/${att.attachment_id}.pdf`;
+  await rpc("atlas_intake_attachment_set_planned_path", {
+    p_id: att.attachment_id, p_expected_state: "downloading", p_storage_path: path,
+  });
+  // Simulate a storage upload failure by explicitly transitioning back to pending.
+  await rpc("atlas_intake_attachment_fail", {
+    p_id: att.attachment_id, p_expected_state: "downloading",
+    p_next_state: "pending", p_error_code: "storage_upload_failed",
+  });
+  const seen = await rest(`atlas_intake_graph_attachments?id=eq.${att.attachment_id}&select=state,storage_path`);
+  eq(seen.body[0].state, "pending", "pending after simulated storage failure");
+  eq(seen.body[0].storage_path, path, "storage_path retained");
+  // Runtime-mirror: the exact predicate findActiveStorageReference uses.
+  const guard = await sqlAdmin(`
+    SELECT id FROM public.atlas_intake_graph_attachments
+    WHERE storage_path = '${path}'
+      AND state IN ('pending','downloading','uploaded','ingested')
+    LIMIT 1;
+  `);
+  assert(okMgmt(guard.status), "guard SQL");
+  assert(Array.isArray(guard.body) && guard.body.length === 1, "pending+path recognised as reference");
 });
 
 test("§17d cleanup revalidation: stale orphan candidate is refused when attachment path is now referenced", async () => {

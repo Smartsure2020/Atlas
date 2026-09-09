@@ -21,9 +21,13 @@ import {
   handleGraphAttachmentIngestJob,
 } from "./graph-attachment";
 import { GraphError } from "./graph-client";
-
-const CLIENT_DOCS_BUCKET = "atlas-client-docs";
-const INSURER_DOCS_BUCKET = "atlas-insurer-docs";
+import {
+  CLIENT_DOCS_BUCKET,
+  INSURER_DOCS_BUCKET,
+  findActiveStorageReference,
+} from "./cleanup-reference";
+export { findActiveStorageReference } from "./cleanup-reference";
+export type { StorageReferenceCheck } from "./cleanup-reference";
 
 type JobRow = {
   id: string;
@@ -389,22 +393,19 @@ async function candidateExists(
 
 async function detectCleanupCandidates(env: Env, admin: ReturnType<typeof adminClient>) {
   const now = new Date().toISOString();
-  const [clientDocs, insurerDocs, clientObjects, insurerObjects, phase5bRefs] = await Promise.all([
+  const [clientDocs, insurerDocs, clientObjects, insurerObjects] = await Promise.all([
     admin.from("atlas_documents").select("id, submission_id, file_name, storage_path, expires_at, status").eq("status", "active").lt("expires_at", now).limit(500),
     admin.from("atlas_insurer_documents").select("id, insurer_id, file_name, storage_path, processing_status").limit(500),
     listStoragePaths(admin, CLIENT_DOCS_BUCKET),
     listStoragePaths(admin, INSURER_DOCS_BUCKET),
-    // Phase 5B references: any attachment tracking row in a resumable /
-    // active state carries a legitimate reservation on its storage_path.
-    // Even before atlas_documents exists, a Phase 5B path in state
-    // downloading/uploaded/ingested must NOT be classified as orphan.
-    admin
-      .from("atlas_intake_graph_attachments")
-      .select("storage_path")
-      .in("state", ["downloading", "uploaded", "ingested"])
-      .not("storage_path", "is", null)
-      .limit(5000),
   ]);
+
+  // Any partial DB read here must NOT be interpreted as "no reference" —
+  // that would let a genuinely-referenced path be classified as an orphan.
+  if (clientDocs.error || insurerDocs.error) {
+    console.warn("atlas_cleanup_detection_aborted", { reason: "reference_query_failed" });
+    return;
+  }
 
   for (const doc of clientDocs.data ?? []) {
     if (await candidateExists(admin, CLIENT_DOCS_BUCKET, doc.storage_path)) continue;
@@ -420,19 +421,14 @@ async function detectCleanupCandidates(env: Env, admin: ReturnType<typeof adminC
     });
   }
 
-  const clientRefs = new Set((clientDocs.data ?? []).map((doc) => doc.storage_path));
-  const allClientRefs = await admin.from("atlas_documents").select("storage_path").limit(5000);
-  const phase5bRefSet = new Set(
-    ((phase5bRefs.data ?? []) as Array<{ storage_path?: string | null }>)
-      .map((r) => r.storage_path)
-      .filter((p): p is string => typeof p === "string" && p.length > 0),
-  );
+  // Orphan detection now goes through the shared reference-check helper
+  // that production deletion uses — so a Phase 5B path in ANY active state
+  // (including pending with a persisted storage_path after a retryable
+  // upload failure) is protected identically at detection and deletion
+  // time. A DB error inside the helper is treated as still-referenced.
   for (const path of clientObjects) {
-    if (clientRefs.has(path) || (allClientRefs.data ?? []).some((row) => row.storage_path === path)) continue;
-    // Phase 5B legitimately owns storage paths BEFORE atlas_documents is
-    // created. A Phase 5B path in an active/resumable state is a genuine
-    // reservation, not an orphan.
-    if (phase5bRefSet.has(path)) continue;
+    const ref = await findActiveStorageReference(admin, CLIENT_DOCS_BUCKET, path);
+    if (ref.referenced) continue;
     if (await candidateExists(admin, CLIENT_DOCS_BUCKET, path)) continue;
     await admin.from("atlas_cleanup_candidates").insert({
       candidate_type: "orphan_storage_path",
@@ -444,9 +440,9 @@ async function detectCleanupCandidates(env: Env, admin: ReturnType<typeof adminC
     });
   }
 
-  const allInsurerRefs = new Set((insurerDocs.data ?? []).map((doc) => doc.storage_path));
   for (const path of insurerObjects) {
-    if (allInsurerRefs.has(path)) continue;
+    const ref = await findActiveStorageReference(admin, INSURER_DOCS_BUCKET, path);
+    if (ref.referenced) continue;
     if (await candidateExists(admin, INSURER_DOCS_BUCKET, path)) continue;
     await admin.from("atlas_cleanup_candidates").insert({
       candidate_type: "orphan_storage_path",
@@ -478,29 +474,36 @@ async function processApprovedCleanup(env: Env, admin: ReturnType<typeof adminCl
     }
     // Deletion-time revalidation. A candidate flagged as an orphan may have
     // acquired a legitimate reference between detection and approval —
-    // atlas_documents.storage_path (any bucket) or, for atlas-client-docs,
-    // atlas_intake_graph_attachments.storage_path in an active/resumable
-    // Phase 5B state. Refuse the delete and dismiss with a safe classified
-    // reason rather than trust the stale candidate row.
+    // atlas_documents.storage_path OR, for atlas-client-docs, an active
+    // Phase 5B atlas_intake_graph_attachments.storage_path (including
+    // state='pending' when a hash claim + persisted path is retryable
+    // after a partial upload failure). Uses the same helper the detection
+    // pass uses so the two decisions cannot diverge. Fails CLOSED if any
+    // reference lookup errors: candidate is marked failed with a classified
+    // code and a safe operational alert is raised. Raw DB error text NEVER
+    // enters the alert.
     if (candidate.candidate_type === "orphan_storage_path") {
-      const { data: docRef } = await admin
-        .from("atlas_documents")
-        .select("id")
-        .eq("storage_path", candidate.storage_path)
-        .limit(1)
-        .maybeSingle();
-      let attRef: { id?: string | null } | null = null;
-      if (candidate.storage_bucket === CLIENT_DOCS_BUCKET) {
-        const { data } = await admin
-          .from("atlas_intake_graph_attachments")
-          .select("id")
-          .eq("storage_path", candidate.storage_path)
-          .in("state", ["downloading", "uploaded", "ingested"])
-          .limit(1)
-          .maybeSingle();
-        attRef = (data as { id?: string | null } | null) ?? null;
+      const ref = await findActiveStorageReference(
+        admin,
+        String(candidate.storage_bucket),
+        String(candidate.storage_path),
+      );
+      if (!ref.ok) {
+        await admin.from("atlas_cleanup_candidates").update({
+          status: "failed",
+          error_code: "cleanup_reference_check_failed",
+          error_message: "Reference lookup failed; deletion refused for safety.",
+        }).eq("id", candidate.id);
+        await createAlertOnce(admin, env, {
+          alertType: "cleanup_reference_check_failed",
+          severity: "critical",
+          title: "Cleanup reference lookup failed",
+          message: "A candidate could not be revalidated before deletion; the object was NOT removed.",
+          metadata: { candidate_id: candidate.id, reason: ref.reason },
+        });
+        continue;
       }
-      if (docRef?.id || attRef?.id) {
+      if (ref.referenced) {
         await admin.from("atlas_cleanup_candidates").update({
           status: "dismissed",
           error_code: "storage_path_now_referenced",

@@ -569,7 +569,11 @@ export async function handleGraphAttachmentIngestJob(
       );
     } catch (err) {
       // Preserve Graph-level classification but map 404/403 to Phase 5B's
-      // specific ingest codes so retryability and logs are unambiguous.
+      // specific ingest codes so retryability and logs are unambiguous. A
+      // non-Graph transport exception (fetch TypeError, network drop, etc.)
+      // is normalised to graph_bytes_failed BEFORE it can reach the outer
+      // executor — raw runtime text must never land in atlas_jobs.error_code
+      // or leak the token / URL / attachment id.
       let code = err instanceof GraphError ? err.code : "graph_bytes_failed";
       if (err instanceof GraphError) {
         if (err.status === 404) code = "graph_attachment_gone";
@@ -577,7 +581,9 @@ export async function handleGraphAttachmentIngestJob(
       }
       logAttachmentError({ code, jobId: job.id, attachmentId, submissionIdHash });
       await failAttachment(admin, row.id, "downloading", nextStateFor(code), code);
-      if (err instanceof GraphError && (err.status === 404 || err.status === 403)) {
+      if (err instanceof GraphError) {
+        // Rethrow the classified code (with the mapped 404/403 replacement
+        // when applicable), preserving Retry-After for 429 semantics.
         throw new GraphError({
           status: err.status,
           code,
@@ -585,7 +591,13 @@ export async function handleGraphAttachmentIngestJob(
           retryAfterSeconds: err.retryAfterSeconds,
         });
       }
-      throw err;
+      // Non-GraphError transport exception → classified fresh throw. No
+      // raw fetch text propagates.
+      throw new GraphError({
+        status: 0,
+        code: "graph_bytes_failed",
+        message: "graph_bytes_failed",
+      });
     }
 
     const maxBytes = attachmentMaxBytes(env);

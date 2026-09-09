@@ -54,6 +54,7 @@
     "worker/src/graph-intake-correlation.ts",
     "worker/src/graph-intake.ts",
     "worker/src/graph-attachment.ts",
+    "worker/src/cleanup-reference.ts",
     "worker/src/config.ts",
     "src/lib/review-edit.ts",
     "src/lib/upload.ts",
