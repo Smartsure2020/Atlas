@@ -218,7 +218,8 @@ one deliberate step.
    ```
 
    `wrangler versions upload` does not redeploy the live version. It
-   returns a `VERSION_ID` — copy it and keep it for §5.
+   returns a `VERSION_ID` — copy it; the next step inspects the exact
+   candidate by that id.
 
 4. Securely remove the temporary secrets file:
 
@@ -230,14 +231,26 @@ one deliberate step.
    (On systems where `shred` is unavailable, use whatever secure-delete
    utility the team has approved. Do NOT rely on plain `rm`.)
 
-5. Inspect the exact candidate WITHOUT activating it. See §5 for the
-   verification pattern (binding NAMES only). For this Graph-OFF deploy
-   the required check is:
+5. Inspect the exact candidate WITHOUT activating it, using its
+   `VERSION_ID` from the previous step:
+
+   ```
+   wrangler versions view <VERSION_ID> --env production --json
+   ```
+
+   (Or open the Cloudflare dashboard version-details view for that
+   `VERSION_ID`.) Check BINDING NAMES only — never print or record any
+   secret VALUE. For this Graph-OFF deploy the required check is:
    - `ATLAS_MALWARE_SCANNER_URL` and `ATLAS_MALWARE_SCANNER_TOKEN`
      bound on the candidate.
    - None of the seven Graph names present on the candidate.
 
-6. Deploy the exact candidate at 100% only after §5 verification:
+   `wrangler versions list` only identifies versions; it does NOT prove
+   bindings — `wrangler versions view <VERSION_ID>` (or the dashboard
+   details view) is the authoritative inspection.
+
+6. Deploy the exact candidate at 100% only after the candidate-version
+   verification above has passed:
 
    ```
    wrangler versions deploy <VERSION_ID>@100% --env production -y
@@ -321,8 +334,8 @@ STOP. Do not configure Atlas.
 ## 6. Choose the forward-only cutover timestamp
 
 **§6 is planning + preflight only. No Cloudflare mutation happens here.**
-The chosen cutover is written to production in §7 as part of the single
-staged candidate version.
+The chosen cutover is written to production in §8 as part of the single
+staged candidate version, after the §7 trigger verification gate.
 
 Choose a fixed UTC ISO 8601 timestamp AFTER the moment the canary
 mailbox is ready to be watched — typically the start of the next
@@ -330,7 +343,7 @@ business day. This becomes the boundary Atlas never crosses backwards
 for THAT mailbox.
 
 Record the chosen cutover privately (e.g. the operator's encrypted
-notes) so it can be pasted verbatim into the §7 local secrets file. Do
+notes) so it can be pasted verbatim into the §8 local secrets file. Do
 NOT commit it to git. Do NOT paste it into terminals that log to disk.
 The value shape:
 
@@ -359,7 +372,7 @@ Once a mailbox has entered production intake:
 - Do not regenerate it from "now" during a subsequent tick or when
   editing the JSON to add another mailbox.
 
-When adding another mailbox (§9), the operator preserves every
+When adding another mailbox (§10), the operator preserves every
 existing mailbox→cutover pair BYTE FOR BYTE and appends only the new
 mailbox's entry.
 
@@ -391,7 +404,8 @@ GET https://graph.microsoft.com/v1.0/users/<mailbox>/mailFolders/Inbox/messages/
     ?$filter=receivedDateTime ge <cutover>
 ```
 
-- Result ≤ ~3,000 → safe. Proceed to §7.
+- Result ≤ ~3,000 → safe. Proceed to §7 (trigger verification gate)
+  and then §8.
 - Result 3,000 – 5,000 → borderline. Prefer a later cutover with
   operational headroom.
 - Result > 5,000 → STOP. Do NOT enable Graph for that mailbox with the
@@ -422,7 +436,66 @@ message ceiling after the floor has advanced, the operator should
 pause polling and reassess. The reset-floor design keeps the recovery
 window bounded but does not remove Microsoft's ceiling.
 
-## 7. Enable Graph intake for the canary mailbox — one staged version
+## 7. Verify production Worker cron trigger (mandatory gate)
+
+Versioned Worker code + secret deployment (§3) and cron trigger
+configuration are separate operational concerns in Cloudflare. A
+successful `wrangler versions deploy` proves the correct code is
+active, but does NOT prove that the production scheduled trigger is
+correctly installed. Graph intake must not be enabled until canonical
+production scheduling is independently verified.
+
+This section is READ-ONLY. Do not create, replace, or modify triggers
+here.
+
+### Read-only trigger inspection
+
+Confirm the Worker `atlas-worker-production` has exactly one trigger
+and that its cron matches the canonical repo value:
+
+- Worker: `atlas-worker-production`
+- cron: `* * * * *`  (exactly this, no other entries)
+- no unexpected temporary or acceptance-only crons
+- do not alter queue consumers as part of this gate
+
+Inspect via the Cloudflare dashboard (Workers & Pages →
+`atlas-worker-production` → Triggers → Cron Triggers) and/or via the
+Wrangler trigger-inspection mechanism supported by your installed
+Wrangler version. If your Wrangler CLI does not expose a supported
+trigger-only read command, the dashboard read is authoritative.
+
+Compare the observed trigger set against the canonical repo value in
+`worker/wrangler.toml` under `[env.production.triggers]` (`crons =
+["* * * * *"]`).
+
+### Stop conditions
+
+If any of the following are true, STOP. Do not proceed to Graph
+enablement.
+
+- The trigger is missing entirely.
+- More than one cron entry is bound.
+- The cron value does not equal `* * * * *`.
+- An unexpected temporary or acceptance cron is present.
+
+Do NOT silently create or replace the trigger as part of Graph
+activation. If a trigger change is genuinely required, treat it as a
+separate explicit operator action, with its own change record and its
+own verification, performed BEFORE returning to this runbook. Do not
+bundle it into the §8 Graph activation.
+
+### Documented separation
+
+- Versioned Worker deployment (`wrangler versions deploy`) governs
+  code and secret binding activation.
+- Cron trigger configuration governs the schedule Atlas runs on.
+- Both must independently reflect the canonical production
+  configuration before Graph intake is enabled.
+
+Only after the trigger read-only inspection matches the canonical
+value in every respect may the operator proceed to §8.
+
+## 8. Enable Graph intake for the canary mailbox — one staged version
 
 Initial Graph enablement stages ALL seven bindings on a single
 non-active Worker candidate version and activates that exact version
@@ -453,8 +526,9 @@ wrangler versions secret bulk ~/atlas/phase6-prod-graph.secrets --env production
 ```
 
 The command uploads all seven secrets onto a single new candidate
-version and returns a `VERSION_ID`. Copy it — it is required for
-verification (§5 pattern) and for the final activation below.
+version and returns a `VERSION_ID`. Copy it — it is required for the
+candidate-version verification below (`wrangler versions view
+<VERSION_ID> --env production --json`) and for the final activation.
 
 Then securely remove the temporary file:
 
@@ -469,7 +543,7 @@ checked, the operator who set it re-confirms locally from the removed
 file before running `shred` — Atlas does not surface secret values
 back.
 
-### Verify the exact candidate version (see §5 pattern)
+### Verify the exact candidate version
 
 Identify the candidate via:
 
@@ -529,7 +603,7 @@ Verification within the first 10 minutes:
   `graph_intake_auth_failure`, `graph_intake_failure_repeated`,
   `graph_intake_misconfigured`, or `graph_intake_cutover_missing`.
 
-## 8. Observation window
+## 9. Observation window
 
 24–72 hours passive observation. Real broker email is expected to arrive
 during this window.
@@ -552,10 +626,10 @@ rows, does each map to the expected submission by the intended
 correlation rule (per `metadata_json.correlation_rule`)? Any `needs_review`
 row deserves inspection.
 
-## 9. Additional mailboxes
+## 10. Additional mailboxes
 
 Only after the canary observation is clean. Do this one mailbox at a
-time. Use the same staged candidate-version pattern as §7 — never edit
+time. Use the same staged candidate-version pattern as §8 — never edit
 the live version with `wrangler secret put`.
 
 1. **Preserve every existing entry byte-for-byte.** Both JSON secrets
@@ -603,7 +677,7 @@ the live version with `wrangler secret put`.
    wrangler versions deploy <VERSION_ID>@100% --env production -y
    ```
 
-7. Repeat §8 observation for the new mailbox. Existing mailboxes MUST
+7. Repeat §9 observation for the new mailbox. Existing mailboxes MUST
    continue polling unaffected — their cutovers were preserved
    verbatim, their `atlas_intake_graph_state.delta_link` values are
    untouched, and their `reset_floor` values remain what the previous
@@ -649,7 +723,7 @@ closed in code for both production AND staging when the flag is unset
 or not exactly `"true"`. Any staging exercise of Phase 5B Graph-job
 processing must set the flag intentionally via versioned secret upload
 plus a deliberate version deploy (matching the production initial-
-cutover pattern in §7):
+cutover pattern in §8):
 
 ```
 wrangler versions secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env staging   # value: "true"
@@ -742,7 +816,7 @@ investigation.
   mailbox has entered production intake, do not move its cutover
   earlier, later, or regenerate it from "now". When adding another
   mailbox, preserve every existing pair byte-for-byte and append the
-  new one (§9).
+  new one (§10).
 - Do not enable ATLAS_DOCUMENT_PIPELINE_MODE beyond `legacy` in the
   same window. Hybrid pipeline consolidation is out of Phase 6 scope.
 - Do not add `Mail.ReadWrite` or `Mail.Send` to the intake app. Atlas

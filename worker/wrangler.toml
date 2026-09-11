@@ -105,9 +105,19 @@ ATLAS_DOC_RETENTION_DAYS = "7"
 ATLAS_DOCUMENT_PIPELINE_MODE = "legacy"
 ATLAS_SHADOW_SAMPLE_PERCENT = "0"
 # Malware scanning fails CLOSED in production. Both of the following MUST be
-# set as WRANGLER SECRETS before deploy — never committed to git:
-#   wrangler secret put ATLAS_MALWARE_SCANNER_URL   --env production
-#   wrangler secret put ATLAS_MALWARE_SCANNER_TOKEN --env production
+# bound on the active production Worker version before deploy — never
+# committed to git:
+#   ATLAS_MALWARE_SCANNER_URL
+#   ATLAS_MALWARE_SCANNER_TOKEN
+# Initial production configuration follows docs/phase6-cutover-runbook.md:
+# secrets are staged onto a non-active candidate Worker version with
+# `wrangler versions upload --secrets-file` (or `wrangler versions secret
+# bulk`), the exact candidate is inspected via
+# `wrangler versions view <VERSION_ID> --env production --json`, and only
+# then deliberately activated with
+# `wrangler versions deploy <VERSION_ID>@100% --env production -y`.
+# Ordinary `wrangler secret put` deploys immediately and is reserved for
+# intentional emergency kill-switch changes only — not initial setup.
 # validateEnv() refuses to serve requests until both are present, and refuses
 # any URL containing a placeholder token (yourcompany, example.com, ...).
 # Flip to "true" only after retention policy is approved:
@@ -118,20 +128,35 @@ ATLAS_ALERT_ESCALATE_MINUTES = "30"
 # Phase 6 — Graph attachment processing kill-switch (LEVEL 2). Production
 # defaults CLOSED in code (graphJobProcessingEnabled). Do NOT declare it as
 # a plaintext var here; the operational binding is the SINGLE SOURCE OF
-# TRUTH. Set / clear it via:
-#   wrangler versions secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env production
-# and activate the new Worker version deliberately (see cutover runbook §7).
-# Emergency LEVEL 2 kill (immediate deploy) uses:
+# TRUTH.
+#
+# Initial production configuration of ALL Phase 6 Graph secrets follows
+# docs/phase6-cutover-runbook.md — the entire seven-binding set is staged
+# on ONE non-active candidate Worker version with:
+#   wrangler versions secret bulk <off-git secrets file> --env production
+# then the candidate's BINDING NAMES are inspected via:
+#   wrangler versions view <VERSION_ID> --env production --json
+# and only then activated in a single deliberate step:
+#   wrangler versions deploy <VERSION_ID>@100% --env production -y
+#
+# Emergency LEVEL 2 kill (immediate deploy) uses ordinary `wrangler secret
+# put`, which is deliberately reserved for intentional emergency kill-
+# switch changes and NOT for initial setup:
 #   wrangler secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env production   # "false"
+#
 # Phase 6 — Graph intake is OFF until the canary gate is authorised.
 # ATLAS_GRAPH_INTAKE_ENABLED is intentionally NOT set here.
 #
-# Graph intake secrets are set out-of-band via wrangler secret put --env production:
+# The following Graph intake binding NAMES are staged onto the candidate
+# version per the runbook — never as plaintext vars in this file, and
+# never via ordinary `wrangler secret put` for initial setup:
 #   ATLAS_GRAPH_TENANT_ID
 #   ATLAS_GRAPH_CLIENT_ID
 #   ATLAS_GRAPH_CLIENT_SECRET
 #   ATLAS_GRAPH_MAILBOXES_JSON
 #   ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON   (forward-only cutover per mailbox)
+#   ATLAS_GRAPH_JOB_PROCESSING_ENABLED
+#   ATLAS_GRAPH_INTAKE_ENABLED
 # Optional — escalation delivery target:
 # ATLAS_ALERT_WEBHOOK_URL = "https://hooks.yourcompany.com/atlas-alerts"
 
