@@ -26,8 +26,13 @@ import {
   INSURER_DOCS_BUCKET,
   findActiveStorageReference,
 } from "./cleanup-reference";
+import {
+  LEVEL2_EXCLUDED_JOB_TYPES,
+  selectClaimableJobs,
+} from "./phase4-queue-selector";
 export { findActiveStorageReference } from "./cleanup-reference";
 export type { StorageReferenceCheck } from "./cleanup-reference";
+export { LEVEL2_EXCLUDED_JOB_TYPES, selectClaimableJobs } from "./phase4-queue-selector";
 
 type JobRow = {
   id: string;
@@ -67,6 +72,37 @@ function internalRequest(job: JobRow): Request {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...request, force: true, background_job_id: job.id }),
   });
+}
+
+/**
+ * Phase 6 LEVEL 2 kill-switch — release a claimed graph_attachment_* job
+ * back to `queued` when the processor returned `{ outcome: "processing_paused" }`.
+ * This is the defence-in-depth fallback path against Graph traffic, NOT
+ * the counter-preservation mechanism.
+ *
+ * On the normal LEVEL 2 path `selectClaimableJobs` excludes these types
+ * BEFORE claim, so `claimJob` is never called and their counters remain
+ * untouched. If a direct / legacy caller has somehow claimed the row
+ * and reached the processor, `claimJob` has already incremented
+ * `attempt_count` (and possibly `retry_count`); this function does NOT
+ * roll those counters back. The row is returned to `queued` so a later
+ * tick can pick it up when LEVEL 2 is enabled again.
+ *
+ * The authoritative counter-preservation contract lives in the selector.
+ * Explicit `.eq("status","running")` guard prevents clobbering a
+ * concurrent state change.
+ */
+async function releaseClaimToQueued(admin: ReturnType<typeof adminClient>, jobId: string): Promise<void> {
+  await admin.from("atlas_jobs").update({
+    status: "queued",
+    started_at: null,
+    claimed_at: null,
+    heartbeat_at: null,
+    current_step: null,
+    progress_percent: 0,
+    error_code: null,
+    error_message: null,
+  }).eq("id", jobId).eq("status", "running");
 }
 
 async function claimJob(admin: ReturnType<typeof adminClient>, candidate: JobRow): Promise<JobRow | null> {
@@ -183,12 +219,24 @@ async function processJob(env: Env, job: JobRow): Promise<void> {
 
   // Phase 5B: attachment discovery + ingest processors. Retry authority is
   // owned by atlas_jobs; failure here NEVER mutates the Phase 5A delta cursor.
+  //
+  // Phase 6 LEVEL 2 kill-switch: selectClaimableJobs already excludes these
+  // job types at the DB query stage when graphJobProcessingEnabled(env) is
+  // false, so `claimJob` is never called for them and their counters remain
+  // untouched — that is the authoritative counter-preservation mechanism.
+  // If a direct / legacy caller reaches us anyway, the processor returns
+  // { outcome: "processing_paused" } BEFORE Graph token acquisition (defence
+  // in depth against Graph traffic) and we release the row back to queued
+  // via releaseClaimToQueued — see the notes on that helper for why the
+  // counters it inherits from the racing claim are not rolled back.
   if (job.job_type === "graph_attachment_discovery" || job.job_type === "graph_attachment_ingest") {
     try {
-      if (job.job_type === "graph_attachment_discovery") {
-        await handleGraphAttachmentDiscoveryJob(env, admin, { id: job.id, metadata: job.metadata });
-      } else {
-        await handleGraphAttachmentIngestJob(env, admin, { id: job.id, metadata: job.metadata });
+      const result = job.job_type === "graph_attachment_discovery"
+        ? await handleGraphAttachmentDiscoveryJob(env, admin, { id: job.id, metadata: job.metadata })
+        : await handleGraphAttachmentIngestJob(env, admin, { id: job.id, metadata: job.metadata });
+      if (result.outcome === "processing_paused") {
+        await releaseClaimToQueued(admin, job.id);
+        return;
       }
       await completeJob(admin, job.id, { metadata: null });
     } catch (error) {
@@ -269,11 +317,15 @@ async function processQueuedJobs(env: Env) {
   const admin = adminClient(env);
   await recoverStuckJobs(env, admin);
   const now = new Date().toISOString();
-  const [queued, retryable] = await Promise.all([
-    admin.from("atlas_jobs").select("*").eq("status", "queued").eq("cancellation_requested", false).order("created_at", { ascending: true }).limit(batchSize(env)),
-    admin.from("atlas_jobs").select("*").eq("status", "failed").eq("cancellation_requested", false).lte("next_retry_at", now).order("next_retry_at", { ascending: true }).limit(batchSize(env)),
-  ]);
-  const candidates = [...((queued.data ?? []) as JobRow[]), ...((retryable.data ?? []) as JobRow[])].slice(0, batchSize(env));
+  // Cast to the narrow QueueSelectorAdmin surface — the real Supabase client
+  // satisfies it structurally but the deep generic type collapses when
+  // TypeScript tries to match it against the loose helper contract.
+  const candidates = (await selectClaimableJobs<JobRow>(
+    admin as unknown as import("./phase4-queue-selector").QueueSelectorAdmin,
+    env,
+    now,
+    batchSize(env),
+  )) as JobRow[];
   for (const candidate of candidates) {
     const claimed = await claimJob(admin, candidate);
     if (!claimed) continue;

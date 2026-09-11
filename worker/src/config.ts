@@ -120,6 +120,39 @@ export interface Env {
   // MAX_CLIENT_UPLOAD_BYTES (15 MiB). Never raises the cap above 15 MiB.
   ATLAS_INTAKE_ATTACHMENT_MAX_BYTES?: string;
 
+  // --- Phase 6 — Forward-only Graph cutover boundary ---
+  // JSON object mapping mailbox address (case-insensitive) to a fixed UTC ISO
+  // 8601 cutover timestamp. The initial delta URL for that mailbox includes
+  // `$filter=receivedDateTime ge <cutover>` so Graph never returns messages
+  // received before the boundary — historic Inbox contents cannot enter Atlas.
+  // Example: {"intake@example.com":"2026-09-20T06:00:00.000Z"}
+  //
+  // Production fails CLOSED: an unset / malformed value prevents polling for
+  // every configured mailbox. Continuation nextLink/deltaLink are Graph-owned
+  // opaque URLs and NEVER modified by Atlas. On delta-token reset the same
+  // fixed cutover is reused — Date.now() is never used as a reset boundary.
+  ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON?: string;
+  // Non-production only: explicit test-default cutover used when the mailbox
+  // has no entry in ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON. Ignored in production.
+  ATLAS_GRAPH_TEST_DEFAULT_CUTOVER?: string;
+
+  // --- Phase 6 — Graph attachment job processing kill-switch (LEVEL 2) ---
+  // Independent of ATLAS_GRAPH_INTAKE_ENABLED. When "false" (or unset in
+  // production), Phase 5B attachment discovery/ingest jobs are held in the
+  // queue: the background worker skips claim for those job types and NO
+  // Graph token acquisition or /$value byte fetch occurs. Retry budget is
+  // NOT consumed while paused — jobs resume cleanly when flipped back on.
+  //
+  // Two-level semantics:
+  //   LEVEL 1 (drain):  ATLAS_GRAPH_INTAKE_ENABLED=false + processing enabled
+  //                     — new polling stops, queued attachment jobs continue
+  //                     to complete (Graph traffic still happens for them).
+  //   LEVEL 2 (stop):   both flags off — no polling AND no attachment Graph
+  //                     traffic; queued work waits without corruption.
+  //
+  // Production defaults to CLOSED — must be explicitly set to "true" to run.
+  ATLAS_GRAPH_JOB_PROCESSING_ENABLED?: string;
+
   // Cloudflare Queue binding for shadow-pipeline processing.
   //
   // Populated only after the operator runs the wrangler commands documented in
@@ -227,4 +260,162 @@ export function graphIntakeMailboxes(env: Env): string[] {
   } catch {
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Forward-only cutover boundary + Graph job processing kill-switch
+// ---------------------------------------------------------------------------
+
+/**
+ * Strict ISO 8601 UTC form check. Refuses locale strings, timezone offsets,
+ * and any format Microsoft Graph may not accept in a $filter clause. Only
+ * `YYYY-MM-DDTHH:MM:SS(.sss)Z` is allowed.
+ */
+const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
+export function isValidCutoverIso(value: string | null | undefined): value is string {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!ISO_UTC_RE.test(trimmed)) return false;
+  const ms = Date.parse(trimmed);
+  return Number.isFinite(ms);
+}
+
+export type CutoverParseResult =
+  | { ok: true; map: Map<string, string> }
+  | { ok: false; reason:
+        | "missing"
+        | "unparseable_json"
+        | "not_object"
+        | "empty_mailbox_key"
+        | "non_string_cutover"
+        | "cutover_not_iso_utc"
+        | "empty_cutover_value" };
+
+/**
+ * Parse ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON strictly. Any anomaly returns
+ * `{ ok: false }` so callers can fail closed in production.
+ *
+ * Keys are lower-cased for case-insensitive lookup — Graph mailbox
+ * addresses are RFC 5321 email addresses and comparison is case-insensitive
+ * on the domain part; we normalise the whole key for a simple exact match.
+ */
+export function graphMailboxCutovers(env: Env): CutoverParseResult {
+  const raw = env.ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON;
+  if (!raw || !raw.trim()) return { ok: false, reason: "missing" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "unparseable_json" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, reason: "not_object" };
+  }
+  const map = new Map<string, string>();
+  for (const [rawKey, rawVal] of Object.entries(parsed as Record<string, unknown>)) {
+    const mailbox = String(rawKey).trim().toLowerCase();
+    if (!mailbox) return { ok: false, reason: "empty_mailbox_key" };
+    if (typeof rawVal !== "string") return { ok: false, reason: "non_string_cutover" };
+    const ts = rawVal.trim();
+    if (!ts) return { ok: false, reason: "empty_cutover_value" };
+    if (!isValidCutoverIso(ts)) return { ok: false, reason: "cutover_not_iso_utc" };
+    map.set(mailbox, ts);
+  }
+  return { ok: true, map };
+}
+
+export type CutoverLookup =
+  | { ok: true; cutoverIso: string }
+  | { ok: false; reason: string };
+
+/**
+ * Resolve the forward-only cutover timestamp for a specific mailbox.
+ *
+ * Production semantics
+ * --------------------
+ *   * Missing or malformed ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON       → { ok:false }
+ *   * Present + valid but no entry for THIS mailbox                → { ok:false }
+ *   * Valid entry present                                          → { ok:true }
+ *
+ * Non-production semantics
+ * ------------------------
+ *   * If a valid mailbox entry exists it is used.
+ *   * Otherwise, if ATLAS_GRAPH_TEST_DEFAULT_CUTOVER is set to a valid
+ *     ISO UTC timestamp, it is used. This lets behavioural tests exercise
+ *     the initial-URL builder without inventing a per-mailbox JSON.
+ *   * Otherwise                                                    → { ok:false }
+ */
+export function resolveMailboxCutover(env: Env, mailbox: string): CutoverLookup {
+  const key = String(mailbox ?? "").trim().toLowerCase();
+  const parsed = graphMailboxCutovers(env);
+  if (parsed.ok) {
+    const hit = parsed.map.get(key);
+    if (hit) return { ok: true, cutoverIso: hit };
+  }
+  if (env.ATLAS_ENV === "production") {
+    if (parsed.ok) return { ok: false, reason: "mailbox_cutover_missing" };
+    return { ok: false, reason: parsed.reason };
+  }
+  const testDefault = env.ATLAS_GRAPH_TEST_DEFAULT_CUTOVER;
+  if (isValidCutoverIso(testDefault)) return { ok: true, cutoverIso: testDefault.trim() };
+  return { ok: false, reason: parsed.ok ? "mailbox_cutover_missing" : parsed.reason };
+}
+
+/**
+ * Phase 6 — LEVEL 2 kill-switch for Phase 5B Graph attachment processing.
+ *
+ * Fails CLOSED in every DEPLOYED environment (production AND staging): must
+ * be explicitly "true" to enable. Only development / test environments
+ * default enabled, so local unit-test suites continue to exercise the
+ * Phase 5B code paths without needing a per-test env override.
+ *
+ * When disabled, the background worker MUST NOT claim
+ * `graph_attachment_discovery` or `graph_attachment_ingest` jobs, and the
+ * processors themselves refuse to acquire a Graph token even when invoked
+ * directly. Queued jobs remain in their existing state — retry budget is not
+ * consumed while paused.
+ *
+ * Deployed environments are ATLAS_ENV in {production, staging}. Any other
+ * value (development, test, or an unset flag with no clear deployment
+ * intent) is treated as non-deployed.
+ */
+export function graphJobProcessingEnabled(env: Env): boolean {
+  const raw = env.ATLAS_GRAPH_JOB_PROCESSING_ENABLED;
+  const atlasEnv = env.ATLAS_ENV;
+  if (atlasEnv === "production" || atlasEnv === "staging") {
+    return raw === "true";
+  }
+  return raw !== "false";
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Malware scanner placeholder guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Substrings that MUST NOT appear in a production
+ * `ATLAS_MALWARE_SCANNER_URL`. Matches common committed-placeholder patterns
+ * so a partly-configured production deploy fails loud in validateEnv rather
+ * than silently sending every scan to a black hole.
+ *
+ * Not exhaustive — a real scanner should never carry any of these tokens.
+ * Case-insensitive comparison.
+ */
+const SCANNER_URL_PLACEHOLDER_TOKENS = [
+  "yourcompany",
+  "your-domain",
+  "your-company",
+  "example.com",
+  "example.org",
+  "placeholder",
+  "changeme",
+  "todo",
+  "replace-me",
+];
+
+export function isPlaceholderScannerUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return SCANNER_URL_PLACEHOLDER_TOKENS.some((token) => lower.includes(token));
 }

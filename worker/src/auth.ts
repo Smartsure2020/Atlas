@@ -9,7 +9,7 @@
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Env, AtlasRole } from "./config";
-import { normalizeAtlasRole, safeErrorBody, type SafeErrorCode } from "./phase6-hardening";
+import { normalizeAtlasRole, safeErrorBody, type SafeErrorCode } from "./phase6-hardening.js";
 
 export interface AtlasUser {
   id: string;

@@ -1,4 +1,5 @@
 import type { Env, AtlasRole } from "./config";
+import { isPlaceholderScannerUrl } from "./config.js";
 
 export type SafeErrorCode =
   | "upload_failed"
@@ -145,6 +146,11 @@ export function validateEnv(env: Env): string[] {
     }
     if (!env.ATLAS_MALWARE_SCANNER_URL || !env.ATLAS_MALWARE_SCANNER_TOKEN) {
       problems.push("production_malware_scanner_missing");
+    } else if (isPlaceholderScannerUrl(env.ATLAS_MALWARE_SCANNER_URL)) {
+      // Phase 6: prevent a committed / accidentally-deployed placeholder URL
+      // from passing the presence check and silently sending scan traffic to
+      // a black hole. Fails LOUD until replaced with a real scanner URL.
+      problems.push("production_malware_scanner_url_is_placeholder");
     }
     if (!env.ATLAS_OAUTH_STATE_SECRET) {
       problems.push("production_oauth_state_secret_missing");

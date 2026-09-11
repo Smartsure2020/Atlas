@@ -65,12 +65,28 @@ interface FakeState {
   failNextIntakeIngest?: string;
   failNextAudit?: string;
   failNextAcquire?: string;
+  // Phase 6 Checkpoint 1A / 1B — record every reset-floor-adjacent call.
+  resetFloorAdvanceCalls: Array<{ mailbox: string; new_reset_floor: string | null }>;
+  // Phase 6 Checkpoint 1B — inject a read failure on
+  //   from("atlas_intake_graph_state").select("reset_floor")
+  // so the fail-closed contract can be exercised.
+  failResetFloorRead?: boolean;
+  // Phase 6 Checkpoint 1B — inject a corrupt persisted reset_floor value.
+  corruptResetFloor?: string;
   // Observability.
   logs: unknown[];
 }
 
 function newFakeState(): FakeState {
-  return { submissions: [], intake: [], graphState: [], audit: [], alerts: [], logs: [] };
+  return {
+    submissions: [],
+    intake: [],
+    graphState: [],
+    audit: [],
+    alerts: [],
+    resetFloorAdvanceCalls: [],
+    logs: [],
+  };
 }
 
 class FakeQuery {
@@ -86,7 +102,21 @@ class FakeQuery {
     private replaceRows: (rows: Array<Record<string, unknown>>) => void,
   ) {}
   select(cols: string) { this.selectCols = cols; return this; }
-  eq(field: string, value: unknown) { this.filters.push((r) => r[field] === value); return this; }
+  eq(field: string, value: unknown) {
+    // PostgREST JSON-path filter: `col->>key` reads `row[col][key]` as text.
+    const jsonPath = /^([a-zA-Z_][a-zA-Z0-9_]*)->>([a-zA-Z_][a-zA-Z0-9_]*)$/.exec(field);
+    if (jsonPath) {
+      const [, col, key] = jsonPath;
+      this.filters.push((r) => {
+        const container = r[col] as Record<string, unknown> | null | undefined;
+        if (container == null) return false;
+        return String(container[key] ?? "") === String(value ?? "");
+      });
+      return this;
+    }
+    this.filters.push((r) => r[field] === value);
+    return this;
+  }
   in(field: string, values: unknown[]) {
     const set = new Set(values);
     this.filters.push((r) => set.has(r[field] as never));
@@ -148,7 +178,29 @@ class FakeQuery {
     return this.applied();
   }
   update(patch: Record<string, unknown>) { this.isUpdate = patch; return this; }
-  async maybeSingle() { return { data: this.terminalRows()[0] ?? null, error: null }; }
+  async maybeSingle() {
+    // Phase 6 Checkpoint 1B fault-injection: fail the reset_floor read.
+    if (
+      this.table === "atlas_intake_graph_state" &&
+      typeof this.selectCols === "string" &&
+      /\breset_floor\b/.test(this.selectCols) &&
+      this.state.failResetFloorRead
+    ) {
+      return { data: null, error: { code: "42703", message: "column reset_floor does not exist" } as { code: string; message: string } };
+    }
+    let row = this.terminalRows()[0] ?? null;
+    // Phase 6 Checkpoint 1B: return a corrupt persisted reset_floor value.
+    if (
+      row != null &&
+      this.table === "atlas_intake_graph_state" &&
+      typeof this.selectCols === "string" &&
+      /\breset_floor\b/.test(this.selectCols) &&
+      typeof this.state.corruptResetFloor === "string"
+    ) {
+      row = { ...row, reset_floor: this.state.corruptResetFloor };
+    }
+    return { data: row, error: null };
+  }
   async single() {
     const rows = this.terminalRows();
     if (rows.length === 0) return { data: null, error: { message: "no rows" } };
@@ -277,6 +329,49 @@ function makeFakeAdmin(state: FakeState): {
       if (args.p_breaker_provided) row.breaker_opened_at = (args.p_breaker_opened_at as string | null) ?? null;
       if (args.p_next_attempt_provided) row.next_attempt_after = (args.p_next_attempt_after as string | null) ?? null;
       return { data: [{ mailbox }], error: null };
+    }
+    if (name === "atlas_intake_release_lease_success_with_floor") {
+      // Phase 6 Checkpoint 1B — atomic success completion including the
+      // monotonic reset_floor advance. All state changes commit or none do
+      // (fake mirrors the SQL RPC).
+      const mailbox = String(args.p_mailbox);
+      const expectedLeaseId = String(args.p_expected_lease_id);
+      const row = state.graphState.find((r) => r.mailbox === mailbox);
+      if (!row || row.lease_id !== expectedLeaseId) {
+        return { data: [{ ok: false, reason: "lease_lost" }], error: null };
+      }
+      // Injectable audit failure inside the transaction — must roll back
+      // every state change, matching SQL transactional atomicity.
+      if (state.failNextAudit === "graph_poll_success") {
+        state.failNextAudit = undefined;
+        return { data: [{ ok: false, reason: "audit_broken" }], error: null };
+      }
+      row.poll_in_flight_since = null;
+      row.lease_id = null;
+      if (args.p_delta_link_provided) row.delta_link = (args.p_delta_link as string | null) ?? null;
+      if (args.p_in_round_provided) row.in_round_next_link = (args.p_in_round_next_link as string | null) ?? null;
+      row.last_error = null;
+      row.consecutive_failures = 0;
+      if (args.p_last_success_at != null) row.last_success_at = args.p_last_success_at as string;
+      row.breaker_opened_at = null;
+      row.next_attempt_after = null;
+      // Monotonic advance — matches SQL greatest(coalesce(..., -infinity), ...).
+      const providedFloor = args.p_reset_floor_provided === true
+        ? ((args.p_new_reset_floor as string | null) ?? null)
+        : null;
+      state.resetFloorAdvanceCalls.push({ mailbox, new_reset_floor: providedFloor });
+      if (providedFloor != null) {
+        const current = (row.reset_floor as string | null) ?? null;
+        if (current == null || current < providedFloor) row.reset_floor = providedFloor;
+      }
+      state.audit.push({
+        id: nextUuid(),
+        submission_id: null,
+        action: "graph_poll_success",
+        actor: null,
+        metadata_json: args.p_audit_metadata,
+      });
+      return { data: [{ ok: true, reason: null }], error: null };
     }
     if (name === "atlas_intake_release_lease_success") {
       const mailbox = String(args.p_mailbox);
@@ -486,6 +581,10 @@ const FAKE_ENV = {
   ATLAS_GRAPH_CLIENT_ID: "client-x",
   ATLAS_GRAPH_CLIENT_SECRET: "secret-x",
   ATLAS_GRAPH_MAILBOXES_JSON: JSON.stringify(["intake@example.com"]),
+  // Phase 6 forward-only cutover: non-production tests use an explicit test
+  // default so the initial delta URL builder receives a fixed boundary
+  // without inventing a per-mailbox JSON for every test.
+  ATLAS_GRAPH_TEST_DEFAULT_CUTOVER: "2026-01-01T00:00:00.000Z",
   SUPABASE_URL: "http://localhost",
   SUPABASE_SERVICE_ROLE_KEY: "key",
   SUPABASE_ANON_KEY: "anon",
@@ -932,6 +1031,331 @@ test("intake audits use actor=null (system/cron convention)", async () => {
   }
   // Submission still uses reserved created_by (NOT NULL constraint).
   eq(state.submissions[0].created_by, ATLAS_INTAKE_SYSTEM_ACTOR_ID, "created_by is system marker");
+});
+
+// -----------------------------------------------------------------------
+// Phase 6 Checkpoint 1A — durable reset-floor behavioural coverage
+// -----------------------------------------------------------------------
+
+test("reset floor: full completed round advances the durable reset_floor", async () => {
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  const routeDelta = (call: FetchCall) =>
+    call.url.includes("/messages/delta")
+      ? jsonResponse(200, {
+          value: [],
+          "@odata.deltaLink": "https://graph.microsoft.com/final",
+        })
+      : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeDelta]);
+  const pollStartMs = Date.parse("2026-10-15T00:00:00.000Z");
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", {
+    graph: { fetchImpl },
+    now: () => pollStartMs,
+    attemptReplyHeaders: false,
+  });
+  eq(result.status, "ok", "status ok");
+  // Exactly one advance call, addressed to this mailbox.
+  eq(state.resetFloorAdvanceCalls.length, 1, "one advance");
+  eq(state.resetFloorAdvanceCalls[0].mailbox, "mbx", "correct mailbox");
+  // Value = pollStart - 24h, clamped to configured cutover.
+  // Test default cutover is 2026-01-01T00:00:00.000Z, so pollStart-24h wins.
+  eq(state.resetFloorAdvanceCalls[0].new_reset_floor, "2026-10-14T00:00:00.000Z", "advance value");
+  // Persisted onto the state row.
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.reset_floor, "2026-10-14T00:00:00.000Z", "row updated");
+});
+
+test("reset floor: partial / resumable round does NOT advance the reset_floor", async () => {
+  // Force page-budget exhaustion (nextLink on every page, no deltaLink)
+  // so pollMailbox exits with status="ok_resumable" — same pattern as the
+  // existing ">MAX pages -> ok_resumable" test above.
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  let pageCount = 0;
+  const routeDelta = (call: FetchCall) => {
+    if (!call.url.startsWith("https://graph.microsoft.com/")) return null;
+    if (call.url.includes("/oauth2/")) return null;
+    pageCount += 1;
+    return jsonResponse(200, {
+      value: [],
+      "@odata.nextLink": `https://graph.microsoft.com/v1.0/continuation?p=${pageCount + 1}`,
+      // NO deltaLink → round never completes in this tick.
+    });
+  };
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeDelta]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", {
+    graph: { fetchImpl },
+    now: () => Date.parse("2026-10-15T00:00:00.000Z"),
+    attemptReplyHeaders: false,
+  });
+  eq(result.status, "ok_resumable", "status ok_resumable");
+  // The atomic RPC IS called on a resumable round (to persist the in_round
+  // checkpoint), but it does NOT include a floor advance: p_reset_floor_
+  // provided is false and p_new_reset_floor is null, so the fake records
+  // a null new_reset_floor and the DB floor is unchanged.
+  const advancing = state.resetFloorAdvanceCalls.filter((c) => c.new_reset_floor != null);
+  eq(advancing.length, 0, "no advancing calls on resumable round");
+});
+
+test("reset floor: 410 reset uses max(configured_cutover, persisted_reset_floor)", async () => {
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  // Pre-seed a persisted reset floor much later than the configured cutover
+  // (test-default cutover = 2026-01-01T00:00:00.000Z).
+  state.graphState.push({
+    mailbox: "mbx",
+    delta_link: null,
+    in_round_next_link: null,
+    last_polled_at: null,
+    last_success_at: null,
+    last_error: null,
+    consecutive_failures: 0,
+    poll_in_flight_since: null,
+    lease_id: null,
+    breaker_opened_at: null,
+    last_failure_at: null,
+    next_attempt_after: null,
+    reset_floor: "2026-06-15T00:00:00.000Z",
+  });
+  // Capture the URL of the first delta request. That's the initial URL
+  // Atlas sends — it must carry the FLOOR's cutover, not the configured one.
+  let firstDeltaUrl: string | null = null;
+  const routeDelta = (call: FetchCall) => {
+    if (!call.url.includes("/messages/delta")) return null;
+    if (firstDeltaUrl == null) firstDeltaUrl = call.url;
+    return jsonResponse(200, { value: [], "@odata.deltaLink": "https://graph.microsoft.com/final" });
+  };
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeDelta]);
+  await pollMailbox(FAKE_ENV, admin as never, "mbx", {
+    graph: { fetchImpl },
+    attemptReplyHeaders: false,
+  });
+  assert(firstDeltaUrl != null, "captured initial URL");
+  const capturedUrl = firstDeltaUrl as string;
+  assert(capturedUrl.includes("2026-06-15T00%3A00%3A00.000Z"), "floor is in initial URL");
+  assert(!capturedUrl.includes("2026-01-01T00%3A00%3A00.000Z"), "configured cutover NOT in URL");
+});
+
+test("reset floor: never precedes the configured cutover", async () => {
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  // Pre-seed a floor OLDER than the configured cutover — should never
+  // reach the URL. The runtime's maxIsoUtc + the RPC's monotonic guard
+  // both defend this.
+  state.graphState.push({
+    mailbox: "mbx",
+    delta_link: null,
+    in_round_next_link: null,
+    last_polled_at: null,
+    last_success_at: null,
+    last_error: null,
+    consecutive_failures: 0,
+    poll_in_flight_since: null,
+    lease_id: null,
+    breaker_opened_at: null,
+    last_failure_at: null,
+    next_attempt_after: null,
+    reset_floor: "2025-01-01T00:00:00.000Z",
+  });
+  let firstDeltaUrl: string | null = null;
+  const routeDelta = (call: FetchCall) => {
+    if (!call.url.includes("/messages/delta")) return null;
+    if (firstDeltaUrl == null) firstDeltaUrl = call.url;
+    return jsonResponse(200, { value: [], "@odata.deltaLink": "https://graph.microsoft.com/final" });
+  };
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeDelta]);
+  await pollMailbox(FAKE_ENV, admin as never, "mbx", {
+    graph: { fetchImpl },
+    attemptReplyHeaders: false,
+  });
+  const captured = firstDeltaUrl as string | null;
+  assert(captured != null, "captured initial URL");
+  const url2 = captured as string;
+  assert(url2.includes("2026-01-01T00%3A00%3A00.000Z"), "configured cutover used, not the older floor");
+  assert(!url2.includes("2025-01-01"), "old floor never leaks to URL");
+});
+
+test("reset floor: repeated fully-completed rounds are idempotent and monotonic", async () => {
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  // Respond to BOTH the initial /messages/delta URL and the persisted
+  // delta_link continuation URL — the second poll resumes from delta_link,
+  // not initialDeltaUrl, so the route must match both.
+  const routeDelta = (call: FetchCall) =>
+    (call.url.includes("/messages/delta") || call.url.includes("/final"))
+      ? jsonResponse(200, { value: [], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/users/mbx/mailFolders/Inbox/messages/delta?$deltatoken=final" })
+      : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, routeDelta]);
+  const t1 = Date.parse("2026-10-15T00:00:00.000Z");
+  const t2 = Date.parse("2026-10-16T00:00:00.000Z");
+  await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl }, now: () => t1, attemptReplyHeaders: false });
+  await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl }, now: () => t2, attemptReplyHeaders: false });
+  eq(state.resetFloorAdvanceCalls.length, 2, "one call per completed round");
+  eq(state.resetFloorAdvanceCalls[0].new_reset_floor, "2026-10-14T00:00:00.000Z", "first advance");
+  eq(state.resetFloorAdvanceCalls[1].new_reset_floor, "2026-10-15T00:00:00.000Z", "second advance");
+  // Monotonic: DB kept the newer value.
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.reset_floor, "2026-10-15T00:00:00.000Z", "row holds the newer floor");
+});
+
+// -----------------------------------------------------------------------
+// Phase 6 Checkpoint 1B — fail-closed reset floor read
+// -----------------------------------------------------------------------
+
+test("missing 0036 / reset_floor read error refuses Graph traffic (fail closed)", async () => {
+  const state = newFakeState();
+  state.failResetFloorRead = true;
+  const { admin } = makeFakeAdmin(state);
+  // Track Graph traffic — must be ZERO on the fail-closed path.
+  let graphNonTokenCalls = 0;
+  const routeDelta = (call: FetchCall) => {
+    if (call.url.includes("graph.microsoft.com") && !call.url.includes("/oauth2/")) graphNonTokenCalls++;
+    return null;
+  };
+  // Token route is present but must never be reached — we fail closed BEFORE
+  // acquireGraphToken.
+  let tokenCalls = 0;
+  const tokenCounter = (call: FetchCall) => {
+    if (call.url.includes("/oauth2/v2.0/token")) { tokenCalls++; return jsonResponse(200, { access_token: "TOK", expires_in: 3600 }); }
+    return null;
+  };
+  const { fetchImpl } = makeFetchMock([tokenCounter, routeDelta]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl }, attemptReplyHeaders: false });
+  eq(result.status, "failed", "status failed");
+  eq(result.errorCode, "reset_floor_read_error", "classified code");
+  eq(tokenCalls, 0, "no Graph token acquisition");
+  eq(graphNonTokenCalls, 0, "no Graph mailbox request");
+  // Lease released safely — the state row exists (created by acquire) with
+  // lease_id null and consecutive_failures incremented.
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.lease_id, null, "lease released");
+  eq(row.consecutive_failures, 1, "failure counted");
+  // Delta cursor untouched.
+  eq(row.delta_link, null, "cursor untouched");
+  // Reset-floor RPC never called.
+  eq(state.resetFloorAdvanceCalls.length, 0, "no advance");
+  // Operational alert inserted, deduped by mailbox_hash.
+  const alerts = state.alerts.filter((a) => a.alert_type === "graph_intake_reset_floor_unavailable");
+  eq(alerts.length, 1, "one alert");
+});
+
+test("malformed persisted reset_floor refuses Graph traffic (fail closed)", async () => {
+  const state = newFakeState();
+  state.corruptResetFloor = "not-a-timestamp";
+  // Pre-seed the graphState row so acquire_lease finds it and the read
+  // returns a row whose reset_floor is the corrupt value.
+  state.graphState.push({
+    mailbox: "mbx",
+    delta_link: null,
+    in_round_next_link: null,
+    last_polled_at: null,
+    last_success_at: null,
+    last_error: null,
+    consecutive_failures: 0,
+    poll_in_flight_since: null,
+    lease_id: null,
+    breaker_opened_at: null,
+    last_failure_at: null,
+    next_attempt_after: null,
+    reset_floor: "not-a-timestamp",
+  });
+  const { admin } = makeFakeAdmin(state);
+  let tokenCalls = 0;
+  const tokenCounter = (call: FetchCall) => {
+    if (call.url.includes("/oauth2/v2.0/token")) { tokenCalls++; return jsonResponse(200, { access_token: "TOK", expires_in: 3600 }); }
+    return null;
+  };
+  const { fetchImpl } = makeFetchMock([tokenCounter]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl }, attemptReplyHeaders: false });
+  eq(result.status, "failed", "status failed");
+  eq(result.errorCode, "reset_floor_malformed_persisted_value", "classified code");
+  eq(tokenCalls, 0, "no Graph token acquisition on corrupt value");
+});
+
+test("atomic release: full round updates delta + reset_floor in one transaction; partial round leaves floor unchanged", async () => {
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  // First tick: force partial (page budget exhaustion, no deltaLink).
+  let pageCount = 0;
+  const routePartial = (call: FetchCall) => {
+    if (!call.url.startsWith("https://graph.microsoft.com/")) return null;
+    if (call.url.includes("/oauth2/")) return null;
+    pageCount++;
+    return jsonResponse(200, { value: [], "@odata.nextLink": `https://graph.microsoft.com/v1.0/continuation?p=${pageCount + 1}` });
+  };
+  const partialFetch = makeFetchMock([tokenRoute, routePartial]);
+  await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl: partialFetch.fetchImpl }, now: () => Date.parse("2026-10-15T00:00:00.000Z"), attemptReplyHeaders: false });
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.delta_link, null, "partial: delta cursor NOT advanced");
+  assert(typeof row.in_round_next_link === "string", "partial: in_round persisted");
+  eq(row.reset_floor ?? null, null, "partial: reset_floor NOT advanced");
+  const partialCallsAdvancingFloor = state.resetFloorAdvanceCalls.filter((c) => c.new_reset_floor != null);
+  eq(partialCallsAdvancingFloor.length, 0, "partial: no floor advance in atomic RPC");
+
+  // Second tick: complete the round with a deltaLink.
+  const routeFull = (call: FetchCall) => {
+    if (!call.url.startsWith("https://graph.microsoft.com/")) return null;
+    if (call.url.includes("/oauth2/")) return null;
+    return jsonResponse(200, { value: [], "@odata.deltaLink": "https://graph.microsoft.com/final" });
+  };
+  const fullFetch = makeFetchMock([tokenRoute, routeFull]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl: fullFetch.fetchImpl }, now: () => Date.parse("2026-10-16T00:00:00.000Z"), attemptReplyHeaders: false });
+  eq(result.status, "ok", "second tick: ok");
+  eq(row.delta_link, "https://graph.microsoft.com/final", "delta advanced");
+  eq(row.in_round_next_link, null, "in_round cleared");
+  eq(row.reset_floor, "2026-10-15T00:00:00.000Z", "reset_floor advanced atomically");
+  // Exactly one atomic success write for the completed round.
+  const advancing = state.resetFloorAdvanceCalls.filter((c) => c.new_reset_floor != null);
+  eq(advancing.length, 1, "one atomic advance write");
+});
+
+test("lease-lost result updates neither delta cursor nor reset_floor", async () => {
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  // Seed row so we can force lease_id divergence at RPC time.
+  const routeDelta = (call: FetchCall) => (call.url.includes("/messages/delta")
+    ? jsonResponse(200, { value: [], "@odata.deltaLink": "https://graph.microsoft.com/final" })
+    : null);
+  // Force the RPC to see a mismatched lease_id by clearing the row's lease
+  // right after acquire, before the SUCCESS rpc lands. We simulate this by
+  // stealing the lease via an interceptor: after Graph fetch returns and
+  // the poll is about to release, clear row.lease_id.
+  const { fetchImpl } = makeFetchMock([
+    tokenRoute,
+    (call: FetchCall) => {
+      if (call.url.includes("/messages/delta")) {
+        const row = state.graphState.find((r) => r.mailbox === "mbx");
+        if (row) row.lease_id = "STOLEN-BY-CONCURRENT-ISOLATE";
+      }
+      return null;
+    },
+    routeDelta,
+  ]);
+  const result = await pollMailbox(FAKE_ENV, admin as never, "mbx", { graph: { fetchImpl }, attemptReplyHeaders: false });
+  eq(result.status, "skipped_lease_lost", "status");
+  const row = state.graphState.find((r) => r.mailbox === "mbx")!;
+  eq(row.delta_link, null, "cursor untouched");
+  eq(row.reset_floor ?? null, null, "reset_floor untouched");
+});
+
+// -----------------------------------------------------------------------
+// Phase 6 Checkpoint 1A — cutover-missing alert dedup
+// -----------------------------------------------------------------------
+
+test("cutover-missing: two consecutive polls insert exactly one operational alert", async () => {
+  const { admin, state } = makeFakeAdmin(newFakeState());
+  // Env WITHOUT any cutover (no per-mailbox JSON, no test default) →
+  // pollMailbox refuses AND inserts a critical alert on the first call.
+  const noCutoverEnv = {
+    ATLAS_GRAPH_INTAKE_ENABLED: "true",
+    ATLAS_GRAPH_TENANT_ID: "t",
+    ATLAS_GRAPH_CLIENT_ID: "c",
+    ATLAS_GRAPH_CLIENT_SECRET: "s",
+    ATLAS_GRAPH_MAILBOXES_JSON: JSON.stringify(["mbx"]),
+    // no ATLAS_GRAPH_TEST_DEFAULT_CUTOVER
+  } as unknown as Parameters<typeof pollMailbox>[0];
+  const { fetchImpl } = makeFetchMock([tokenRoute]);
+  const r1 = await pollMailbox(noCutoverEnv, admin as never, "mbx", { graph: { fetchImpl } });
+  eq(r1.status, "skipped_cutover_missing", "first poll refused");
+  eq(state.alerts.length, 1, "one alert inserted on first refusal");
+  eq(state.alerts[0].alert_type, "graph_intake_cutover_missing", "correct alert type");
+  const r2 = await pollMailbox(noCutoverEnv, admin as never, "mbx", { graph: { fetchImpl } });
+  eq(r2.status, "skipped_cutover_missing", "second poll refused");
+  eq(state.alerts.length, 1, "still one alert — dedup held across the minute-cron");
 });
 
 // -----------------------------------------------------------------------

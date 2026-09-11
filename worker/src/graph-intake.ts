@@ -11,7 +11,12 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { graphIntakeEnabled, graphIntakeMailboxes, type Env } from "./config.js";
+import {
+  graphIntakeEnabled,
+  graphIntakeMailboxes,
+  resolveMailboxCutover,
+  type Env,
+} from "./config.js";
 import {
   acquireGraphToken,
   canonicalMessageId,
@@ -46,6 +51,81 @@ export const CIRCUIT_BREAKER_COOLDOWN_MS = 15 * 60_000;
  * resumes from it. See handleResumableEnd().
  */
 export const MAX_DELTA_PAGES_PER_POLL = 50;
+
+/**
+ * Phase 6 (Checkpoint 1A) — replay overlap subtracted from a completed
+ * round's poll-start time when advancing the durable reset floor.
+ *
+ * Rationale: after a fully-completed round, we're confident everything the
+ * previous initial-enumeration boundary captured has been persisted. On a
+ * later 410 reset we want to re-enumerate from just BEFORE that completion,
+ * not from Date.now() and not from the immutable configured cutover forever.
+ * 24 hours is a conservative overlap that gives Graph and Atlas ample room
+ * to reconcile straggler messages; DB idempotency (Rule 1 / Rule 2 uniques
+ * on graph_message_id and internet_message_id) absorbs any replayed rows.
+ */
+export const RESET_FLOOR_OVERLAP_MS = 24 * 60 * 60_000;
+
+/**
+ * Chronological max of two ISO-8601 UTC-equivalent timestamps.
+ *
+ * Compares parsed epoch milliseconds so representation differences that
+ * arise between the runtime and Postgres do not corrupt the ordering:
+ *
+ *   * "2026-09-20T06:00:00Z"          (bare second precision)
+ *   * "2026-09-20T06:00:00.000Z"      (millisecond precision, our own emit)
+ *   * "2026-09-20T06:00:00.500Z"      (millisecond precision, non-zero)
+ *   * "2026-09-20T06:00:00+00:00"     (offset form, common from timestamptz)
+ *
+ * All refer to the same UTC instant when the offset is zero; a naive
+ * lexicographic compare would rank them incorrectly (`+00:00` sorts before
+ * `Z` in ASCII).
+ *
+ * NULL is treated as -infinity. Any invalid input on the b side is treated
+ * as -infinity too (so a corrupt persisted `reset_floor` cannot silently
+ * override a valid configured cutover); the caller should still validate.
+ * Returned value is normalised to millisecond-precision `...Z` form.
+ */
+export function maxIsoUtc(a: string | null, b: string | null): string | null {
+  const parse = (v: string | null): number | null => {
+    if (v == null) return null;
+    const ms = Date.parse(v);
+    return Number.isFinite(ms) ? ms : null;
+  };
+  const am = parse(a);
+  const bm = parse(b);
+  if (am == null && bm == null) return null;
+  if (am == null) return new Date(bm as number).toISOString();
+  if (bm == null) return new Date(am).toISOString();
+  return new Date(Math.max(am, bm)).toISOString();
+}
+
+/**
+ * True when `value` parses to a finite epoch-ms instant. NULL / undefined
+ * / unparseable → false. Used for fail-closed validation of a persisted
+ * `reset_floor` before it enters the effective-cutover calculation.
+ */
+export function isParseableInstant(value: string | null | undefined): boolean {
+  if (typeof value !== "string" || value.length === 0) return false;
+  return Number.isFinite(Date.parse(value));
+}
+
+/**
+ * Given the poll-start time of a fully-completed round and the immutable
+ * configured cutover, compute the value we would persist as `reset_floor`.
+ * Deterministic (pure function). Never derives anything from Date.now()
+ * itself — the caller decides what "poll-start time" is and passes it in.
+ *
+ * Guarantees:
+ *   * The advance never precedes the configured cutover (immutable floor).
+ *   * Overlap subtraction is a fixed constant, not clock-derived at reset time.
+ *   * Output is normalised millisecond-precision UTC ISO 8601.
+ */
+export function computeResetFloorAdvance(pollStartMs: number, configuredCutoverIso: string): string {
+  const proposedMs = pollStartMs - RESET_FLOOR_OVERLAP_MS;
+  const proposedIso = new Date(proposedMs).toISOString();
+  return maxIsoUtc(configuredCutoverIso, proposedIso)!;
+}
 
 // ---------------------------------------------------------------------------
 // Injection surfaces
@@ -85,6 +165,7 @@ export interface PollResult {
     | "skipped_breaker"
     | "skipped_throttled"
     | "skipped_lease_lost"
+    | "skipped_cutover_missing"
     | "failed";
   errorCode?: string;
 }
@@ -143,6 +224,12 @@ interface GraphStateRow {
   breaker_opened_at: string | null;
   last_failure_at: string | null;
   next_attempt_after: string | null;
+  /**
+   * Phase 6 durable reset floor (migration 0036). NULL when never advanced.
+   * Present here for type-safety on the state read; the acquire RPC does not
+   * return this column (it is read separately after lease acquisition).
+   */
+  reset_floor?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -686,9 +773,45 @@ async function finaliseNeedsReview(
  *   1. in_round_next_link (mid-round checkpoint from a previous partial tick)
  *   2. delta_link         (the durable cursor of the last completed round)
  *   3. initial delta URL  (first-ever poll for this mailbox)
+ *
+ * Phase 6: when the fallback path builds an initial URL the fixed forward-only
+ * cutover is included. Continuation URLs (nextLink / deltaLink) are unchanged.
  */
-function chooseStartCursor(row: GraphStateRow, mailbox: string): string {
-  return row.in_round_next_link ?? row.delta_link ?? initialDeltaUrl(mailbox);
+function chooseStartCursor(row: GraphStateRow, mailbox: string, effectiveCutoverIso: string): string {
+  return row.in_round_next_link ?? row.delta_link ?? initialDeltaUrl(mailbox, effectiveCutoverIso);
+}
+
+/**
+ * Read the durable reset_floor for a mailbox (migration 0036).
+ *
+ * FAIL-CLOSED: any DB error (missing column when 0036 is not applied, RLS
+ * refusal, transport failure) is surfaced to the caller as a classified
+ * failure. Returning null on error would silently degrade to the immutable
+ * configured cutover — but past the ~5,000-message filtered-delta ceiling
+ * that would be unsafe. The caller MUST release its lease and refuse to
+ * poll on `ok: false`.
+ *
+ * A malformed persisted value (non-string, unparseable timestamp) is also
+ * treated as a fail-closed condition — never silently ignored.
+ */
+type ResetFloorRead =
+  | { ok: true; floor: string | null }
+  | { ok: false; reason: "read_error" | "malformed_persisted_value" };
+
+async function readResetFloor(admin: SupabaseClient, mailbox: string): Promise<ResetFloorRead> {
+  const { data, error } = await admin
+    .from("atlas_intake_graph_state")
+    .select("reset_floor")
+    .eq("mailbox", mailbox)
+    .limit(1)
+    .maybeSingle();
+  if (error) return { ok: false, reason: "read_error" };
+  const rawValue = (data as { reset_floor?: string | null } | null)?.reset_floor ?? null;
+  if (rawValue == null) return { ok: true, floor: null };
+  if (typeof rawValue !== "string" || !isParseableInstant(rawValue)) {
+    return { ok: false, reason: "malformed_persisted_value" };
+  }
+  return { ok: true, floor: rawValue };
 }
 
 export async function pollMailbox(
@@ -710,13 +833,116 @@ export async function pollMailbox(
     status: "failed",
   };
 
-  const acquired = await acquireMailboxLease(admin, mailbox, nowFn(), deps);
+  // Phase 6 forward-only cutover — resolved BEFORE any Graph traffic. A
+  // missing / malformed cutover in production is a hard stop: no lease, no
+  // token, no Graph request. Best-effort misconfiguration alert so operators
+  // notice without needing a runtime error to escape the scheduled handler.
+  const cutoverLookup = resolveMailboxCutover(env, mailbox);
+  if (!cutoverLookup.ok) {
+    const code = `cutover_${cutoverLookup.reason}`;
+    const mailboxHash = await safeHash(mailbox);
+    logIntakeError({ code, mailboxHash });
+    // Dedup: never spawn a new critical alert every cron minute. Only insert
+    // if there is no existing open/acknowledged alert of this type for this
+    // mailbox hash. Same pattern the runGraphIntakeCycle mailbox-list-empty
+    // guard uses for graph_intake_misconfigured.
+    try {
+      const { data: existing } = await admin
+        .from("atlas_operational_alerts")
+        .select("id")
+        .eq("alert_type", "graph_intake_cutover_missing")
+        .eq("metadata->>mailbox_hash", mailboxHash)
+        .in("status", ["open", "acknowledged"])
+        .limit(1)
+        .maybeSingle();
+      if (!existing?.id) {
+        await admin.from("atlas_operational_alerts").insert(
+          buildAlert({
+            alertType: "graph_intake_cutover_missing",
+            severity: "critical",
+            title: "Graph intake cutover missing or malformed",
+            message:
+              "ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON is missing an entry (or has a malformed value) for a configured mailbox. Polling is refused until this is corrected.",
+            metadata: { mailbox_hash: mailboxHash, reason: cutoverLookup.reason },
+          }),
+        ).then(() => undefined, () => undefined);
+      }
+    } catch {
+      /* alert insertion failure never blocks scheduled() */
+    }
+    result.status = "skipped_cutover_missing";
+    result.errorCode = code;
+    return result;
+  }
+  const cutoverIso = cutoverLookup.cutoverIso;
+
+  // Poll-start time captured ONCE, used only for the reset-floor advance path
+  // (never as a reset boundary itself — see computeResetFloorAdvance and
+  // migration 0036 header).
+  const pollStartMs = nowFn();
+
+  const acquired = await acquireMailboxLease(admin, mailbox, pollStartMs, deps);
   if (acquired.kind === "locked") { result.status = "skipped_locked"; return result; }
   if (acquired.kind === "throttled") { result.status = "skipped_throttled"; return result; }
   if (acquired.kind === "breaker_open") { result.status = "skipped_breaker"; return result; }
   const lease = acquired.row!;
   const leaseId = acquired.leaseId!;
   const mailboxHash = await safeHash(mailbox);
+
+  // Phase 6 (Checkpoint 1B): read the durable reset_floor BEFORE Graph token
+  // acquisition. FAIL CLOSED on any Supabase error, missing 0036 (column
+  // absent), or malformed persisted value. A degraded read must NEVER cause
+  // a fallback to the immutable configured cutover alone — past the ~5,000-
+  // message filtered-delta ceiling that would silently break enumeration.
+  // Release the acquired mailbox lease safely so a subsequent tick can retry
+  // once 0036 / DB access is fixed. No Graph token is acquired. No Graph
+  // request is issued. A stable classified error code + operational alert
+  // is surfaced.
+  const floorRead = await readResetFloor(admin, mailbox);
+  if (!floorRead.ok) {
+    const code = `reset_floor_${floorRead.reason}`;
+    logIntakeError({ code, mailboxHash });
+    // Safe lease release: no state advance, no cursor mutation, no audit.
+    // Existing releaseLease() pathway is used with no changes so the state
+    // returns to the pre-poll condition and consecutive_failures increments
+    // by 1 like any other failure classification.
+    await releaseLease(admin, mailbox, leaseId, {
+      lastError: code,
+      consecutiveFailures: (lease.consecutive_failures ?? 0) + 1,
+      lastFailureAt: new Date(nowFn()).toISOString(),
+    }, {});
+    // Dedup operational alert by mailbox_hash so a persistent schema issue
+    // does not spawn a critical alert every cron minute. Same pattern as
+    // graph_intake_cutover_missing.
+    try {
+      const { data: existing } = await admin
+        .from("atlas_operational_alerts")
+        .select("id")
+        .eq("alert_type", "graph_intake_reset_floor_unavailable")
+        .eq("metadata->>mailbox_hash", mailboxHash)
+        .in("status", ["open", "acknowledged"])
+        .limit(1)
+        .maybeSingle();
+      if (!existing?.id) {
+        await admin.from("atlas_operational_alerts").insert(
+          buildAlert({
+            alertType: "graph_intake_reset_floor_unavailable",
+            severity: "critical",
+            title: "Graph intake reset floor unavailable",
+            message:
+              "Atlas could not read the Phase 6 reset_floor for a configured mailbox (missing migration 0036, RLS refusal, or malformed persisted value). Polling is refused until this is corrected.",
+            metadata: { mailbox_hash: mailboxHash, reason: floorRead.reason },
+          }),
+        ).then(() => undefined, () => undefined);
+      }
+    } catch {
+      /* alert insertion failure never blocks scheduled() */
+    }
+    result.status = "failed";
+    result.errorCode = code;
+    return result;
+  }
+  const persistedResetFloor = floorRead.floor;
 
   let token: GraphAccessToken;
   try {
@@ -728,7 +954,10 @@ export async function pollMailbox(
     return result;
   }
 
-  let cursor: string | null = chooseStartCursor(lease, mailbox);
+  // Phase 6 effective cutover = max(configured_cutover, persisted_reset_floor).
+  const effectiveCutoverIso = maxIsoUtc(cutoverIso, persistedResetFloor) ?? cutoverIso;
+
+  let cursor: string | null = chooseStartCursor(lease, mailbox, effectiveCutoverIso);
   let finalDeltaLink: string | null = null;
   let pageBudgetExhausted = false;
   let lastNextLink: string | null = null;
@@ -753,7 +982,12 @@ export async function pollMailbox(
             });
           }
           deltaResetAttempted = true;
-          cursor = initialDeltaUrl(mailbox);
+          // Phase 6 (Checkpoint 1A): reset uses the effective cutover, which
+          // is max(configured_cutover, persisted_reset_floor). The floor is a
+          // durably-persisted value from a prior fully-completed round; it is
+          // NEVER derived from Date.now() at reset time. The configured
+          // cutover remains the immutable earliest boundary.
+          cursor = initialDeltaUrl(mailbox, effectiveCutoverIso);
           continue;
         }
         throw err;
@@ -796,15 +1030,19 @@ export async function pollMailbox(
     });
 
     if (finalDeltaLink) {
-      // Full round complete. Fenced RPC atomically advances the durable
-      // cursor, clears failure/breaker/throttle state, AND writes the
-      // graph_poll_success audit in one transaction. A lease-lost result
-      // mutates nothing.
+      // Full round complete. Phase 6 (Checkpoint 1B) atomic RPC commits the
+      // durable cursor, clears failure/breaker/throttle state, writes the
+      // graph_poll_success audit AND monotonically advances reset_floor
+      // in ONE Postgres transaction. A lease-lost result mutates nothing.
+      // A cursor/floor split-brain window is not reachable.
+      const advanceIso = computeResetFloorAdvance(pollStartMs, cutoverIso);
       const ok = await releaseLeaseSuccess(admin, mailbox, leaseId, {
         deltaLink: finalDeltaLink,
         inRoundNextLink: null,
         lastSuccessAt: nowIso,
         auditMetadata: buildSuccessMetadata(false),
+        newResetFloor: advanceIso,
+        resetFloorProvided: true,
       });
       if (!ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
       result.status = "ok";
@@ -845,6 +1083,12 @@ export async function pollMailbox(
  * Fenced success-completion RPC wrapper. Returns true iff the transaction
  * committed under the caller's lease. On a lost fence the DB state is
  * untouched — the caller must not report a false poll success.
+ *
+ * Phase 6 (Checkpoint 1B): callers pass an optional reset_floor advance
+ * that participates in the SAME Postgres transaction as the delta cursor
+ * commit and the graph_poll_success audit. A cursor/floor split-brain
+ * window is not reachable. When resetFloorProvided is false (resumable /
+ * empty rounds) the persisted reset_floor is left unchanged.
  */
 async function releaseLeaseSuccess(
   admin: SupabaseClient,
@@ -855,9 +1099,11 @@ async function releaseLeaseSuccess(
     inRoundNextLink?: string | null;
     lastSuccessAt?: string | null;
     auditMetadata: Record<string, unknown>;
+    newResetFloor?: string | null;
+    resetFloorProvided?: boolean;
   },
 ): Promise<boolean> {
-  const { data, error } = await admin.rpc("atlas_intake_release_lease_success", {
+  const { data, error } = await admin.rpc("atlas_intake_release_lease_success_with_floor", {
     p_mailbox: mailbox,
     p_expected_lease_id: leaseId,
     p_delta_link: update.deltaLink ?? null,
@@ -866,7 +1112,12 @@ async function releaseLeaseSuccess(
     p_in_round_provided: update.inRoundNextLink !== undefined,
     p_last_success_at: update.lastSuccessAt ?? null,
     p_audit_metadata: update.auditMetadata,
+    p_new_reset_floor: update.newResetFloor ?? null,
+    p_reset_floor_provided: Boolean(update.resetFloorProvided),
   });
+  // A failing atomic RPC MUST NEVER be reported as poll success. Preserve
+  // the pre-existing IntakeDbError contract so the outer catch classifies
+  // the run correctly and records a failure metric.
   if (error) throw new IntakeDbError("intake_release_success_failed");
   const row = (Array.isArray(data) ? data[0] : data) as { ok?: boolean } | undefined;
   return Boolean(row?.ok);

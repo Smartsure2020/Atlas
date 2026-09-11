@@ -15,6 +15,12 @@ ATLAS_EMAIL_MODE = "template"
 ATLAS_SHADOW_SAMPLE_PERCENT = "0"
 ATLAS_LEGACY_FALLBACK_DISABLED = "false"
 ATLAS_STRICT_ACCESS_SCOPING = "true"
+# Phase 6 — Graph attachment processing kill-switch (LEVEL 2). Staging is a
+# deployed environment and defaults CLOSED in code (graphJobProcessingEnabled).
+# Do NOT declare it as a plaintext var here; the operational binding is the
+# single source of truth. Set / clear it via:
+#   wrangler versions secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env staging
+# and activate the new Worker version deliberately.
 
 [[queues.producers]]
 binding = "ATLAS_SHADOW_QUEUE"
