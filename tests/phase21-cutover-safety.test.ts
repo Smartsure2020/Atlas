@@ -30,6 +30,7 @@ import { scanStorageObject } from "../worker/src/malware-scan.js";
 import {
   RESET_FLOOR_OVERLAP_MS,
   computeResetFloorAdvance,
+  isParseableInstant,
   maxIsoUtc,
 } from "../worker/src/graph-intake.js";
 
@@ -376,20 +377,63 @@ test("scanStorageObject: development_bypass never activates in production", asyn
 // Reset-floor advance logic (Checkpoint 1A)
 // ---------------------------------------------------------------------------
 
-test("maxIsoUtc: null-safe and string-comparable for strict UTC ISO", () => {
+test("maxIsoUtc: null-safe and chronologically compares mixed representations", () => {
   eq(maxIsoUtc(null, null), null, "both null");
-  eq(maxIsoUtc("2026-09-20T06:00:00.000Z", null), "2026-09-20T06:00:00.000Z", "b null");
-  eq(maxIsoUtc(null, "2026-09-20T06:00:00.000Z"), "2026-09-20T06:00:00.000Z", "a null");
+  // Same instant, mixed representations. All four are 2026-09-20T06:00:00Z.
   eq(
-    maxIsoUtc("2026-09-20T06:00:00.000Z", "2026-10-01T00:00:00.000Z"),
-    "2026-10-01T00:00:00.000Z",
-    "later wins",
+    maxIsoUtc("2026-09-20T06:00:00Z", "2026-09-20T06:00:00.000Z"),
+    "2026-09-20T06:00:00.000Z",
+    "second-precision Z vs ms-precision Z — same instant, normalised output",
   );
   eq(
-    maxIsoUtc("2026-10-01T00:00:00.000Z", "2026-09-20T06:00:00.000Z"),
-    "2026-10-01T00:00:00.000Z",
-    "later wins (reversed)",
+    maxIsoUtc("2026-09-20T06:00:00.000Z", "2026-09-20T06:00:00+00:00"),
+    "2026-09-20T06:00:00.000Z",
+    "ms-Z vs +00:00 offset — same instant, normalised output",
   );
+  // Non-zero fractional seconds.
+  eq(
+    maxIsoUtc("2026-09-20T06:00:00.500Z", "2026-09-20T06:00:00.000Z"),
+    "2026-09-20T06:00:00.500Z",
+    "500 ms wins over 0 ms same second",
+  );
+  // Later date with +00:00 offset MUST beat an earlier strict-Z cutover —
+  // naive lexicographic comparison would sort '+' (ASCII 0x2B) before 'Z'
+  // (0x5A) and pick the earlier one; chronological compare picks the later.
+  eq(
+    maxIsoUtc("2026-09-20T06:00:00Z", "2026-10-01T00:00:00+00:00"),
+    "2026-10-01T00:00:00.000Z",
+    "later +00:00 beats earlier Z",
+  );
+  // Reversed argument order.
+  eq(
+    maxIsoUtc("2026-10-01T00:00:00+00:00", "2026-09-20T06:00:00Z"),
+    "2026-10-01T00:00:00.000Z",
+    "reversed order still picks the later instant",
+  );
+  // NULL half — returns the other, normalised.
+  eq(
+    maxIsoUtc("2026-09-20T06:00:00Z", null),
+    "2026-09-20T06:00:00.000Z",
+    "b null → a normalised",
+  );
+  // Corrupt b treated as -infinity so a valid a wins (fail-closed for the
+  // caller: readResetFloor still rejects corrupt persisted values before
+  // they reach maxIsoUtc, so this is defence in depth).
+  eq(
+    maxIsoUtc("2026-09-20T06:00:00Z", "not-a-timestamp"),
+    "2026-09-20T06:00:00.000Z",
+    "corrupt b treated as -infinity",
+  );
+});
+
+test("isParseableInstant: rejects NULL / empty / unparseable", () => {
+  assert(isParseableInstant("2026-09-20T06:00:00.000Z"), "ms Z");
+  assert(isParseableInstant("2026-09-20T06:00:00Z"), "sec Z");
+  assert(isParseableInstant("2026-09-20T06:00:00+00:00"), "offset");
+  assert(!isParseableInstant(""), "empty");
+  assert(!isParseableInstant(null), "null");
+  assert(!isParseableInstant(undefined), "undefined");
+  assert(!isParseableInstant("not-a-timestamp"), "garbage");
 });
 
 test("computeResetFloorAdvance: subtracts fixed 24h overlap and clamps to configured cutover", () => {
@@ -452,6 +496,111 @@ test("continuation URLs (nextLink/deltaLink) are opaque — no $filter rewriting
   // continuation URL. initialDeltaUrl is the ONLY producer of $filter, and it
   // takes a mailbox + optional cutover — never an existing URL.
   assert(!opaque.includes("$filter"), "no filter on Graph-issued continuation");
+});
+
+// ---------------------------------------------------------------------------
+// Queue-starvation regression (Checkpoint 1B §2) — LEVEL 2 excludes at the DB
+// query stage BEFORE limit, so non-Graph jobs are not starved by an older
+// backlog of held Graph jobs.
+// ---------------------------------------------------------------------------
+
+test("LEVEL 2 off: selectClaimableJobs filters graph_attachment_* at query stage, non-Graph jobs still selected", async () => {
+  const { selectClaimableJobs, LEVEL2_EXCLUDED_JOB_TYPES } = await import(
+    "../worker/src/phase4-queue-selector.js"
+  );
+
+  interface FakeJob { id: string; job_type: string; created_at: string; }
+
+  // 5 older held graph_attachment_* jobs + 3 newer non-graph jobs.
+  const allJobs: FakeJob[] = [
+    { id: "g1", job_type: "graph_attachment_discovery", created_at: "2026-01-01T00:00:00Z" },
+    { id: "g2", job_type: "graph_attachment_ingest",    created_at: "2026-01-02T00:00:00Z" },
+    { id: "g3", job_type: "graph_attachment_discovery", created_at: "2026-01-03T00:00:00Z" },
+    { id: "g4", job_type: "graph_attachment_ingest",    created_at: "2026-01-04T00:00:00Z" },
+    { id: "g5", job_type: "graph_attachment_discovery", created_at: "2026-01-05T00:00:00Z" },
+    { id: "m1", job_type: "malware_scan",               created_at: "2026-02-01T00:00:00Z" },
+    { id: "e1", job_type: "extraction",                 created_at: "2026-02-02T00:00:00Z" },
+    { id: "r1", job_type: "recommendation",             created_at: "2026-02-03T00:00:00Z" },
+  ];
+
+  interface Recorded { table: string; notFilter: string | null; }
+  const recorded: Recorded[] = [];
+
+  interface FakeQueryShape {
+    eq: (f: string, v: unknown) => FakeQueryShape;
+    not: (f: string, op: string, v: string) => FakeQueryShape;
+    lte: (f: string, v: unknown) => FakeQueryShape;
+    order: (f: string, o?: { ascending?: boolean }) => FakeQueryShape;
+    limit: (n: number) => Promise<{ data: FakeJob[]; error: null }>;
+  }
+  const makeQuery = (rows: FakeJob[]): FakeQueryShape => {
+    let filtered = rows;
+    let statusFilter: string | null = null;
+    const rec: Recorded = { table: "atlas_jobs", notFilter: null };
+    recorded.push(rec);
+    const q: FakeQueryShape = {
+      eq(field: string, value: unknown) {
+        if (field === "status") {
+          statusFilter = String(value);
+          // The seed is conceptually 'queued' — the retryable ('failed')
+          // query returns nothing so both filtered sets don't double-count.
+          if (statusFilter !== "queued") filtered = [];
+        }
+        return q;
+      },
+      not(_f: string, _op: string, v: string) { rec.notFilter = v; filtered = filtered.filter((j) => !v.includes(j.job_type)); return q; },
+      lte(_f: string, _v: unknown) { return q; },
+      order(_f: string, _o?: { ascending?: boolean }) { return q; },
+      limit(n: number) { return Promise.resolve({ data: filtered.slice(0, n), error: null as null }); },
+    };
+    return q;
+  };
+
+  const fakeAdmin = {
+    from(_table: string) {
+      return { select: (_c: string) => makeQuery(allJobs) };
+    },
+  } as unknown as Parameters<typeof selectClaimableJobs>[0];
+
+  // Env: staging (deployed env, LEVEL 2 fails closed unless flag = 'true').
+  const env = { ATLAS_ENV: "staging", ATLAS_WORKER_BATCH_SIZE: "5" } as unknown as Env;
+
+  const claimable = await selectClaimableJobs(fakeAdmin, env, "2026-03-01T00:00:00Z", 5);
+  const types = claimable.map((j) => j.job_type);
+  assert(!types.includes("graph_attachment_discovery"), "no discovery jobs surfaced");
+  assert(!types.includes("graph_attachment_ingest"), "no ingest jobs surfaced");
+  assert(types.includes("malware_scan"), "malware_scan surfaced");
+  assert(types.includes("extraction"), "extraction surfaced");
+  assert(types.includes("recommendation"), "recommendation surfaced");
+  eq(claimable.length, 3, "three non-graph jobs surfaced within batch of 5");
+  // Confirm the .not filter was applied at the DB layer.
+  eq(recorded[0].notFilter, LEVEL2_EXCLUDED_JOB_TYPES, "queued query used .not filter");
+  eq(recorded[1].notFilter, LEVEL2_EXCLUDED_JOB_TYPES, "retryable query used .not filter");
+});
+
+test("LEVEL 2 on: selectClaimableJobs does NOT apply the Graph exclusion filter", async () => {
+  const { selectClaimableJobs, LEVEL2_EXCLUDED_JOB_TYPES } = await import(
+    "../worker/src/phase4-queue-selector.js"
+  );
+  interface FakeJob { id: string; job_type: string; }
+  const jobs: FakeJob[] = [
+    { id: "g1", job_type: "graph_attachment_discovery" },
+    { id: "m1", job_type: "malware_scan" },
+  ];
+  let notCalled = false;
+  const q = {
+    eq: () => q,
+    not: () => { notCalled = true; return q; },
+    lte: () => q,
+    order: () => q,
+    limit: () => Promise.resolve({ data: jobs, error: null as null }),
+  };
+  const fakeAdmin = { from: () => ({ select: () => q }) } as unknown as Parameters<typeof selectClaimableJobs>[0];
+  const env = { ATLAS_ENV: "production", ATLAS_GRAPH_JOB_PROCESSING_ENABLED: "true", ATLAS_WORKER_BATCH_SIZE: "5" } as unknown as Env;
+  const claimable = await selectClaimableJobs(fakeAdmin, env, "2026-03-01T00:00:00Z", 5);
+  assert(!notCalled, ".not filter not applied when LEVEL 2 is on");
+  eq(claimable.length, 4, "both queries returned the seed; concat + slice(5) → 4 rows");
+  assert(LEVEL2_EXCLUDED_JOB_TYPES.includes("graph_attachment"), "constant contains the graph types");
 });
 
 // ---------------------------------------------------------------------------

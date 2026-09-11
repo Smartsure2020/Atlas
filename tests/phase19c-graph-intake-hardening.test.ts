@@ -191,7 +191,10 @@ function makeFakeAdmin(state: FakeState) {
       if (args.p_next_attempt_provided) row.next_attempt_after = (args.p_next_attempt_after as string | null) ?? null;
       return { data: [{ mailbox: row.mailbox }], error: null };
     }
-    if (name === "atlas_intake_release_lease_success") {
+    if (
+      name === "atlas_intake_release_lease_success" ||
+      name === "atlas_intake_release_lease_success_with_floor"
+    ) {
       const row = state.graphState.find((r) => r.mailbox === args.p_mailbox);
       if (!row || row.lease_id !== args.p_expected_lease_id) return { data: [{ ok: false, reason: "lease_lost" }], error: null };
       row.poll_in_flight_since = null;
@@ -203,6 +206,14 @@ function makeFakeAdmin(state: FakeState) {
       if (args.p_last_success_at != null) row.last_success_at = args.p_last_success_at as string;
       row.breaker_opened_at = null;
       row.next_attempt_after = null;
+      // Phase 6 Checkpoint 1B — atomic floor advance (only when provided).
+      if (name === "atlas_intake_release_lease_success_with_floor" && args.p_reset_floor_provided) {
+        const proposed = (args.p_new_reset_floor as string | null) ?? null;
+        if (proposed) {
+          const current = (row.reset_floor as string | null) ?? null;
+          if (current == null || current < proposed) row.reset_floor = proposed;
+        }
+      }
       state.audit.push({ id: nextUuid(), submission_id: null, action: "graph_poll_success", actor: null, metadata_json: args.p_audit_metadata });
       return { data: [{ ok: true, reason: null }], error: null };
     }
@@ -668,7 +679,7 @@ test("graph_poll_success audit failure once → replay next tick succeeds and cu
   const state = newFakeState();
   const { rpc } = makeFakeAdmin(state);
   const admin: unknown = { from() { return { select: () => ({ eq: () => ({ limit: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) }), insert: () => ({ then: (cb: (v: unknown) => unknown) => Promise.resolve(cb({ data: null, error: null })) }) }; }, rpc };
-  state.failNextRpc = { name: "atlas_intake_release_lease_success", code: "audit_broken" };
+  state.failNextRpc = { name: "atlas_intake_release_lease_success_with_floor", code: "audit_broken" };
   const routeDelta = (c: FetchCall) => c.url.startsWith("https://graph.microsoft.com/") && !c.url.includes("/oauth2/")
     ? jsonResponse(200, { value: [], "@odata.deltaLink": "https://graph.microsoft.com/end" })
     : null;

@@ -116,10 +116,13 @@ ATLAS_WORKER_BATCH_SIZE = "5"
 ATLAS_STUCK_JOB_MINUTES = "20"
 ATLAS_ALERT_ESCALATE_MINUTES = "30"
 # Phase 6 — Graph attachment processing kill-switch (LEVEL 2). Production
-# defaults CLOSED. Flip to "true" only when Phase 5B attachment ingestion is
-# authorised to run in production; separate from ATLAS_GRAPH_INTAKE_ENABLED
-# (LEVEL 1) so operators can drain existing work or stop all Graph traffic.
-ATLAS_GRAPH_JOB_PROCESSING_ENABLED = "false"
+# defaults CLOSED in code (graphJobProcessingEnabled). Do NOT declare it as
+# a plaintext var here; the operational binding is the SINGLE SOURCE OF
+# TRUTH. Set / clear it via:
+#   wrangler versions secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env production
+# and activate the new Worker version deliberately (see cutover runbook §7).
+# Emergency LEVEL 2 kill (immediate deploy) uses:
+#   wrangler secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env production   # "false"
 # Phase 6 — Graph intake is OFF until the canary gate is authorised.
 # ATLAS_GRAPH_INTAKE_ENABLED is intentionally NOT set here.
 #

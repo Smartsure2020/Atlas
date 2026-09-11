@@ -1,5 +1,5 @@
 import { adminClient, audit, type AtlasUser } from "./auth";
-import { graphJobProcessingEnabled, type Env } from "./config";
+import type { Env } from "./config";
 import { scanStorageObject } from "./malware-scan";
 import {
   buildAlert,
@@ -26,8 +26,13 @@ import {
   INSURER_DOCS_BUCKET,
   findActiveStorageReference,
 } from "./cleanup-reference";
+import {
+  LEVEL2_EXCLUDED_JOB_TYPES,
+  selectClaimableJobs,
+} from "./phase4-queue-selector";
 export { findActiveStorageReference } from "./cleanup-reference";
 export type { StorageReferenceCheck } from "./cleanup-reference";
+export { LEVEL2_EXCLUDED_JOB_TYPES, selectClaimableJobs } from "./phase4-queue-selector";
 
 type JobRow = {
   id: string;
@@ -298,19 +303,16 @@ async function processQueuedJobs(env: Env) {
   const admin = adminClient(env);
   await recoverStuckJobs(env, admin);
   const now = new Date().toISOString();
-  const [queued, retryable] = await Promise.all([
-    admin.from("atlas_jobs").select("*").eq("status", "queued").eq("cancellation_requested", false).order("created_at", { ascending: true }).limit(batchSize(env)),
-    admin.from("atlas_jobs").select("*").eq("status", "failed").eq("cancellation_requested", false).lte("next_retry_at", now).order("next_retry_at", { ascending: true }).limit(batchSize(env)),
-  ]);
-  const candidates = [...((queued.data ?? []) as JobRow[]), ...((retryable.data ?? []) as JobRow[])].slice(0, batchSize(env));
-  // Phase 6 LEVEL 2 kill-switch — when Graph attachment processing is
-  // administratively paused, skip claim for graph_attachment_* candidates
-  // entirely. Their queue state stays intact; retry budget is not consumed.
-  const graphProcessingOn = graphJobProcessingEnabled(env);
+  // Cast to the narrow QueueSelectorAdmin surface — the real Supabase client
+  // satisfies it structurally but the deep generic type collapses when
+  // TypeScript tries to match it against the loose helper contract.
+  const candidates = (await selectClaimableJobs<JobRow>(
+    admin as unknown as import("./phase4-queue-selector").QueueSelectorAdmin,
+    env,
+    now,
+    batchSize(env),
+  )) as JobRow[];
   for (const candidate of candidates) {
-    if (!graphProcessingOn && (candidate.job_type === "graph_attachment_discovery" || candidate.job_type === "graph_attachment_ingest")) {
-      continue;
-    }
     const claimed = await claimJob(admin, candidate);
     if (!claimed) continue;
     try {

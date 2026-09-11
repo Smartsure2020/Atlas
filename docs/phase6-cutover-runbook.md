@@ -25,45 +25,109 @@ verification and a rollback; do not advance without both.
 
 ## 1. Production migration inventory
 
-Run against production Supabase read-only:
+Confirm every Phase 5A/5B/6 migration is applied to production BEFORE
+enabling anything.
 
-```sql
-select version from public.supabase_migrations order by version desc;
+### Read-only inventory (preferred: Supabase CLI, deliberately linked)
+
+```
+supabase link --project-ref algenlnxagpxzsgaworz
+supabase migration list
 ```
 
-Confirm 0028, 0029, 0030, 0031, 0032, 0033, 0034, 0035 are all present.
+Confirm the remote column lists 0028, 0029, 0030, 0031, 0032, 0033,
+0034, 0035, 0036. `supabase migration list` reads the CLI's own remote
+history table (`supabase_migrations.schema_migrations`) — the correct
+source of truth. Do NOT rely on ad-hoc `select version from
+public.supabase_migrations`; that table name is not part of the
+supported inventory contract.
 
-### If any of 0028–0035 are missing
+### Read-only inventory (equivalent SQL, if the CLI is unavailable)
+
+```sql
+select version
+  from supabase_migrations.schema_migrations
+ order by version;
+```
+
+Confirm 0028–0036 all present.
+
+### If any of 0028–0036 are missing
 
 Apply the missing files in numeric order, in ONE maintenance window,
-using the same Supabase migration tooling the team normally uses.
-No manual SQL. No ad-hoc DDL.
+using `supabase db push` (or the team's normal Supabase migration
+tooling). No manual SQL. No ad-hoc DDL. No mutation of migration
+history — forward-only.
 
-After each migration:
+### Migration-aware post-apply validation
+
+Every check below runs read-only. Skip any check whose migration is
+not yet applied.
+
+**After 0028 (intake schema baseline):**
 
 ```sql
 select count(*) from public.atlas_submission_intake_messages;
 select count(*) from public.atlas_intake_graph_state;
-select count(*) from public.atlas_intake_graph_attachments;
 ```
 
-Every one must return `0`. A non-zero count on the intake tables at this
-point means someone has already been writing to them — STOP and
-investigate before continuing.
+Both must return `0`. Non-zero would mean someone has written to the
+intake tables before Graph is enabled — STOP and investigate.
 
-Also confirm RLS is enabled and policies are attached (spot check):
+Confirm RLS is enabled:
 
 ```sql
 select tablename, rowsecurity
   from pg_tables
-  where tablename in (
-    'atlas_submission_intake_messages',
-    'atlas_intake_graph_state',
-    'atlas_intake_graph_attachments'
-  );
+ where schemaname = 'public'
+   and tablename in ('atlas_submission_intake_messages',
+                     'atlas_intake_graph_state');
 ```
 
-All three must show `rowsecurity = true`.
+Both rows must show `rowsecurity = true`.
+
+**After 0032 (Phase 5B attachment schema):**
+
+```sql
+select count(*) from public.atlas_intake_graph_attachments;
+
+select tablename, rowsecurity
+  from pg_tables
+ where schemaname = 'public'
+   and tablename = 'atlas_intake_graph_attachments';
+```
+
+Count = 0; `rowsecurity = true`.
+
+**After 0036 (Phase 6 reset floor):**
+
+```sql
+-- reset_floor column present on state row
+select column_name, data_type, is_nullable
+  from information_schema.columns
+ where table_schema = 'public'
+   and table_name   = 'atlas_intake_graph_state'
+   and column_name  = 'reset_floor';
+
+-- atomic success RPC present with expected signature
+select p.proname, pg_get_function_identity_arguments(p.oid) as args
+  from pg_proc p
+  join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public'
+   and p.proname = 'atlas_intake_release_lease_success_with_floor';
+
+-- service_role holds EXECUTE; public / authenticated / anon must NOT
+select r.rolname,
+       has_function_privilege(r.rolname,
+         'public.atlas_intake_release_lease_success_with_floor(text,uuid,text,boolean,text,boolean,timestamptz,jsonb,timestamptz,boolean)',
+         'EXECUTE') as can_exec
+  from pg_roles r
+ where r.rolname in ('service_role', 'authenticated', 'anon', 'public');
+```
+
+Expected: reset_floor column present as `timestamp with time zone`,
+nullable. The RPC row must be present exactly once. Only `service_role`
+returns `can_exec = true`; the others must be false.
 
 ### Rollback (migrations)
 
@@ -196,32 +260,54 @@ business day. This becomes the boundary Atlas never crosses backwards.
 
 ### Microsoft Graph 5,000-message filtered-delta consideration
 
-Microsoft Graph filtered `messages/delta` initial enumerations using
-`$filter=receivedDateTime ge …` are documented to return at most ~5,000
-messages before the caller is expected to switch to the unfiltered
-delta continuation. Atlas honours this in two ways:
+Microsoft Graph documents that applying `$filter` to `messages/delta`
+returns **at most ~5,000 messages total** for that filtered
+enumeration. `@odata.nextLink` continues **within** the filtered result
+set, but pagination does **not** raise the total ceiling. If the
+filter would match more than ~5,000 messages, results beyond the
+ceiling are not returned.
 
-1. **First sync** for a mailbox uses the configured cutover verbatim.
-   For a busy mailbox where >5,000 messages have accumulated since
-   that timestamp, the initial enumeration may not surface everything
-   in one page cycle. Atlas paginates safely via `@odata.nextLink` and
-   resumes across ticks via `in_round_next_link`; no data is lost, but
-   the round takes more than one tick to complete on that mailbox.
+Operational rule — the operator picks the cutover so that the number
+of Inbox messages received since that timestamp is comfortably below
+the ceiling. Conservative preflight before setting the secret:
 
-2. **Delta-token resets** (HTTP 410, `syncStateNotFound` /
-   `syncStateInvalid`) no longer replay from the original cutover
-   forever. Migration 0036 adds a durable per-mailbox `reset_floor`
-   that is monotonically advanced ONLY after a fully-completed delta
-   round to `poll_start_time - 24h` (never derived from `Date.now()`
-   at the reset itself, never advanced on `ok_resumable` partial
-   rounds). On a 410, Atlas restarts from
-   `max(configured_cutover, reset_floor)`. The configured cutover
-   remains the immutable earliest boundary; the floor never precedes
-   it. See `computeResetFloorAdvance` in `worker/src/graph-intake.ts`.
+```
+# Adjust <mailbox> and <cutover> to the intended values. Requires an
+# authenticated Graph session with Mail.Read on the mailbox.
+GET https://graph.microsoft.com/v1.0/users/<mailbox>/mailFolders/Inbox/messages/$count
+    ?$filter=receivedDateTime ge <cutover>
+```
 
-Pick the cutover accordingly. For a mailbox that carries substantial
-recent traffic, picking a cutover only a few days back keeps the very
-first enumeration within one comfortable working set.
+- Result ≤ ~3,000 → safe. Proceed to §7.
+- Result 3,000 – 5,000 → borderline. Prefer a later cutover with
+  operational headroom.
+- Result > 5,000 → STOP. Do NOT enable Graph for that mailbox with the
+  planned cutover; pick a later timestamp. Do NOT attempt to work
+  around the ceiling with historical backfill — Phase 6 policy is
+  forward-only.
+
+**Delta-token resets** (HTTP 410, `syncStateNotFound` /
+`syncStateInvalid`) do not replay from the original cutover forever.
+Migration 0036 adds a durable per-mailbox `reset_floor` that is
+monotonically advanced — atomically, in the same Postgres transaction
+as the delta cursor commit — after each fully-completed delta round to
+`poll_start_time - 24h`. It is never advanced on `ok_resumable`
+partial rounds, and is never derived from `Date.now()` at the reset
+itself. On a 410, Atlas restarts the initial URL from:
+
+```
+effective_reset_boundary = max(configured_cutover, reset_floor)
+```
+
+The configured cutover is immutable; the reset floor may advance only
+after a fully-committed complete round. The floor never precedes the
+configured cutover. See `computeResetFloorAdvance` and
+`readResetFloor` in `worker/src/graph-intake.ts`.
+
+If a subsequent 410 recovery window would still exceed the ~5,000-
+message ceiling after the floor has advanced, the operator should
+pause polling and reassess. The reset-floor design keeps the recovery
+window bounded but does not remove Microsoft's ceiling.
 
 ```
 wrangler secret put ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON --env production
@@ -244,29 +330,53 @@ Contract:
 
 ## 7. Enable Graph intake for the canary mailbox
 
-Set the remaining secrets (individually, one at a time so each write is
-confirmable):
+`wrangler secret put` creates a new Worker version AND deploys it
+immediately. Using it for INITIAL enablement would activate Graph
+piecewise — the first LEVEL 2 or LEVEL 1 secret write would deploy a
+half-configured Worker. Phase 6 initial enablement uses Cloudflare
+**versioned secrets** so all Graph configuration is staged on a new
+version and activated in a single deliberate step.
+
+### Stage every Graph secret on a new (non-active) version
 
 ```
-wrangler secret put ATLAS_GRAPH_TENANT_ID          --env production
-wrangler secret put ATLAS_GRAPH_CLIENT_ID          --env production
-wrangler secret put ATLAS_GRAPH_CLIENT_SECRET      --env production
-wrangler secret put ATLAS_GRAPH_MAILBOXES_JSON     --env production   # ["canary@yourdomain.co.za"]
+wrangler versions secret put ATLAS_GRAPH_TENANT_ID                  --env production
+wrangler versions secret put ATLAS_GRAPH_CLIENT_ID                  --env production
+wrangler versions secret put ATLAS_GRAPH_CLIENT_SECRET              --env production
+wrangler versions secret put ATLAS_GRAPH_MAILBOXES_JSON             --env production   # ["canary@yourdomain.co.za"]
+wrangler versions secret put ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON      --env production   # from §6
+wrangler versions secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED     --env production   # value: "true"
+wrangler versions secret put ATLAS_GRAPH_INTAKE_ENABLED             --env production   # value: "true"
 ```
 
-Turn LEVEL 2 attachment processing on (also a wrangler var/secret):
+Each `wrangler versions secret put` command uploads a secret to a new,
+staged Worker version — it does NOT redeploy the live version. The
+Cloudflare dashboard "Save Version → Deploy Version" workflow is
+equivalent for operators who prefer the UI. Confirm with:
 
 ```
-wrangler secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env production   # value: "true"
+wrangler versions list --env production
 ```
 
-Finally, turn LEVEL 1 intake on:
+The new version should show every ATLAS_GRAPH_* secret bound, alongside
+the previously-active version which has none of them.
+
+### Verify secret NAMES only
+
+Do not print or read secret values. Ensure the new version's bindings
+list contains all seven names above. Verify the cutover value shape by
+having the operator who set it re-confirm they used the exact JSON
+computed in §6 — Atlas does not surface secret values back.
+
+### One deliberate activation
 
 ```
-wrangler secret put ATLAS_GRAPH_INTAKE_ENABLED --env production   # value: "true"
+wrangler versions deploy --env production
 ```
 
-Redeploy so the new env takes effect: `wrangler deploy --env production`.
+Select the newly-staged version and confirm activation. This is the
+SINGLE moment at which Graph intake becomes live in production; every
+other command up to this point has been staging.
 
 Verification within the first 10 minutes:
 
@@ -323,9 +433,11 @@ Do this one mailbox at a time.
 Use when you want to stop new emails from being pulled in, but let the
 attachments already discovered for existing intakes finish processing.
 
+Emergency kill uses `wrangler secret put`, which deploys the change
+immediately — the desirable behaviour for a kill switch.
+
 ```
 wrangler secret put ATLAS_GRAPH_INTAKE_ENABLED --env production   # value: "false"
-# no redeploy required; the value is read live by graphIntakeEnabled()
 ```
 
 Expected behaviour:
@@ -347,21 +459,41 @@ new intake while letting existing work drain.
 
 ## Staging note — Phase 5B Graph-job processing is CLOSED by default
 
-Staging is a deployed environment. As of Checkpoint 1A,
-`graphJobProcessingEnabled` fails closed in both production AND staging:
-`ATLAS_GRAPH_JOB_PROCESSING_ENABLED` must be exactly `"true"` for
-attachment jobs to be claimed and processed. Any staging exercise of
-Phase 5B Graph-job processing must set the flag intentionally with
-`wrangler secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env staging`
-(value: `"true"`) and remove / flip back to `"false"` at the end of
-that test window. Development and test environments continue to
-default enabled so local test suites work unchanged.
+Staging is a deployed environment. `graphJobProcessingEnabled` fails
+closed in code for both production AND staging when the flag is unset
+or not exactly `"true"`. Any staging exercise of Phase 5B Graph-job
+processing must set the flag intentionally via versioned secret upload
+plus a deliberate version deploy (matching the production initial-
+cutover pattern in §7):
+
+```
+wrangler versions secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env staging   # value: "true"
+wrangler versions deploy --env staging
+```
+
+To end the staging test window (or as an emergency staging kill), use
+the immediate-deploy form:
+
+```
+wrangler secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env staging   # value: "false"
+```
+
+Development and test environments continue to default enabled so local
+test suites work unchanged.
+
+The flag is NOT declared as a plaintext `[vars]` entry in either
+`worker/wrangler.toml` or `worker/wrangler.staging.toml`. The
+operational binding (wrangler secret) is the single source of truth so
+there is no ambiguity about which value takes effect at runtime.
 
 ## LEVEL 2 — STOP ALL GRAPH TRAFFIC
 
 Use when Atlas must contact Graph zero times: an outage, a security
 incident, a token compromise, or when the operator needs the queue to
 freeze completely.
+
+Emergency kill uses `wrangler secret put`, which deploys each change
+immediately — the desirable behaviour for a kill switch.
 
 ```
 # 1. Stop new polling.
