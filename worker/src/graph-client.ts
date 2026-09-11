@@ -43,9 +43,16 @@ const GRAPH_HEADERS_URL_FN = (mailbox: string, messageId: string) =>
 // Phase 5B — metadata listing only. $select excludes `contentBytes` so this
 // call is bounded, and `@odata.type` is included in the response envelope
 // without needing to be listed here.
+//
+// `contentId` is deliberately NOT requested against the base
+// `/messages/{id}/attachments` collection: live Microsoft Graph rejects a
+// $select that includes `contentId` on that collection with HTTP 400. The
+// property only exists on the fileAttachment subtype, and requesting it
+// from the polymorphic base list is invalid — Atlas does not need it for
+// discovery-time classification.
 const GRAPH_ATTACHMENT_LIST_URL_FN = (mailbox: string, messageId: string) =>
   `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/attachments` +
-  `?$select=id,name,contentType,size,isInline,contentId`;
+  `?$select=id,name,contentType,size,isInline`;
 
 // Phase 5B — raw byte fetch. /$value returns unstructured octet-stream.
 const GRAPH_ATTACHMENT_VALUE_URL_FN = (
@@ -213,6 +220,10 @@ export function canonicalMessageId(raw: string | null | undefined): string | nul
 }
 
 function classifyGraphErrorCode(status: number): string {
+  // 400 must classify to a stable, non-retryable code. Retrying the same
+  // malformed request against Graph will simply fail identically and burn
+  // through the retry budget. See phase8-core NON_RETRYABLE_CODES.
+  if (status === 400) return "graph_bad_request";
   if (status === 401) return "graph_unauthorized";
   if (status === 403) return "graph_forbidden";
   if (status === 404) return "graph_not_found";
@@ -436,6 +447,12 @@ function parseMessageIdList(raw: string): string[] {
  * `attachmentType` is derived from `@odata.type` and normalised to the three
  * supported forms plus `unknown` for anything else. Bytes are NEVER present
  * here — the metadata list uses `$select` that excludes `contentBytes`.
+ *
+ * `contentId` is retained on the shape for schema compatibility with the
+ * atlas_intake_graph_attachments.content_id column but is ALWAYS `null` from
+ * the base collection projection — live Graph refuses `contentId` in
+ * `$select` on `/messages/{id}/attachments` (400). Discovery never fetches
+ * it, and downstream filtering does not require it.
  */
 export interface GraphAttachmentMetadata {
   id: string;
@@ -519,7 +536,8 @@ export async function listMessageAttachments(
         contentType?: string | null;
         size?: number | null;
         isInline?: boolean | null;
-        contentId?: string | null;
+        // contentId is NOT projected from the base attachments collection —
+        // even if Graph returned it we would ignore it here.
         "@odata.type"?: string;
       }>;
       "@odata.nextLink"?: string;
@@ -545,7 +563,9 @@ export async function listMessageAttachments(
         contentType: typeof row.contentType === "string" ? row.contentType : null,
         size: typeof row.size === "number" && Number.isFinite(row.size) ? row.size : null,
         isInline: row.isInline === true,
-        contentId: typeof row.contentId === "string" ? row.contentId : null,
+        // Always null from the base collection projection (see interface
+        // docs). Filtering does not depend on it.
+        contentId: null,
         attachmentType: normaliseAttachmentType(row["@odata.type"]),
       });
       if (out.length > ATTACHMENT_LIST_MAX_ROWS) {

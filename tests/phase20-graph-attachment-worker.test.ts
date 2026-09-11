@@ -703,6 +703,124 @@ test("discovery: 404 message-gone-before-discovery propagates as specific code a
   eq(state.intake.length, 1, "intake row remains");
 });
 
+// -----------------------------------------------------------------------
+// Live-Graph projection compatibility (Phase 5B remediation)
+// -----------------------------------------------------------------------
+
+test("discovery: attachment list URL never requests contentId or contentBytes", async () => {
+  const state = newState();
+  const storageCalls: StorageCall[] = [];
+  const admin = makeAdmin(state, storageCalls);
+  const { intakeId } = seedIntake(state);
+  let listUrl: string | null = null;
+  const listRoute = (c: FetchCall) => {
+    if (!/\/attachments\?\$select=/.test(c.url)) return null;
+    listUrl = c.url;
+    return jsonResponse(200, {
+      value: [{
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        id: "att-1", name: "policy.pdf", contentType: "application/pdf",
+        size: 42_000, isInline: false,
+      }],
+    });
+  };
+  const { fetchImpl } = makeFetchMock([tokenRoute, listRoute]);
+  await handleGraphAttachmentDiscoveryJob(
+    ENV, admin as never, { id: "disc-1", metadata: { intake_message_id: intakeId } }, { graph: { fetchImpl } },
+  );
+  assert(listUrl != null, "list URL was observed");
+  const selectRaw = new URL(listUrl!).searchParams.get("$select") ?? "";
+  const projected = selectRaw.split(",").map((s) => s.trim()).filter(Boolean);
+  assert(!projected.includes("contentId"), `contentId must NOT be projected — got $select=${selectRaw}`);
+  assert(!projected.includes("contentBytes"), `contentBytes must NOT be projected — got $select=${selectRaw}`);
+  for (const required of ["id", "name", "contentType", "size", "isInline"]) {
+    assert(projected.includes(required), `missing required projection: ${required} (got ${selectRaw})`);
+  }
+});
+
+test("discovery: fileAttachment WITHOUT contentId on the wire is accepted and normalised", async () => {
+  // Live Graph rejects `contentId` in $select on the base collection with a
+  // 400. This test proves the parser accepts the reduced payload shape
+  // (no contentId key) and still produces an eligible pending row.
+  const state = newState();
+  const storageCalls: StorageCall[] = [];
+  const admin = makeAdmin(state, storageCalls);
+  const { intakeId } = seedIntake(state);
+  const listRoute = (c: FetchCall) =>
+    /\/attachments\?\$select=/.test(c.url)
+      ? jsonResponse(200, {
+          value: [{
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            id: "att-1", name: "policy.pdf", contentType: "application/pdf",
+            size: 250_000, isInline: false,
+            // NOTE: contentId key deliberately absent from the payload.
+          }],
+        })
+      : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, listRoute]);
+  const result = await handleGraphAttachmentDiscoveryJob(
+    ENV, admin as never, { id: "disc-1", metadata: { intake_message_id: intakeId } }, { graph: { fetchImpl } },
+  );
+  eq(result.outcome, "discovery_complete", "outcome");
+  eq(state.attachments.length, 1, "one attachment row");
+  eq(state.attachments[0].state, "pending", "state (eligible)");
+  eq(state.attachments[0].content_id, null, "content_id null (unavailable from base projection)");
+  eq(state.jobs.length, 1, "one ingest job queued");
+});
+
+test("discovery: inline image without contentId is still deterministically skipped", async () => {
+  // Regression: filtering must not depend on contentId. A small inline
+  // image with no contentId should still be classified skipped, not queued.
+  const state = newState();
+  const storageCalls: StorageCall[] = [];
+  const admin = makeAdmin(state, storageCalls);
+  const { intakeId } = seedIntake(state);
+  const listRoute = (c: FetchCall) =>
+    /\/attachments\?\$select=/.test(c.url)
+      ? jsonResponse(200, {
+          value: [{
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            id: "sig-1", name: "sig.png", contentType: "image/png",
+            size: 8_000, isInline: true,
+          }],
+        })
+      : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, listRoute]);
+  await handleGraphAttachmentDiscoveryJob(
+    ENV, admin as never, { id: "disc-1", metadata: { intake_message_id: intakeId } }, { graph: { fetchImpl } },
+  );
+  eq(state.attachments.length, 1, "row created");
+  eq(state.attachments[0].state, "skipped", "skipped");
+  eq(state.jobs.length, 0, "no ingest job for inline image");
+});
+
+test("discovery: 400 from Graph classifies to graph_bad_request (non-retryable, no body leak)", async () => {
+  const state = newState();
+  const storageCalls: StorageCall[] = [];
+  const admin = makeAdmin(state, storageCalls);
+  const { intakeId } = seedIntake(state);
+  // Body carries the kind of guidance Microsoft returns for an invalid
+  // $select; the classifier must NOT propagate it upstream.
+  const listRoute = (c: FetchCall) =>
+    /\/attachments/.test(c.url)
+      ? jsonResponse(400, { error: { code: "BadRequest", message: "Property 'contentId' does not exist on type 'microsoft.graph.attachment'." } })
+      : null;
+  const { fetchImpl } = makeFetchMock([tokenRoute, listRoute]);
+  let caught: unknown = null;
+  try {
+    await handleGraphAttachmentDiscoveryJob(
+      ENV, admin as never, { id: "d-400", metadata: { intake_message_id: intakeId } }, { graph: { fetchImpl } },
+    );
+  } catch (err) { caught = err; }
+  assert(caught instanceof GraphError, "GraphError thrown");
+  eq((caught as GraphError).code, "graph_bad_request", "classified 400 code");
+  eq((caught as GraphError).status, 400, "status preserved");
+  eq((caught as GraphError).message, "graph_status_400", "bland message — no upstream body text");
+  assert(!(caught as GraphError).message.includes("contentId"), "must not leak the invalid property name");
+  assert(!(caught as GraphError).message.includes("Property"), "must not leak upstream guidance");
+  eq(state.attachments.length, 0, "no partial commit on 400");
+});
+
 // =======================================================================
 // INGEST
 // =======================================================================

@@ -18,6 +18,10 @@ const NON_RETRYABLE_CODES = new Set([
   // structurally invalid; a changed hash on an owned row means we would be
   // silently rewriting a claim.
   "graph_forbidden",
+  // A 400 from Graph classifies here so the same malformed request cannot
+  // spin the atlas_jobs queue. Retrying an identical request is guaranteed
+  // to fail identically — the fix must be a code change.
+  "graph_bad_request",
   "graph_attachment_gone",
   "graph_message_gone_before_attachment_discovery",
   "graph_delta_reset_failed",

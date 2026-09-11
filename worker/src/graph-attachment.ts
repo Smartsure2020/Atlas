@@ -144,10 +144,15 @@ export function classifyAttachment(
   }
   // fileAttachment past this point.
 
-  // Inline signature / logo images.
+  // Inline signature / logo images. Live Microsoft Graph refuses `contentId`
+  // in the base attachments $select (400), so discovery filtering must be
+  // deterministic from `isInline`, `contentType`, and `size` alone. Very
+  // small inline images match the typical email-signature shape and are
+  // labeled inline_signature; larger inline images stay inline_image. Both
+  // remain deterministically skipped.
   const size = typeof meta.size === "number" ? meta.size : null;
   const mime = (meta.contentType ?? "").toLowerCase();
-  if (meta.isInline && meta.contentId && size != null && size < INLINE_SIGNATURE_MAX_BYTES) {
+  if (meta.isInline && mime.startsWith("image/") && size != null && size < INLINE_SIGNATURE_MAX_BYTES) {
     return { initial_state: "skipped", skip_reason: "inline_signature" };
   }
   if (meta.isInline && mime.startsWith("image/") && size != null && size < INLINE_IMAGE_MAX_BYTES) {

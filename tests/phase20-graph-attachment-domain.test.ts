@@ -76,22 +76,35 @@ test("classify: unknown @odata.type is unsupported", () => {
   eq(d.skip_reason, "unknown_attachment_type", "reason");
 });
 
-test("classify: inline signature (contentId, small) is skipped", () => {
+test("classify: inline signature (small inline image) is skipped without contentId", () => {
+  // contentId is NEVER available from the base collection projection —
+  // classification must remain deterministic from isInline+contentType+size.
   const d = classifyAttachment(
-    meta({ isInline: true, contentId: "sig-1", size: 12_000, contentType: "image/png", name: "sig.png" }),
+    meta({ isInline: true, contentId: null, size: 12_000, contentType: "image/png", name: "sig.png" }),
     15 * 1024 * 1024,
   );
   eq(d.initial_state, "skipped", "state");
   eq(d.skip_reason, "inline_signature", "reason");
 });
 
-test("classify: inline image without contentId, small, is skipped", () => {
+test("classify: larger inline image (still small) is skipped as inline_image", () => {
   const d = classifyAttachment(
     meta({ isInline: true, contentId: null, size: 180_000, contentType: "image/jpeg", name: "banner.jpg" }),
     15 * 1024 * 1024,
   );
   eq(d.initial_state, "skipped", "state");
   eq(d.skip_reason, "inline_image", "reason");
+});
+
+test("classify: PDF discovered without contentId remains eligible (pending)", () => {
+  // Regression guard: live Graph never gives us contentId on the base
+  // collection, so a legitimate PDF must not be blocked by its absence.
+  const d = classifyAttachment(
+    meta({ contentId: null, isInline: false, contentType: "application/pdf", size: 250_000, name: "quote.pdf" }),
+    15 * 1024 * 1024,
+  );
+  eq(d.initial_state, "pending", "state");
+  eq(d.skip_reason, null, "reason");
 });
 
 test("classify: calendar invite text/calendar is skipped", () => {
@@ -213,6 +226,7 @@ test("isRetryableError: Phase 5B retryable codes", () => {
 test("isRetryableError: Phase 5B non-retryable codes", () => {
   for (const code of [
     "graph_forbidden",
+    "graph_bad_request",
     "graph_attachment_gone",
     "graph_message_gone_before_attachment_discovery",
     "discovery_missing_intake_id",
