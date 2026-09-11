@@ -76,11 +76,21 @@ function internalRequest(job: JobRow): Request {
 
 /**
  * Phase 6 LEVEL 2 kill-switch — release a claimed graph_attachment_* job
- * back to `queued` without consuming retry budget. Only invoked when the
- * processor returned `{ outcome: "processing_paused" }`, i.e. the direct
- * defence-in-depth path (normal flow skips claim entirely). Explicit
- * `.eq("status","running")` guard prevents clobbering a concurrent state
- * change.
+ * back to `queued` when the processor returned `{ outcome: "processing_paused" }`.
+ * This is the defence-in-depth fallback path against Graph traffic, NOT
+ * the counter-preservation mechanism.
+ *
+ * On the normal LEVEL 2 path `selectClaimableJobs` excludes these types
+ * BEFORE claim, so `claimJob` is never called and their counters remain
+ * untouched. If a direct / legacy caller has somehow claimed the row
+ * and reached the processor, `claimJob` has already incremented
+ * `attempt_count` (and possibly `retry_count`); this function does NOT
+ * roll those counters back. The row is returned to `queued` so a later
+ * tick can pick it up when LEVEL 2 is enabled again.
+ *
+ * The authoritative counter-preservation contract lives in the selector.
+ * Explicit `.eq("status","running")` guard prevents clobbering a
+ * concurrent state change.
  */
 async function releaseClaimToQueued(admin: ReturnType<typeof adminClient>, jobId: string): Promise<void> {
   await admin.from("atlas_jobs").update({
@@ -210,11 +220,15 @@ async function processJob(env: Env, job: JobRow): Promise<void> {
   // Phase 5B: attachment discovery + ingest processors. Retry authority is
   // owned by atlas_jobs; failure here NEVER mutates the Phase 5A delta cursor.
   //
-  // Phase 6 LEVEL 2 kill-switch: processQueuedJobs already skips claim for
-  // these job types when graphJobProcessingEnabled(env) is false. If a direct
-  // caller reaches us anyway (e.g. legacy test path), the processor itself
-  // will return { outcome: "processing_paused" } and we release the job back
-  // to queued WITHOUT consuming retry budget.
+  // Phase 6 LEVEL 2 kill-switch: selectClaimableJobs already excludes these
+  // job types at the DB query stage when graphJobProcessingEnabled(env) is
+  // false, so `claimJob` is never called for them and their counters remain
+  // untouched — that is the authoritative counter-preservation mechanism.
+  // If a direct / legacy caller reaches us anyway, the processor returns
+  // { outcome: "processing_paused" } BEFORE Graph token acquisition (defence
+  // in depth against Graph traffic) and we release the row back to queued
+  // via releaseClaimToQueued — see the notes on that helper for why the
+  // counters it inherits from the racing claim are not rolled back.
   if (job.job_type === "graph_attachment_discovery" || job.job_type === "graph_attachment_ingest") {
     try {
       const result = job.job_type === "graph_attachment_discovery"

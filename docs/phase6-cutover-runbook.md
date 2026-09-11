@@ -116,18 +116,38 @@ select p.proname, pg_get_function_identity_arguments(p.oid) as args
  where n.nspname = 'public'
    and p.proname = 'atlas_intake_release_lease_success_with_floor';
 
--- service_role holds EXECUTE; public / authenticated / anon must NOT
-select r.rolname,
-       has_function_privilege(r.rolname,
+-- service_role holds EXECUTE; public / authenticated / anon must NOT.
+--
+-- PUBLIC is a PostgreSQL pseudo-role rather than an ordinary pg_roles
+-- row, so a WHERE rolname IN (...) filter over pg_roles would silently
+-- omit it. Drive the query from a VALUES list so all four labels are
+-- always evaluated:
+select roles.role_name,
+       has_function_privilege(
+         roles.role_name,
          'public.atlas_intake_release_lease_success_with_floor(text,uuid,text,boolean,text,boolean,timestamptz,jsonb,timestamptz,boolean)',
-         'EXECUTE') as can_exec
-  from pg_roles r
- where r.rolname in ('service_role', 'authenticated', 'anon', 'public');
+         'EXECUTE'
+       ) as can_exec
+  from (values
+          ('service_role'),
+          ('authenticated'),
+          ('anon'),
+          ('public')
+       ) as roles(role_name);
 ```
 
 Expected: reset_floor column present as `timestamp with time zone`,
-nullable. The RPC row must be present exactly once. Only `service_role`
-returns `can_exec = true`; the others must be false.
+nullable. The RPC row must be present exactly once. Exactly:
+
+| role_name      | can_exec |
+|----------------|----------|
+| service_role   | true     |
+| authenticated  | false    |
+| anon           | false    |
+| public         | false    |
+
+The migration's REVOKE/GRANT statements are unchanged — the query above
+is verification only.
 
 ### Rollback (migrations)
 
@@ -155,37 +175,83 @@ the pipeline works with a real scanner.
 
 Only after BOTH pass do we authorise the production scanner secret.
 
-## 3. Production Worker deploy — Graph OFF
+## 3. Production Worker deploy — Graph OFF, single staged version
 
-Before running `wrangler deploy --env production`:
+Ordinary `wrangler secret put` creates a new Worker version AND deploys
+it immediately. Doing the malware secret writes before the intended
+Phase 6 deploy would create two interim production deployments (once
+per secret write) with mismatched code / config states. Stage
+everything on a single non-active candidate version and activate it in
+one deliberate step.
 
-1. Set the real production scanner secrets:
+1. Off-git secrets file — plaintext file OUTSIDE the repo, matching
+   `.gitignore`. Never paste its contents into reports, terminals that
+   log to disk, or chat. Example location: `~/atlas/phase6-prod-scanner.secrets`.
+   File contents (dotenv shape — do NOT commit):
+
    ```
-   wrangler secret put ATLAS_MALWARE_SCANNER_URL   --env production
-   wrangler secret put ATLAS_MALWARE_SCANNER_TOKEN --env production
+   ATLAS_MALWARE_SCANNER_URL=<real production scanner URL>
+   ATLAS_MALWARE_SCANNER_TOKEN=<real production scanner token>
    ```
-   Both must resolve to a real hostname. Atlas refuses to serve requests
-   if the URL contains a placeholder token (`yourcompany`, `example.com`,
-   `placeholder`, `changeme`, `todo`, `replace-me`) — see
-   `phase6-hardening.validateEnv`.
 
-2. Confirm the following secrets are NOT set in production (Graph must
-   stay off):
+   The URL must resolve to a real hostname; Atlas refuses to serve
+   requests if it contains a placeholder token (`yourcompany`,
+   `example.com`, `placeholder`, `changeme`, `todo`, `replace-me`,
+   `your-domain`) — see `phase6-hardening.validateEnv`.
+
+2. Confirm the following Graph secrets are NOT set on production or any
+   staged production candidate version (Graph must stay off):
    - `ATLAS_GRAPH_INTAKE_ENABLED`
    - `ATLAS_GRAPH_TENANT_ID`
    - `ATLAS_GRAPH_CLIENT_ID`
    - `ATLAS_GRAPH_CLIENT_SECRET`
    - `ATLAS_GRAPH_MAILBOXES_JSON`
    - `ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON`
+   - `ATLAS_GRAPH_JOB_PROCESSING_ENABLED`
 
-3. `wrangler deploy --env production`.
+3. Upload the Phase 6 Worker code + scanner secrets onto ONE new
+   NON-ACTIVE candidate version:
+
+   ```
+   wrangler versions upload --env production \
+     --secrets-file ~/atlas/phase6-prod-scanner.secrets
+   ```
+
+   `wrangler versions upload` does not redeploy the live version. It
+   returns a `VERSION_ID` — copy it and keep it for §5.
+
+4. Securely remove the temporary secrets file:
+
+   ```
+   shred -u ~/atlas/phase6-prod-scanner.secrets    # Linux
+   # or: srm ~/atlas/phase6-prod-scanner.secrets   # macOS with srm installed
+   ```
+
+   (On systems where `shred` is unavailable, use whatever secure-delete
+   utility the team has approved. Do NOT rely on plain `rm`.)
+
+5. Inspect the exact candidate WITHOUT activating it. See §5 for the
+   verification pattern (binding NAMES only). For this Graph-OFF deploy
+   the required check is:
+   - `ATLAS_MALWARE_SCANNER_URL` and `ATLAS_MALWARE_SCANNER_TOKEN`
+     bound on the candidate.
+   - None of the seven Graph names present on the candidate.
+
+6. Deploy the exact candidate at 100% only after §5 verification:
+
+   ```
+   wrangler versions deploy <VERSION_ID>@100% --env production -y
+   ```
+
+   Dashboard Save Version → Deploy Version of that same version id is
+   equivalent. This is a SINGLE production deployment.
 
 Verification:
 
 - `GET https://<prod-origin>/api/health` returns 200.
 - No `atlas_operational_alerts` rows created in the 30 minutes after deploy.
-- Cron runs every minute but does no Graph work (see `scheduled()` handler:
-  `runGraphIntakeCycleForEnv` returns immediately when the flag is off).
+- Cron runs every minute but does no Graph work (`runGraphIntakeCycleForEnv`
+  returns immediately when the flag is off).
 
 Rollback: `wrangler rollback --env production` (previous Worker version).
 
@@ -252,11 +318,58 @@ Optional direct Graph proof:
 If either the InScope test or the Graph proof shows unexpected access,
 STOP. Do not configure Atlas.
 
-## 6. Set the forward-only cutover timestamp
+## 6. Choose the forward-only cutover timestamp
+
+**§6 is planning + preflight only. No Cloudflare mutation happens here.**
+The chosen cutover is written to production in §7 as part of the single
+staged candidate version.
 
 Choose a fixed UTC ISO 8601 timestamp AFTER the moment the canary
 mailbox is ready to be watched — typically the start of the next
-business day. This becomes the boundary Atlas never crosses backwards.
+business day. This becomes the boundary Atlas never crosses backwards
+for THAT mailbox.
+
+Record the chosen cutover privately (e.g. the operator's encrypted
+notes) so it can be pasted verbatim into the §7 local secrets file. Do
+NOT commit it to git. Do NOT paste it into terminals that log to disk.
+The value shape:
+
+```json
+{"canary@yourdomain.co.za":"2026-09-20T06:00:00.000Z"}
+```
+
+Contract:
+- Value MUST be strict ISO 8601 UTC form: `YYYY-MM-DDTHH:MM:SS(.sss)Z`.
+  Timezone offsets and locale strings are refused by `isValidCutoverIso`.
+- Missing or malformed entries in production cause `pollMailbox` to
+  return `status="skipped_cutover_missing"` and raise
+  `atlas_operational_alerts.alert_type = graph_intake_cutover_missing`.
+- On a 410 delta-token reset Atlas restarts the initial URL from
+  `max(configured_cutover, reset_floor)`. The configured cutover is
+  immutable earliest boundary; the reset floor may advance only after a
+  fully-committed complete round.
+
+### Configured cutovers are operationally IMMUTABLE
+
+Once a mailbox has entered production intake:
+
+- Its configured cutover timestamp MUST NOT be changed.
+- Do not move it earlier.
+- Do not move it later.
+- Do not regenerate it from "now" during a subsequent tick or when
+  editing the JSON to add another mailbox.
+
+When adding another mailbox (§9), the operator preserves every
+existing mailbox→cutover pair BYTE FOR BYTE and appends only the new
+mailbox's entry.
+
+Reason: `effective_reset_boundary = max(configured_cutover, reset_floor)`.
+`reset_floor` advances only after fully-completed rounds keyed against
+the original boundary. Altering an established cutover would change
+the replay / skip semantics of any future 410 reset for that mailbox
+and could unintentionally re-enumerate messages already processed, or
+skip a window between the old and new boundary. The immutability rule
+keeps intake deterministic and auditable.
 
 ### Microsoft Graph 5,000-message filtered-delta consideration
 
@@ -309,74 +422,103 @@ message ceiling after the floor has advanced, the operator should
 pause polling and reassess. The reset-floor design keeps the recovery
 window bounded but does not remove Microsoft's ceiling.
 
-```
-wrangler secret put ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON --env production
-```
+## 7. Enable Graph intake for the canary mailbox — one staged version
 
-Value (single-line JSON):
+Initial Graph enablement stages ALL seven bindings on a single
+non-active Worker candidate version and activates that exact version
+in one deliberate step. Ordinary `wrangler secret put` would deploy on
+every write and produce piecewise activations.
 
-```json
-{"canary@yourdomain.co.za":"2026-09-20T06:00:00.000Z"}
-```
+### Stage seven bindings on ONE candidate version
 
-Contract:
-- Value MUST be strict ISO 8601 UTC form: `YYYY-MM-DDTHH:MM:SS(.sss)Z`.
-  Timezone offsets and locale strings are refused by `isValidCutoverIso`.
-- Missing or malformed entries in production cause `pollMailbox` to
-  return `status="skipped_cutover_missing"` and raise
-  `atlas_operational_alerts.alert_type = graph_intake_cutover_missing`.
-- On delta-token reset the same timestamp is reused. Atlas never uses
-  `Date.now()` as a boundary.
-
-## 7. Enable Graph intake for the canary mailbox
-
-`wrangler secret put` creates a new Worker version AND deploys it
-immediately. Using it for INITIAL enablement would activate Graph
-piecewise — the first LEVEL 2 or LEVEL 1 secret write would deploy a
-half-configured Worker. Phase 6 initial enablement uses Cloudflare
-**versioned secrets** so all Graph configuration is staged on a new
-version and activated in a single deliberate step.
-
-### Stage every Graph secret on a new (non-active) version
+Local off-git secrets file, matching `.gitignore`, e.g.
+`~/atlas/phase6-prod-graph.secrets`. Never commit; never paste
+contents into reports, terminals that log to disk, or chat. The two
+flags MUST both be exactly `"true"`.
 
 ```
-wrangler versions secret put ATLAS_GRAPH_TENANT_ID                  --env production
-wrangler versions secret put ATLAS_GRAPH_CLIENT_ID                  --env production
-wrangler versions secret put ATLAS_GRAPH_CLIENT_SECRET              --env production
-wrangler versions secret put ATLAS_GRAPH_MAILBOXES_JSON             --env production   # ["canary@yourdomain.co.za"]
-wrangler versions secret put ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON      --env production   # from §6
-wrangler versions secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED     --env production   # value: "true"
-wrangler versions secret put ATLAS_GRAPH_INTAKE_ENABLED             --env production   # value: "true"
+ATLAS_GRAPH_TENANT_ID=<tenant id>
+ATLAS_GRAPH_CLIENT_ID=<client id>
+ATLAS_GRAPH_CLIENT_SECRET=<client secret>
+ATLAS_GRAPH_MAILBOXES_JSON=["canary@yourdomain.co.za"]
+ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON={"canary@yourdomain.co.za":"<cutover from §6, verbatim>"}
+ATLAS_GRAPH_JOB_PROCESSING_ENABLED=true
+ATLAS_GRAPH_INTAKE_ENABLED=true
 ```
 
-Each `wrangler versions secret put` command uploads a secret to a new,
-staged Worker version — it does NOT redeploy the live version. The
-Cloudflare dashboard "Save Version → Deploy Version" workflow is
-equivalent for operators who prefer the UI. Confirm with:
+Stage them onto a NON-ACTIVE candidate version in ONE command:
+
+```
+wrangler versions secret bulk ~/atlas/phase6-prod-graph.secrets --env production
+```
+
+The command uploads all seven secrets onto a single new candidate
+version and returns a `VERSION_ID`. Copy it — it is required for
+verification (§5 pattern) and for the final activation below.
+
+Then securely remove the temporary file:
+
+```
+shred -u ~/atlas/phase6-prod-graph.secrets     # Linux
+# or the team's approved secure-delete utility
+```
+
+Do NOT activate the candidate yet. Do NOT echo any secret value into
+logs, reports, or the report file. If a value shape needs to be
+checked, the operator who set it re-confirms locally from the removed
+file before running `shred` — Atlas does not surface secret values
+back.
+
+### Verify the exact candidate version (see §5 pattern)
+
+Identify the candidate via:
 
 ```
 wrangler versions list --env production
 ```
 
-The new version should show every ATLAS_GRAPH_* secret bound, alongside
-the previously-active version which has none of them.
+Confirm the returned `VERSION_ID` matches the one from
+`wrangler versions secret bulk`.
 
-### Verify secret NAMES only
+Then inspect that EXACT candidate:
 
-Do not print or read secret values. Ensure the new version's bindings
-list contains all seven names above. Verify the cutover value shape by
-having the operator who set it re-confirm they used the exact JSON
-computed in §6 — Atlas does not surface secret values back.
+```
+wrangler versions view <VERSION_ID> --env production --json
+```
+
+(Or open the Cloudflare dashboard version-details view for the same
+`VERSION_ID`.)
+
+Check BINDING NAMES only. Required — all seven names must appear on
+the same candidate version:
+
+- `ATLAS_GRAPH_TENANT_ID`
+- `ATLAS_GRAPH_CLIENT_ID`
+- `ATLAS_GRAPH_CLIENT_SECRET`
+- `ATLAS_GRAPH_MAILBOXES_JSON`
+- `ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON`
+- `ATLAS_GRAPH_JOB_PROCESSING_ENABLED`
+- `ATLAS_GRAPH_INTAKE_ENABLED`
+
+Alongside the pre-existing scanner names from §3
+(`ATLAS_MALWARE_SCANNER_URL`, `ATLAS_MALWARE_SCANNER_TOKEN`) which
+continue to be bound on this version.
+
+Never print or record any secret VALUE. Never claim
+`wrangler versions list` proves the bindings — it only identifies
+versions; `wrangler versions view <VERSION_ID>` (or the dashboard
+details view) is the authoritative inspection.
 
 ### One deliberate activation
 
 ```
-wrangler versions deploy --env production
+wrangler versions deploy <VERSION_ID>@100% --env production -y
 ```
 
-Select the newly-staged version and confirm activation. This is the
-SINGLE moment at which Graph intake becomes live in production; every
-other command up to this point has been staging.
+(Dashboard Save Version → Deploy Version of the same version id is
+equivalent.) This is the SINGLE moment at which Graph intake becomes
+live in production; every other command up to this point has been
+staging.
 
 Verification within the first 10 minutes:
 
@@ -412,17 +554,60 @@ row deserves inspection.
 
 ## 9. Additional mailboxes
 
-Only after the canary observation is clean.
+Only after the canary observation is clean. Do this one mailbox at a
+time. Use the same staged candidate-version pattern as §7 — never edit
+the live version with `wrangler secret put`.
 
-1. Extend the `ATLAS_GRAPH_MAILBOXES_JSON` value by ONE mailbox.
-2. Extend `ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON` with a fresh cutover for
-   the new mailbox (typically "now, rounded to top of the hour").
-3. Extend the Exchange RBAC role assignment resource scope by the same
-   mailbox. Repeat §5 positive/negative tests for the new mailbox.
-4. Redeploy.
-5. Repeat §7 verification + §8 observation for the new mailbox.
+1. **Preserve every existing entry byte-for-byte.** Both JSON secrets
+   must retain every previously-configured mailbox and its cutover
+   unchanged:
+   - `ATLAS_GRAPH_MAILBOXES_JSON` gets the new mailbox address APPENDED.
+   - `ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON` gets the new mailbox→cutover
+     pair APPENDED. Never mutate an existing pair.
 
-Do this one mailbox at a time.
+2. Choose the new mailbox's cutover per §6 (preflight $count check,
+   record privately). The cutover for that mailbox becomes immutable
+   from the moment it enters production intake.
+
+3. Extend the Exchange App RBAC resource scope by the same mailbox.
+   Repeat §5 InScope=True / InScope=False proofs for the new mailbox
+   (existing mailboxes should still show InScope=True).
+
+4. Local off-git secrets file containing only the two updated JSONs:
+
+   ```
+   ATLAS_GRAPH_MAILBOXES_JSON=<full existing array + new address>
+   ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON=<full existing object + new entry>
+   ```
+
+   Stage onto ONE non-active candidate version:
+
+   ```
+   wrangler versions secret bulk ~/atlas/phase6-add-mailbox.secrets --env production
+   ```
+
+   `shred -u` the file. Capture the returned `VERSION_ID`.
+
+5. Verify the exact candidate via
+   `wrangler versions view <VERSION_ID> --env production --json`
+   (or the dashboard). Confirm BINDING NAMES only. Both JSON binding
+   names must be present on the candidate; the other five Graph names
+   (`ATLAS_GRAPH_TENANT_ID`, `ATLAS_GRAPH_CLIENT_ID`,
+   `ATLAS_GRAPH_CLIENT_SECRET`, `ATLAS_GRAPH_JOB_PROCESSING_ENABLED`,
+   `ATLAS_GRAPH_INTAKE_ENABLED`) and the scanner names should all
+   remain bound from the previously-active version.
+
+6. Activate the exact candidate:
+
+   ```
+   wrangler versions deploy <VERSION_ID>@100% --env production -y
+   ```
+
+7. Repeat §8 observation for the new mailbox. Existing mailboxes MUST
+   continue polling unaffected — their cutovers were preserved
+   verbatim, their `atlas_intake_graph_state.delta_link` values are
+   untouched, and their `reset_floor` values remain what the previous
+   completed rounds advanced them to.
 
 ---
 
@@ -505,18 +690,31 @@ wrangler secret put ATLAS_GRAPH_JOB_PROCESSING_ENABLED --env production  # value
 Expected behaviour:
 
 - No Graph delta requests (LEVEL 1 semantics).
-- The background worker SKIPS claim for `graph_attachment_discovery`
-  and `graph_attachment_ingest` jobs. Those rows stay in `queued`
-  (or wherever the retry cycle had them). Their `retry_count` is NOT
-  incremented while paused.
-- The processor functions themselves check the flag before token
-  acquisition — defence in depth. A direct/legacy caller that reaches
-  the processor sees `outcome = "processing_paused"` and the wrapper
-  releases the row back to `queued` without consuming retry budget.
+- **Authoritative counter-preservation:** the background worker's job
+  selector (`selectClaimableJobs` in
+  `worker/src/phase4-queue-selector.ts`) EXCLUDES
+  `graph_attachment_discovery` and `graph_attachment_ingest` at the
+  database query stage, BEFORE `LIMIT`. Those rows are never claimed
+  while LEVEL 2 is off, so `claimJob` is never called for them — their
+  `retry_count`, `attempt_count`, and `next_retry_at` values are
+  untouched.
+- **Defence in depth (Graph traffic only, NOT counter-preservation):**
+  the processors themselves (`handleGraphAttachmentDiscoveryJob`,
+  `handleGraphAttachmentIngestJob`) check the flag BEFORE Graph token
+  acquisition. If a direct/legacy caller ever reaches the processor
+  bypassing the selector, no Graph request is issued. In that
+  fallback path `claimJob` has already run and already incremented
+  `attempt_count` (and possibly `retry_count`); the wrapper releases
+  the row back to `queued` via `releaseClaimToQueued` but does NOT
+  roll back those counters. This is acceptable because the normal
+  scheduled path never reaches it — the selector is where budget
+  preservation is enforced.
 - `atlas_intake_graph_attachments.state` is UNCHANGED. A row in
   `downloading` at pause time remains resumable.
 - Malware scans for already-ingested Graph attachments STILL RUN
-  (they are scoped to Supabase storage, not Graph).
+  (they are scoped to Supabase storage, not Graph). Extraction,
+  recommendation, insurer-doc, and every other non-Graph job type
+  continues to be claimed and processed normally.
 
 When resuming: flip `ATLAS_GRAPH_JOB_PROCESSING_ENABLED` back to
 `"true"` first (jobs will start draining), and only then flip
@@ -540,7 +738,11 @@ investigation.
   initial delta URL is Atlas's contract with Graph on this point.
 - Do not run `wrangler secret delete` on the cutover value in
   production — a subsequent poll will refuse (skipped_cutover_missing).
-  Update the value in place instead.
+  Configured cutovers are operationally IMMUTABLE per §6: once a
+  mailbox has entered production intake, do not move its cutover
+  earlier, later, or regenerate it from "now". When adding another
+  mailbox, preserve every existing pair byte-for-byte and append the
+  new one (§9).
 - Do not enable ATLAS_DOCUMENT_PIPELINE_MODE beyond `legacy` in the
   same window. Hybrid pipeline consolidation is out of Phase 6 scope.
 - Do not add `Mail.ReadWrite` or `Mail.Send` to the intake app. Atlas
