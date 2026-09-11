@@ -29,7 +29,12 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { attachmentMaxBytes, retentionDays, type Env } from "./config.js";
+import {
+  attachmentMaxBytes,
+  graphJobProcessingEnabled,
+  retentionDays,
+  type Env,
+} from "./config.js";
 import {
   acquireGraphToken,
   fetchAttachmentBytes,
@@ -76,7 +81,8 @@ export interface AttachmentProcessResult {
     | "ingest_duplicate"
     | "ingest_skipped"
     | "ingest_unsupported"
-    | "ingest_missing";
+    | "ingest_missing"
+    | "processing_paused";
   ingestJobIds?: string[];
   documentId?: string | null;
   scanJobId?: string | null;
@@ -187,6 +193,12 @@ export async function handleGraphAttachmentDiscoveryJob(
   job: DiscoveryJobRow,
   deps: AttachmentJobDeps = {},
 ): Promise<AttachmentProcessResult> {
+  // LEVEL 2 kill-switch (defence in depth). Callers should already have
+  // skipped claim for this job; if a direct caller reaches us anyway, refuse
+  // BEFORE any Graph token acquisition or Graph request.
+  if (!graphJobProcessingEnabled(env)) {
+    return { outcome: "processing_paused" };
+  }
   const intakeMessageId = String((job.metadata ?? {}).intake_message_id ?? "");
   if (!intakeMessageId) {
     logAttachmentError({ code: "discovery_missing_intake_id", jobId: job.id });
@@ -482,6 +494,11 @@ export async function handleGraphAttachmentIngestJob(
   job: IngestJobRow,
   deps: AttachmentJobDeps = {},
 ): Promise<AttachmentProcessResult> {
+  // LEVEL 2 kill-switch (defence in depth). Refuse BEFORE token acquisition
+  // and BEFORE /$value byte fetch.
+  if (!graphJobProcessingEnabled(env)) {
+    return { outcome: "processing_paused" };
+  }
   const attachmentId = String((job.metadata ?? {}).attachment_id ?? "");
   if (!attachmentId) {
     throw new GraphError({

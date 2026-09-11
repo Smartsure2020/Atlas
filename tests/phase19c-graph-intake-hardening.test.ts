@@ -272,7 +272,15 @@ function jsonResponse(status: number, body: unknown, headers: Record<string, str
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
 }
 const tokenRoute = (c: FetchCall) => c.url.includes("/oauth2/v2.0/token") ? jsonResponse(200, { access_token: "TOK", expires_in: 3600 }) : null;
-const FAKE_ENV = { ATLAS_GRAPH_INTAKE_ENABLED: "true", ATLAS_GRAPH_TENANT_ID: "t", ATLAS_GRAPH_CLIENT_ID: "c", ATLAS_GRAPH_CLIENT_SECRET: "s", ATLAS_GRAPH_MAILBOXES_JSON: "[\"m\"]" } as unknown as Parameters<typeof pollMailbox>[0];
+const FAKE_ENV = {
+  ATLAS_GRAPH_INTAKE_ENABLED: "true",
+  ATLAS_GRAPH_TENANT_ID: "t",
+  ATLAS_GRAPH_CLIENT_ID: "c",
+  ATLAS_GRAPH_CLIENT_SECRET: "s",
+  ATLAS_GRAPH_MAILBOXES_JSON: "[\"m\"]",
+  // Phase 6 forward-only cutover — explicit non-production test default.
+  ATLAS_GRAPH_TEST_DEFAULT_CUTOVER: "2026-01-01T00:00:00.000Z",
+} as unknown as Parameters<typeof pollMailbox>[0];
 
 // ---------------------------------------------------------------------------
 // FINDING #5 — exact origin

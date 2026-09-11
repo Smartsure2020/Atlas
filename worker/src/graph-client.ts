@@ -30,11 +30,25 @@ const GRAPH_TOKEN_URL_FN = (tenantId: string) =>
 
 // Initial delta query. `$select` narrows the projection to the fields Phase 5A
 // actually needs — attachment payloads are deliberately excluded.
-const GRAPH_INITIAL_DELTA_URL_FN = (mailbox: string) =>
-  `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}` +
-  `/mailFolders/Inbox/messages/delta` +
-  `?$select=id,internetMessageId,conversationId,subject,bodyPreview,from,` +
-  `toRecipients,ccRecipients,receivedDateTime,hasAttachments`;
+//
+// Phase 6 forward-only cutover: when a fixed ISO 8601 UTC cutover timestamp is
+// supplied, Atlas adds `$filter=receivedDateTime ge <cutover>` so the initial
+// enumeration never returns historic Inbox contents. Continuation nextLink /
+// deltaLink URLs come back from Microsoft Graph opaquely and are NEVER
+// rewritten by Atlas; the filter is applied exclusively to the initial URL.
+// On delta-token reset the caller must reuse the SAME cutover timestamp — the
+// runtime never invents a boundary from Date.now().
+const GRAPH_INITIAL_DELTA_URL_FN = (mailbox: string, cutoverIso?: string) => {
+  const base =
+    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}` +
+    `/mailFolders/Inbox/messages/delta` +
+    `?$select=id,internetMessageId,conversationId,subject,bodyPreview,from,` +
+    `toRecipients,ccRecipients,receivedDateTime,hasAttachments`;
+  if (!cutoverIso) return base;
+  // Graph requires OData `$filter` values to be URL-encoded. `receivedDateTime`
+  // + `ge` + literal Edm.DateTimeOffset is a Microsoft-supported form.
+  return `${base}&$filter=${encodeURIComponent(`receivedDateTime ge ${cutoverIso}`)}`;
+};
 
 const GRAPH_HEADERS_URL_FN = (mailbox: string, messageId: string) =>
   `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}` +
@@ -341,9 +355,19 @@ export async function acquireGraphToken(
   return { token: payload.access_token, expiresAt: now + (expiresIn - 60) * 1000 };
 }
 
-/** Compose the initial delta URL for a mailbox (see spec sec. 12). */
-export function initialDeltaUrl(mailbox: string): string {
-  return GRAPH_INITIAL_DELTA_URL_FN(mailbox);
+/**
+ * Compose the initial delta URL for a mailbox (see spec sec. 12).
+ *
+ * Phase 6 accepts an optional fixed UTC ISO 8601 `cutoverIso`. When present,
+ * `$filter=receivedDateTime ge <cutover>` is appended so the initial
+ * enumeration is forward-only from that boundary. Continuation nextLink /
+ * deltaLink URLs from Microsoft Graph remain opaque and are untouched by
+ * Atlas — the filter is applied to the initial URL only. On delta-token reset,
+ * callers reuse the same fixed cutover; the runtime never derives a boundary
+ * from Date.now().
+ */
+export function initialDeltaUrl(mailbox: string, cutoverIso?: string): string {
+  return GRAPH_INITIAL_DELTA_URL_FN(mailbox, cutoverIso);
 }
 
 /**

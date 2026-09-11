@@ -104,15 +104,31 @@ ATLAS_DOC_RETENTION_DAYS = "7"
 # Production defaults keep the hybrid pipeline OFF; shadow sampling zero.
 ATLAS_DOCUMENT_PIPELINE_MODE = "legacy"
 ATLAS_SHADOW_SAMPLE_PERCENT = "0"
-# Required before deploy — background scanning fails closed without it in production:
-ATLAS_MALWARE_SCANNER_URL = "https://scanner.yourcompany.com/scan"
-# ATLAS_MALWARE_SCANNER_TOKEN is a secret — set via:
+# Malware scanning fails CLOSED in production. Both of the following MUST be
+# set as WRANGLER SECRETS before deploy — never committed to git:
+#   wrangler secret put ATLAS_MALWARE_SCANNER_URL   --env production
 #   wrangler secret put ATLAS_MALWARE_SCANNER_TOKEN --env production
+# validateEnv() refuses to serve requests until both are present, and refuses
+# any URL containing a placeholder token (yourcompany, example.com, ...).
 # Flip to "true" only after retention policy is approved:
 ATLAS_CLEANUP_APPROVED = "false"
 ATLAS_WORKER_BATCH_SIZE = "5"
 ATLAS_STUCK_JOB_MINUTES = "20"
 ATLAS_ALERT_ESCALATE_MINUTES = "30"
+# Phase 6 — Graph attachment processing kill-switch (LEVEL 2). Production
+# defaults CLOSED. Flip to "true" only when Phase 5B attachment ingestion is
+# authorised to run in production; separate from ATLAS_GRAPH_INTAKE_ENABLED
+# (LEVEL 1) so operators can drain existing work or stop all Graph traffic.
+ATLAS_GRAPH_JOB_PROCESSING_ENABLED = "false"
+# Phase 6 — Graph intake is OFF until the canary gate is authorised.
+# ATLAS_GRAPH_INTAKE_ENABLED is intentionally NOT set here.
+#
+# Graph intake secrets are set out-of-band via wrangler secret put --env production:
+#   ATLAS_GRAPH_TENANT_ID
+#   ATLAS_GRAPH_CLIENT_ID
+#   ATLAS_GRAPH_CLIENT_SECRET
+#   ATLAS_GRAPH_MAILBOXES_JSON
+#   ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON   (forward-only cutover per mailbox)
 # Optional — escalation delivery target:
 # ATLAS_ALERT_WEBHOOK_URL = "https://hooks.yourcompany.com/atlas-alerts"
 

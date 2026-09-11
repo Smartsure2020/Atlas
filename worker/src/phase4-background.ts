@@ -1,5 +1,5 @@
 import { adminClient, audit, type AtlasUser } from "./auth";
-import type { Env } from "./config";
+import { graphJobProcessingEnabled, type Env } from "./config";
 import { scanStorageObject } from "./malware-scan";
 import {
   buildAlert,
@@ -67,6 +67,27 @@ function internalRequest(job: JobRow): Request {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...request, force: true, background_job_id: job.id }),
   });
+}
+
+/**
+ * Phase 6 LEVEL 2 kill-switch — release a claimed graph_attachment_* job
+ * back to `queued` without consuming retry budget. Only invoked when the
+ * processor returned `{ outcome: "processing_paused" }`, i.e. the direct
+ * defence-in-depth path (normal flow skips claim entirely). Explicit
+ * `.eq("status","running")` guard prevents clobbering a concurrent state
+ * change.
+ */
+async function releaseClaimToQueued(admin: ReturnType<typeof adminClient>, jobId: string): Promise<void> {
+  await admin.from("atlas_jobs").update({
+    status: "queued",
+    started_at: null,
+    claimed_at: null,
+    heartbeat_at: null,
+    current_step: null,
+    progress_percent: 0,
+    error_code: null,
+    error_message: null,
+  }).eq("id", jobId).eq("status", "running");
 }
 
 async function claimJob(admin: ReturnType<typeof adminClient>, candidate: JobRow): Promise<JobRow | null> {
@@ -183,12 +204,20 @@ async function processJob(env: Env, job: JobRow): Promise<void> {
 
   // Phase 5B: attachment discovery + ingest processors. Retry authority is
   // owned by atlas_jobs; failure here NEVER mutates the Phase 5A delta cursor.
+  //
+  // Phase 6 LEVEL 2 kill-switch: processQueuedJobs already skips claim for
+  // these job types when graphJobProcessingEnabled(env) is false. If a direct
+  // caller reaches us anyway (e.g. legacy test path), the processor itself
+  // will return { outcome: "processing_paused" } and we release the job back
+  // to queued WITHOUT consuming retry budget.
   if (job.job_type === "graph_attachment_discovery" || job.job_type === "graph_attachment_ingest") {
     try {
-      if (job.job_type === "graph_attachment_discovery") {
-        await handleGraphAttachmentDiscoveryJob(env, admin, { id: job.id, metadata: job.metadata });
-      } else {
-        await handleGraphAttachmentIngestJob(env, admin, { id: job.id, metadata: job.metadata });
+      const result = job.job_type === "graph_attachment_discovery"
+        ? await handleGraphAttachmentDiscoveryJob(env, admin, { id: job.id, metadata: job.metadata })
+        : await handleGraphAttachmentIngestJob(env, admin, { id: job.id, metadata: job.metadata });
+      if (result.outcome === "processing_paused") {
+        await releaseClaimToQueued(admin, job.id);
+        return;
       }
       await completeJob(admin, job.id, { metadata: null });
     } catch (error) {
@@ -274,7 +303,14 @@ async function processQueuedJobs(env: Env) {
     admin.from("atlas_jobs").select("*").eq("status", "failed").eq("cancellation_requested", false).lte("next_retry_at", now).order("next_retry_at", { ascending: true }).limit(batchSize(env)),
   ]);
   const candidates = [...((queued.data ?? []) as JobRow[]), ...((retryable.data ?? []) as JobRow[])].slice(0, batchSize(env));
+  // Phase 6 LEVEL 2 kill-switch — when Graph attachment processing is
+  // administratively paused, skip claim for graph_attachment_* candidates
+  // entirely. Their queue state stays intact; retry budget is not consumed.
+  const graphProcessingOn = graphJobProcessingEnabled(env);
   for (const candidate of candidates) {
+    if (!graphProcessingOn && (candidate.job_type === "graph_attachment_discovery" || candidate.job_type === "graph_attachment_ingest")) {
+      continue;
+    }
     const claimed = await claimJob(admin, candidate);
     if (!claimed) continue;
     try {

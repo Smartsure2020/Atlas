@@ -15,6 +15,10 @@ ATLAS_EMAIL_MODE = "template"
 ATLAS_SHADOW_SAMPLE_PERCENT = "0"
 ATLAS_LEGACY_FALLBACK_DISABLED = "false"
 ATLAS_STRICT_ACCESS_SCOPING = "true"
+# Phase 6 — Graph attachment processing kill-switch (LEVEL 2). Staging is a
+# deployed environment and defaults CLOSED. Set to "true" only when Phase 5B
+# Graph-job processing is being intentionally exercised on staging.
+ATLAS_GRAPH_JOB_PROCESSING_ENABLED = "false"
 
 [[queues.producers]]
 binding = "ATLAS_SHADOW_QUEUE"

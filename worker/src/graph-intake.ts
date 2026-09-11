@@ -11,7 +11,12 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { graphIntakeEnabled, graphIntakeMailboxes, type Env } from "./config.js";
+import {
+  graphIntakeEnabled,
+  graphIntakeMailboxes,
+  resolveMailboxCutover,
+  type Env,
+} from "./config.js";
 import {
   acquireGraphToken,
   canonicalMessageId,
@@ -46,6 +51,47 @@ export const CIRCUIT_BREAKER_COOLDOWN_MS = 15 * 60_000;
  * resumes from it. See handleResumableEnd().
  */
 export const MAX_DELTA_PAGES_PER_POLL = 50;
+
+/**
+ * Phase 6 (Checkpoint 1A) — replay overlap subtracted from a completed
+ * round's poll-start time when advancing the durable reset floor.
+ *
+ * Rationale: after a fully-completed round, we're confident everything the
+ * previous initial-enumeration boundary captured has been persisted. On a
+ * later 410 reset we want to re-enumerate from just BEFORE that completion,
+ * not from Date.now() and not from the immutable configured cutover forever.
+ * 24 hours is a conservative overlap that gives Graph and Atlas ample room
+ * to reconcile straggler messages; DB idempotency (Rule 1 / Rule 2 uniques
+ * on graph_message_id and internet_message_id) absorbs any replayed rows.
+ */
+export const RESET_FLOOR_OVERLAP_MS = 24 * 60 * 60_000;
+
+/**
+ * Return the lexicographically-greater of two strict UTC ISO 8601 timestamps.
+ * Because `YYYY-MM-DDTHH:MM:SS(.sss)Z` is a monotonic textual encoding, string
+ * comparison agrees with chronological comparison. NULL is treated as -infinity.
+ */
+export function maxIsoUtc(a: string | null, b: string | null): string | null {
+  if (a == null) return b;
+  if (b == null) return a;
+  return a >= b ? a : b;
+}
+
+/**
+ * Given the poll-start time of a fully-completed round and the immutable
+ * configured cutover, compute the value we would persist as `reset_floor`.
+ * Deterministic (pure function). Never derives anything from Date.now()
+ * itself — the caller decides what "poll-start time" is and passes it in.
+ *
+ * Guarantees:
+ *   * The advance never precedes the configured cutover (immutable floor).
+ *   * Overlap subtraction is a fixed constant, not clock-derived at reset time.
+ */
+export function computeResetFloorAdvance(pollStartMs: number, configuredCutoverIso: string): string {
+  const proposedMs = pollStartMs - RESET_FLOOR_OVERLAP_MS;
+  const proposedIso = new Date(proposedMs).toISOString();
+  return maxIsoUtc(configuredCutoverIso, proposedIso)!;
+}
 
 // ---------------------------------------------------------------------------
 // Injection surfaces
@@ -85,6 +131,7 @@ export interface PollResult {
     | "skipped_breaker"
     | "skipped_throttled"
     | "skipped_lease_lost"
+    | "skipped_cutover_missing"
     | "failed";
   errorCode?: string;
 }
@@ -143,6 +190,12 @@ interface GraphStateRow {
   breaker_opened_at: string | null;
   last_failure_at: string | null;
   next_attempt_after: string | null;
+  /**
+   * Phase 6 durable reset floor (migration 0036). NULL when never advanced.
+   * Present here for type-safety on the state read; the acquire RPC does not
+   * return this column (it is read separately after lease acquisition).
+   */
+  reset_floor?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -686,9 +739,43 @@ async function finaliseNeedsReview(
  *   1. in_round_next_link (mid-round checkpoint from a previous partial tick)
  *   2. delta_link         (the durable cursor of the last completed round)
  *   3. initial delta URL  (first-ever poll for this mailbox)
+ *
+ * Phase 6: when the fallback path builds an initial URL the fixed forward-only
+ * cutover is included. Continuation URLs (nextLink / deltaLink) are unchanged.
  */
-function chooseStartCursor(row: GraphStateRow, mailbox: string): string {
-  return row.in_round_next_link ?? row.delta_link ?? initialDeltaUrl(mailbox);
+function chooseStartCursor(row: GraphStateRow, mailbox: string, effectiveCutoverIso: string): string {
+  return row.in_round_next_link ?? row.delta_link ?? initialDeltaUrl(mailbox, effectiveCutoverIso);
+}
+
+/**
+ * Read the durable reset_floor for a mailbox (migration 0036). Best-effort:
+ * a read error is treated as "no floor" so a transient DB problem cannot
+ * revert to the immutable configured cutover PLUS an unbounded historic
+ * replay. The floor is monotonic and idempotently advanced, so missing one
+ * read only delays a floor gain by at most one round.
+ */
+async function readResetFloor(admin: SupabaseClient, mailbox: string): Promise<string | null> {
+  const { data, error } = await admin
+    .from("atlas_intake_graph_state")
+    .select("reset_floor")
+    .eq("mailbox", mailbox)
+    .limit(1)
+    .maybeSingle();
+  if (error) return null;
+  const value = (data as { reset_floor?: string | null } | null)?.reset_floor ?? null;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Advance the durable reset_floor after a fully-completed delta round.
+ * Never called on a resumable / partial round. Idempotent and monotonic at
+ * the DB layer (RPC guards against non-advancing writes).
+ */
+async function advanceResetFloor(admin: SupabaseClient, mailbox: string, newFloorIso: string): Promise<void> {
+  await admin.rpc("atlas_intake_reset_floor_advance", {
+    p_mailbox: mailbox,
+    p_new_reset_floor: newFloorIso,
+  }).then(() => undefined, () => undefined);
 }
 
 export async function pollMailbox(
@@ -710,7 +797,55 @@ export async function pollMailbox(
     status: "failed",
   };
 
-  const acquired = await acquireMailboxLease(admin, mailbox, nowFn(), deps);
+  // Phase 6 forward-only cutover — resolved BEFORE any Graph traffic. A
+  // missing / malformed cutover in production is a hard stop: no lease, no
+  // token, no Graph request. Best-effort misconfiguration alert so operators
+  // notice without needing a runtime error to escape the scheduled handler.
+  const cutoverLookup = resolveMailboxCutover(env, mailbox);
+  if (!cutoverLookup.ok) {
+    const code = `cutover_${cutoverLookup.reason}`;
+    const mailboxHash = await safeHash(mailbox);
+    logIntakeError({ code, mailboxHash });
+    // Dedup: never spawn a new critical alert every cron minute. Only insert
+    // if there is no existing open/acknowledged alert of this type for this
+    // mailbox hash. Same pattern the runGraphIntakeCycle mailbox-list-empty
+    // guard uses for graph_intake_misconfigured.
+    try {
+      const { data: existing } = await admin
+        .from("atlas_operational_alerts")
+        .select("id")
+        .eq("alert_type", "graph_intake_cutover_missing")
+        .eq("metadata->>mailbox_hash", mailboxHash)
+        .in("status", ["open", "acknowledged"])
+        .limit(1)
+        .maybeSingle();
+      if (!existing?.id) {
+        await admin.from("atlas_operational_alerts").insert(
+          buildAlert({
+            alertType: "graph_intake_cutover_missing",
+            severity: "critical",
+            title: "Graph intake cutover missing or malformed",
+            message:
+              "ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON is missing an entry (or has a malformed value) for a configured mailbox. Polling is refused until this is corrected.",
+            metadata: { mailbox_hash: mailboxHash, reason: cutoverLookup.reason },
+          }),
+        ).then(() => undefined, () => undefined);
+      }
+    } catch {
+      /* alert insertion failure never blocks scheduled() */
+    }
+    result.status = "skipped_cutover_missing";
+    result.errorCode = code;
+    return result;
+  }
+  const cutoverIso = cutoverLookup.cutoverIso;
+
+  // Poll-start time captured ONCE, used only for the reset-floor advance path
+  // (never as a reset boundary itself — see computeResetFloorAdvance and
+  // migration 0036 header).
+  const pollStartMs = nowFn();
+
+  const acquired = await acquireMailboxLease(admin, mailbox, pollStartMs, deps);
   if (acquired.kind === "locked") { result.status = "skipped_locked"; return result; }
   if (acquired.kind === "throttled") { result.status = "skipped_throttled"; return result; }
   if (acquired.kind === "breaker_open") { result.status = "skipped_breaker"; return result; }
@@ -728,7 +863,14 @@ export async function pollMailbox(
     return result;
   }
 
-  let cursor: string | null = chooseStartCursor(lease, mailbox);
+  // Phase 6 effective cutover = max(configured_cutover, persisted_reset_floor).
+  // Read the floor AFTER lease acquisition so we know we own the mailbox and
+  // no concurrent isolate is racing us on it. The floor is monotonically
+  // advanced only by fully-completed rounds — see advanceResetFloor below.
+  const persistedResetFloor = await readResetFloor(admin, mailbox);
+  const effectiveCutoverIso = maxIsoUtc(cutoverIso, persistedResetFloor) ?? cutoverIso;
+
+  let cursor: string | null = chooseStartCursor(lease, mailbox, effectiveCutoverIso);
   let finalDeltaLink: string | null = null;
   let pageBudgetExhausted = false;
   let lastNextLink: string | null = null;
@@ -753,7 +895,12 @@ export async function pollMailbox(
             });
           }
           deltaResetAttempted = true;
-          cursor = initialDeltaUrl(mailbox);
+          // Phase 6 (Checkpoint 1A): reset uses the effective cutover, which
+          // is max(configured_cutover, persisted_reset_floor). The floor is a
+          // durably-persisted value from a prior fully-completed round; it is
+          // NEVER derived from Date.now() at reset time. The configured
+          // cutover remains the immutable earliest boundary.
+          cursor = initialDeltaUrl(mailbox, effectiveCutoverIso);
           continue;
         }
         throw err;
@@ -807,6 +954,14 @@ export async function pollMailbox(
         auditMetadata: buildSuccessMetadata(false),
       });
       if (!ok) { result.status = "skipped_lease_lost"; result.errorCode = "lease_lost"; return result; }
+      // Phase 6 (Checkpoint 1A): ONLY after a fully-completed round do we
+      // advance the durable reset floor. Uses pollStartMs (captured at the
+      // top of this poll, BEFORE any round-completion decision) minus a
+      // fixed conservative overlap. Monotonic + idempotent at the DB layer.
+      // Skipped on ok_resumable / partial rounds so a bounded page budget
+      // can never cause a message to be lost from a subsequent reset.
+      const advanceIso = computeResetFloorAdvance(pollStartMs, cutoverIso);
+      await advanceResetFloor(admin, mailbox, advanceIso);
       result.status = "ok";
       return result;
     }
