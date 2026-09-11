@@ -16,9 +16,18 @@ import { handleExtract } from "./extract-endpoint";
 import { handleRunRecommendation } from "./recommendation-endpoints";
 import { handleRunQuoteReview } from "./quote-review-endpoints";
 import { handleProcessInsurerDoc } from "./insurer-endpoints";
-
-const CLIENT_DOCS_BUCKET = "atlas-client-docs";
-const INSURER_DOCS_BUCKET = "atlas-insurer-docs";
+import {
+  handleGraphAttachmentDiscoveryJob,
+  handleGraphAttachmentIngestJob,
+} from "./graph-attachment";
+import { GraphError } from "./graph-client";
+import {
+  CLIENT_DOCS_BUCKET,
+  INSURER_DOCS_BUCKET,
+  findActiveStorageReference,
+} from "./cleanup-reference";
+export { findActiveStorageReference } from "./cleanup-reference";
+export type { StorageReferenceCheck } from "./cleanup-reference";
 
 type JobRow = {
   id: string;
@@ -168,6 +177,28 @@ async function processJob(env: Env, job: JobRow): Promise<void> {
         }).eq("id", job.document_id);
       }
       await failJob(admin, job.id, { errorCode, errorMessage: "Upload malware scan failed." });
+    }
+    return;
+  }
+
+  // Phase 5B: attachment discovery + ingest processors. Retry authority is
+  // owned by atlas_jobs; failure here NEVER mutates the Phase 5A delta cursor.
+  if (job.job_type === "graph_attachment_discovery" || job.job_type === "graph_attachment_ingest") {
+    try {
+      if (job.job_type === "graph_attachment_discovery") {
+        await handleGraphAttachmentDiscoveryJob(env, admin, { id: job.id, metadata: job.metadata });
+      } else {
+        await handleGraphAttachmentIngestJob(env, admin, { id: job.id, metadata: job.metadata });
+      }
+      await completeJob(admin, job.id, { metadata: null });
+    } catch (error) {
+      const graphErr = error instanceof GraphError ? error : null;
+      const errorCode = graphErr?.code ?? (error as Error)?.message ?? "attachment_processing_failed";
+      await failJob(admin, job.id, {
+        errorCode,
+        errorMessage: `Phase 5B attachment ${job.job_type} failed.`,
+        retryAfterSeconds: graphErr?.retryAfterSeconds ?? null,
+      });
     }
     return;
   }
@@ -369,6 +400,13 @@ async function detectCleanupCandidates(env: Env, admin: ReturnType<typeof adminC
     listStoragePaths(admin, INSURER_DOCS_BUCKET),
   ]);
 
+  // Any partial DB read here must NOT be interpreted as "no reference" —
+  // that would let a genuinely-referenced path be classified as an orphan.
+  if (clientDocs.error || insurerDocs.error) {
+    console.warn("atlas_cleanup_detection_aborted", { reason: "reference_query_failed" });
+    return;
+  }
+
   for (const doc of clientDocs.data ?? []) {
     if (await candidateExists(admin, CLIENT_DOCS_BUCKET, doc.storage_path)) continue;
     await admin.from("atlas_cleanup_candidates").insert({
@@ -383,10 +421,14 @@ async function detectCleanupCandidates(env: Env, admin: ReturnType<typeof adminC
     });
   }
 
-  const clientRefs = new Set((clientDocs.data ?? []).map((doc) => doc.storage_path));
-  const allClientRefs = await admin.from("atlas_documents").select("storage_path").limit(5000);
+  // Orphan detection now goes through the shared reference-check helper
+  // that production deletion uses — so a Phase 5B path in ANY active state
+  // (including pending with a persisted storage_path after a retryable
+  // upload failure) is protected identically at detection and deletion
+  // time. A DB error inside the helper is treated as still-referenced.
   for (const path of clientObjects) {
-    if (clientRefs.has(path) || (allClientRefs.data ?? []).some((row) => row.storage_path === path)) continue;
+    const ref = await findActiveStorageReference(admin, CLIENT_DOCS_BUCKET, path);
+    if (ref.referenced) continue;
     if (await candidateExists(admin, CLIENT_DOCS_BUCKET, path)) continue;
     await admin.from("atlas_cleanup_candidates").insert({
       candidate_type: "orphan_storage_path",
@@ -398,9 +440,9 @@ async function detectCleanupCandidates(env: Env, admin: ReturnType<typeof adminC
     });
   }
 
-  const allInsurerRefs = new Set((insurerDocs.data ?? []).map((doc) => doc.storage_path));
   for (const path of insurerObjects) {
-    if (allInsurerRefs.has(path)) continue;
+    const ref = await findActiveStorageReference(admin, INSURER_DOCS_BUCKET, path);
+    if (ref.referenced) continue;
     if (await candidateExists(admin, INSURER_DOCS_BUCKET, path)) continue;
     await admin.from("atlas_cleanup_candidates").insert({
       candidate_type: "orphan_storage_path",
@@ -427,6 +469,46 @@ async function processApprovedCleanup(env: Env, admin: ReturnType<typeof adminCl
       const { data: doc } = await admin.from("atlas_documents").select("status").eq("id", candidate.document_id).maybeSingle();
       if (doc?.status === "active") {
         await admin.from("atlas_cleanup_candidates").update({ status: "dismissed", error_code: "active_document_protected", error_message: "Active documents are never deleted by cleanup." }).eq("id", candidate.id);
+        continue;
+      }
+    }
+    // Deletion-time revalidation. A candidate flagged as an orphan may have
+    // acquired a legitimate reference between detection and approval —
+    // atlas_documents.storage_path OR, for atlas-client-docs, an active
+    // Phase 5B atlas_intake_graph_attachments.storage_path (including
+    // state='pending' when a hash claim + persisted path is retryable
+    // after a partial upload failure). Uses the same helper the detection
+    // pass uses so the two decisions cannot diverge. Fails CLOSED if any
+    // reference lookup errors: candidate is marked failed with a classified
+    // code and a safe operational alert is raised. Raw DB error text NEVER
+    // enters the alert.
+    if (candidate.candidate_type === "orphan_storage_path") {
+      const ref = await findActiveStorageReference(
+        admin,
+        String(candidate.storage_bucket),
+        String(candidate.storage_path),
+      );
+      if (!ref.ok) {
+        await admin.from("atlas_cleanup_candidates").update({
+          status: "failed",
+          error_code: "cleanup_reference_check_failed",
+          error_message: "Reference lookup failed; deletion refused for safety.",
+        }).eq("id", candidate.id);
+        await createAlertOnce(admin, env, {
+          alertType: "cleanup_reference_check_failed",
+          severity: "critical",
+          title: "Cleanup reference lookup failed",
+          message: "A candidate could not be revalidated before deletion; the object was NOT removed.",
+          metadata: { candidate_id: candidate.id, reason: ref.reason },
+        });
+        continue;
+      }
+      if (ref.referenced) {
+        await admin.from("atlas_cleanup_candidates").update({
+          status: "dismissed",
+          error_code: "storage_path_now_referenced",
+          error_message: "Path has an active reference and must not be deleted.",
+        }).eq("id", candidate.id);
         continue;
       }
     }

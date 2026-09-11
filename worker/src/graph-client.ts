@@ -40,6 +40,30 @@ const GRAPH_HEADERS_URL_FN = (mailbox: string, messageId: string) =>
   `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}` +
   `?$select=internetMessageHeaders`;
 
+// Phase 5B — metadata listing only. $select excludes `contentBytes` so this
+// call is bounded, and `@odata.type` is included in the response envelope
+// without needing to be listed here.
+//
+// `contentId` is deliberately NOT requested against the base
+// `/messages/{id}/attachments` collection: live Microsoft Graph rejects a
+// $select that includes `contentId` on that collection with HTTP 400. The
+// property only exists on the fileAttachment subtype, and requesting it
+// from the polymorphic base list is invalid — Atlas does not need it for
+// discovery-time classification.
+const GRAPH_ATTACHMENT_LIST_URL_FN = (mailbox: string, messageId: string) =>
+  `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/attachments` +
+  `?$select=id,name,contentType,size,isInline`;
+
+// Phase 5B — raw byte fetch. /$value returns unstructured octet-stream.
+const GRAPH_ATTACHMENT_VALUE_URL_FN = (
+  mailbox: string,
+  messageId: string,
+  attachmentId: string,
+) =>
+  `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}` +
+  `/messages/${encodeURIComponent(messageId)}` +
+  `/attachments/${encodeURIComponent(attachmentId)}/$value`;
+
 /** Injection surface for tests. Kept minimal on purpose. */
 export interface GraphClientDeps {
   /**
@@ -196,6 +220,10 @@ export function canonicalMessageId(raw: string | null | undefined): string | nul
 }
 
 function classifyGraphErrorCode(status: number): string {
+  // 400 must classify to a stable, non-retryable code. Retrying the same
+  // malformed request against Graph will simply fail identically and burn
+  // through the retry budget. See phase8-core NON_RETRYABLE_CODES.
+  if (status === 400) return "graph_bad_request";
   if (status === 401) return "graph_unauthorized";
   if (status === 403) return "graph_forbidden";
   if (status === 404) return "graph_not_found";
@@ -270,21 +298,37 @@ export async function acquireGraphToken(
   // The token endpoint is a well-known static Microsoft URL. redirect:"manual"
   // matches the delta path: any 3xx here is a misconfiguration, not a normal
   // OAuth response.
-  const res = await fetchImpl(GRAPH_TOKEN_URL_FN(tenant), {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-    redirect: "manual",
-  });
+  //
+  // Any raw transport exception (fetch network failure, TypeError from the
+  // runtime, etc.) is normalised to a classified GraphError so downstream
+  // failJob/atlas_jobs.retry state never receives arbitrary runtime text
+  // that could leak the token endpoint URL, tenant id, client id, or the
+  // client secret embedded in the request body.
+  let res: Response;
+  try {
+    res = await fetchImpl(GRAPH_TOKEN_URL_FN(tenant), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      redirect: "manual",
+    });
+  } catch (err) {
+    if (err instanceof GraphError) throw err;
+    throw new GraphError({
+      status: 0,
+      code: "graph_token_failed",
+      message: "graph_token_failed",
+    });
+  }
   if (res.status >= 300 && res.status < 400) {
     throw new GraphError({ status: res.status, code: "graph_unexpected_redirect", message: "graph_unexpected_redirect" });
   }
   if (!res.ok) throw await graphErrorFromResponse(res);
-  const payload = (await res.json()) as {
+  const payload = (await res.json().catch(() => null)) as {
     access_token?: string;
     expires_in?: number;
-  };
-  if (!payload.access_token) {
+  } | null;
+  if (!payload || !payload.access_token) {
     throw new GraphError({
       status: 500,
       code: "graph_token_malformed",
@@ -392,6 +436,210 @@ function parseMessageIdList(raw: string): string[] {
     if (canon) out.push(canon);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5B — attachment metadata + raw-byte fetches
+// ---------------------------------------------------------------------------
+
+/**
+ * One attachment metadata entry as returned by Graph's list endpoint.
+ * `attachmentType` is derived from `@odata.type` and normalised to the three
+ * supported forms plus `unknown` for anything else. Bytes are NEVER present
+ * here — the metadata list uses `$select` that excludes `contentBytes`.
+ *
+ * `contentId` is retained on the shape for schema compatibility with the
+ * atlas_intake_graph_attachments.content_id column but is ALWAYS `null` from
+ * the base collection projection — live Graph refuses `contentId` in
+ * `$select` on `/messages/{id}/attachments` (400). Discovery never fetches
+ * it, and downstream filtering does not require it.
+ */
+export interface GraphAttachmentMetadata {
+  id: string;
+  name: string | null;
+  contentType: string | null;
+  size: number | null;
+  isInline: boolean;
+  contentId: string | null;
+  attachmentType: "fileAttachment" | "itemAttachment" | "referenceAttachment" | "unknown";
+}
+
+const ATTACHMENT_TYPE_MAP: Record<string, GraphAttachmentMetadata["attachmentType"]> = {
+  "#microsoft.graph.fileAttachment": "fileAttachment",
+  "#microsoft.graph.itemAttachment": "itemAttachment",
+  "#microsoft.graph.referenceAttachment": "referenceAttachment",
+};
+
+function normaliseAttachmentType(raw: unknown): GraphAttachmentMetadata["attachmentType"] {
+  if (typeof raw !== "string") return "unknown";
+  return ATTACHMENT_TYPE_MAP[raw] ?? "unknown";
+}
+
+/**
+ * Bounded page limits for attachment metadata listing. Conservative safety
+ * bounds: a single message with more than a few dozen attachments already
+ * exceeds normal Atlas underwriting; > 500 or > 20 pages is treated as a
+ * pathological input that must fail closed rather than be silently
+ * truncated.
+ */
+export const ATTACHMENT_LIST_MAX_PAGES = 20;
+export const ATTACHMENT_LIST_MAX_ROWS  = 500;
+
+/**
+ * List attachment metadata for one message. Follows @odata.nextLink through
+ * a bounded number of pages. Every nextLink is re-validated through the
+ * exact-origin allowlist (so a poisoned Graph response cannot redirect the
+ * bearer token off-domain). Bytes are NEVER fetched here.
+ *
+ * Fails closed on:
+ *   * any non-2xx from Graph (rethrown with retryable/non-retryable
+ *     classification from graphErrorFromResponse);
+ *   * malformed payload;
+ *   * more than ATTACHMENT_LIST_MAX_PAGES pages or ATTACHMENT_LIST_MAX_ROWS
+ *     accumulated rows (throws graph_attachment_page_limit — non-retryable
+ *     so the queue does not spin on the same pathological message);
+ *   * a mid-list transport failure — the entire list fails atomically; the
+ *     caller must NOT commit a partial enumeration.
+ */
+export async function listMessageAttachments(
+  mailbox: string,
+  messageId: string,
+  token: GraphAccessToken,
+  deps: GraphClientDeps = {},
+): Promise<GraphAttachmentMetadata[]> {
+  const out: GraphAttachmentMetadata[] = [];
+  let url: string | null = GRAPH_ATTACHMENT_LIST_URL_FN(mailbox, messageId);
+  let pageCount = 0;
+  while (url) {
+    if (pageCount >= ATTACHMENT_LIST_MAX_PAGES) {
+      throw new GraphError({
+        status: 0,
+        code: "graph_attachment_page_limit",
+        message: "graph_attachment_page_limit",
+      });
+    }
+    // Every URL that carries the bearer token passes the exact-origin
+    // allowlist — including server-returned nextLinks.
+    const res = await fetchWithAllowlist(
+      url,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token.token}`, Accept: "application/json" },
+      },
+      deps,
+    );
+    if (!res.ok) throw await graphErrorFromResponse(res);
+    const payload = (await res.json().catch(() => null)) as {
+      value?: Array<{
+        id?: string;
+        name?: string | null;
+        contentType?: string | null;
+        size?: number | null;
+        isInline?: boolean | null;
+        // contentId is NOT projected from the base attachments collection —
+        // even if Graph returned it we would ignore it here.
+        "@odata.type"?: string;
+      }>;
+      "@odata.nextLink"?: string;
+    } | null;
+    if (!payload || !Array.isArray(payload.value)) {
+      throw new GraphError({
+        status: 0,
+        code: "graph_attachment_list_malformed",
+        message: "graph_attachment_list_malformed",
+      });
+    }
+    for (const row of payload.value) {
+      if (!row || typeof row.id !== "string" || row.id.length === 0) {
+        throw new GraphError({
+          status: 0,
+          code: "graph_attachment_list_malformed",
+          message: "graph_attachment_list_malformed",
+        });
+      }
+      out.push({
+        id: row.id,
+        name: typeof row.name === "string" ? row.name : null,
+        contentType: typeof row.contentType === "string" ? row.contentType : null,
+        size: typeof row.size === "number" && Number.isFinite(row.size) ? row.size : null,
+        isInline: row.isInline === true,
+        // Always null from the base collection projection (see interface
+        // docs). Filtering does not depend on it.
+        contentId: null,
+        attachmentType: normaliseAttachmentType(row["@odata.type"]),
+      });
+      if (out.length > ATTACHMENT_LIST_MAX_ROWS) {
+        throw new GraphError({
+          status: 0,
+          code: "graph_attachment_page_limit",
+          message: "graph_attachment_page_limit",
+        });
+      }
+    }
+    pageCount += 1;
+    const nextLink = typeof payload["@odata.nextLink"] === "string" ? payload["@odata.nextLink"] : null;
+    if (!nextLink) {
+      url = null;
+    } else {
+      // Validate BEFORE assigning: if the origin is off-Graph we throw
+      // rather than issue a token-bearing request. assertAllowedGraphUrl
+      // raises a classified GraphError; the whole listing then fails
+      // atomically (no partial discovery commit).
+      assertAllowedGraphUrl(nextLink);
+      url = nextLink;
+    }
+  }
+  return out;
+}
+
+/**
+ * Fetch raw attachment bytes via `/attachments/{id}/$value`.
+ *
+ * If `maxBytes` is provided AND a valid Content-Length response header
+ * exceeds it, the request is failed with `size_mismatch` BEFORE the body
+ * is consumed — a malformed upstream response cannot force an unbounded
+ * allocation. The caller must still re-validate the actual byte length
+ * after reading, because Content-Length is advisory.
+ *
+ * Never used for `referenceAttachment` (would point off-Microsoft) and
+ * never for `itemAttachment` (embedded item, not a byte payload).
+ */
+export async function fetchAttachmentBytes(
+  mailbox: string,
+  messageId: string,
+  attachmentId: string,
+  token: GraphAccessToken,
+  deps: GraphClientDeps = {},
+  maxBytes?: number,
+): Promise<ArrayBuffer> {
+  const res = await fetchWithAllowlist(
+    GRAPH_ATTACHMENT_VALUE_URL_FN(mailbox, messageId, attachmentId),
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token.token}`,
+        Accept: "application/octet-stream",
+      },
+    },
+    deps,
+  );
+  if (!res.ok) throw await graphErrorFromResponse(res);
+  if (typeof maxBytes === "number" && Number.isFinite(maxBytes) && maxBytes > 0) {
+    const rawLen = res.headers.get("Content-Length");
+    if (rawLen) {
+      const n = Number(rawLen);
+      if (Number.isFinite(n) && n > maxBytes) {
+        // Refuse the body up-front rather than allocating for a response
+        // that will be rejected downstream anyway.
+        throw new GraphError({
+          status: res.status,
+          code: "size_mismatch",
+          message: "size_mismatch",
+        });
+      }
+    }
+  }
+  return await res.arrayBuffer();
 }
 
 // Referenced for stable module-graph presence in checked builds; harmless.

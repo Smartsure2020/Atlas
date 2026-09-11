@@ -30,6 +30,8 @@ export type AtlasJobType =
   | "quote_review"
   | "communication_generation"
   | "cleanup"
+  | "graph_attachment_discovery"
+  | "graph_attachment_ingest"
   | "other";
 
 export type AtlasJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "skipped";
@@ -200,7 +202,16 @@ export async function completeJob(
 export async function failJob(
   admin: SupabaseClient,
   jobId: string | undefined,
-  params: { errorCode: string; errorMessage?: string | null }
+  params: {
+    errorCode: string;
+    errorMessage?: string | null;
+    /**
+     * Optional upstream Retry-After (seconds). When provided AND the failure
+     * is retryable, the next-retry timestamp honors this hint (clamped) so
+     * Microsoft Graph 429 semantics propagate through the atlas_jobs clock.
+     */
+    retryAfterSeconds?: number | null;
+  }
 ) {
   if (!jobId) return;
   const { data: current } = await admin
@@ -221,7 +232,12 @@ export async function failJob(
       error_message: params.errorMessage?.slice(0, 240) ?? null,
       last_error_code: params.errorCode,
       last_error_message: params.errorMessage?.slice(0, 240) ?? null,
-      next_retry_at: nextRetryAt({ retryCount, maxRetries, retryable }),
+      next_retry_at: nextRetryAt({
+        retryCount,
+        maxRetries,
+        retryable,
+        retryAfterSeconds: params.retryAfterSeconds ?? null,
+      }),
       completed_at: new Date().toISOString(),
       heartbeat_at: new Date().toISOString(),
     })

@@ -114,6 +114,12 @@ export interface Env {
   // Empty/absent => intake is effectively disabled even if the flag is on.
   ATLAS_GRAPH_MAILBOXES_JSON?: string;
 
+  // --- Microsoft Graph attachment ingestion (Phase 5B) ---
+  // Optional override for the maximum attachment byte size Phase 5B will
+  // download. Effective cap is min(this, MAX_CLIENT_UPLOAD_BYTES). Absent =>
+  // MAX_CLIENT_UPLOAD_BYTES (15 MiB). Never raises the cap above 15 MiB.
+  ATLAS_INTAKE_ATTACHMENT_MAX_BYTES?: string;
+
   // Cloudflare Queue binding for shadow-pipeline processing.
   //
   // Populated only after the operator runs the wrangler commands documented in
@@ -186,6 +192,22 @@ export function strictAccessScoping(env: Env): boolean {
  */
 export function graphIntakeEnabled(env: Env): boolean {
   return env.ATLAS_GRAPH_INTAKE_ENABLED === "true";
+}
+
+/**
+ * Phase 5B — resolve the effective attachment byte cap. Never exceeds the
+ * existing Atlas client-document ceiling (MAX_CLIENT_UPLOAD_BYTES). A
+ * misconfigured env cannot raise the cap; oversize attachments are refused
+ * before any Graph byte fetch.
+ */
+export const MAX_INTAKE_ATTACHMENT_BYTES_DEFAULT = 15 * 1024 * 1024;
+
+export function attachmentMaxBytes(env: Env): number {
+  const configured = Number(env.ATLAS_INTAKE_ATTACHMENT_MAX_BYTES);
+  const cap = Number.isFinite(configured) && configured > 0
+    ? Math.trunc(configured)
+    : MAX_INTAKE_ATTACHMENT_BYTES_DEFAULT;
+  return Math.min(cap, MAX_INTAKE_ATTACHMENT_BYTES_DEFAULT);
 }
 
 /**
