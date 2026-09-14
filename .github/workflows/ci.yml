@@ -17,6 +17,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             worker/package-lock.json
+            services/malware-scanner/package-lock.json
 
       - name: Install frontend dependencies
         run: npm ci
@@ -37,3 +38,52 @@ jobs:
 
       - name: Frontend production build
         run: npm run build
+
+  scanner-service:
+    # Isolated malware-scanner adapter (services/malware-scanner). Runs the
+    # scanner test suite and a build, both against a local fake clamd — no
+    # real ClamAV, no malware, no EICAR in CI. The runtime container is
+    # exercised in the docker-build step below.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: services/malware-scanner/package-lock.json
+
+      - name: Install scanner dependencies (npm ci)
+        run: npm ci
+        working-directory: services/malware-scanner
+
+      - name: Build scanner (tsc)
+        run: npm run build
+        working-directory: services/malware-scanner
+
+      - name: Validate scanner entrypoint resolves
+        run: npm run validate:entrypoint
+        working-directory: services/malware-scanner
+
+      - name: Run scanner tests (fake clamd)
+        run: npm test
+        working-directory: services/malware-scanner
+
+  scanner-docker-build:
+    # Build the scanner adapter container using the committed lockfile. No
+    # push, no registry, no real clamd. Runs on ubuntu-latest which ships
+    # Docker; keeps builds hermetic to the lockfile via `npm ci` inside.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
+        run: docker build -t atlas-malware-scanner:ci .
+        working-directory: services/malware-scanner
+      - name: docker compose config (syntax check only)
+        run: docker compose -f docker-compose.yml config >/dev/null
+        working-directory: services/malware-scanner
+        env:
+          # docker compose config needs the required var to interpolate; the
+          # value is not used because nothing is actually started.
+          MALWARE_SCANNER_TOKEN: ci-only-placeholder-not-a-real-token-value-32ok
