@@ -68,6 +68,11 @@ export interface Env {
   // is not configured in production.
   ATLAS_MALWARE_SCANNER_URL?: string;
   ATLAS_MALWARE_SCANNER_TOKEN?: string;
+  // Optional. Bounded HTTP timeout for the Atlas -> scanner request. Missing /
+  // malformed / out-of-range values fall back to a safe default and are
+  // clamped, never trusted as-is. A timeout MUST fail closed and never
+  // return a clean verdict. See `scannerRequestTimeoutMs()` below.
+  ATLAS_MALWARE_SCANNER_TIMEOUT_MS?: string;
   ATLAS_ALERT_WEBHOOK_URL?: string;
   ATLAS_STRICT_ACCESS_SCOPING?: string;
   ATLAS_CLEANUP_APPROVED?: string;
@@ -418,4 +423,42 @@ export function isPlaceholderScannerUrl(url: string | null | undefined): boolean
   if (!url) return false;
   const lower = url.toLowerCase();
   return SCANNER_URL_PLACEHOLDER_TOKENS.some((token) => lower.includes(token));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 Checkpoint 2B2B — Atlas -> scanner request timeout
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounded timeout for the Atlas Worker -> malware-scanner HTTP request.
+ *
+ * The scanner is a separate service reachable over the public network. Without
+ * an application-level timeout an unreachable scanner can hold a fetch open
+ * for a long time and starve the background worker. This timeout is enforced
+ * via an AbortController by the caller.
+ *
+ * Fail-closed semantics
+ * ---------------------
+ *   * A missing or malformed env value falls back to the default (below),
+ *     never to "infinite".
+ *   * Absurd values (too small to complete a scan, or larger than a few
+ *     minutes) are clamped to the [`MIN`, `MAX`] range. We never trust the
+ *     env value as-is.
+ *   * The caller MUST convert an AbortError into a non-clean failure. See
+ *     `worker/src/malware-scan.ts` for the corresponding wiring.
+ */
+export const SCANNER_TIMEOUT_DEFAULT_MS = 30_000;
+export const SCANNER_TIMEOUT_MIN_MS = 1_000;
+export const SCANNER_TIMEOUT_MAX_MS = 5 * 60_000;
+
+export function scannerRequestTimeoutMs(env: Env): number {
+  const raw = env.ATLAS_MALWARE_SCANNER_TIMEOUT_MS;
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return SCANNER_TIMEOUT_DEFAULT_MS;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return SCANNER_TIMEOUT_DEFAULT_MS;
+  if (n < SCANNER_TIMEOUT_MIN_MS) return SCANNER_TIMEOUT_MIN_MS;
+  if (n > SCANNER_TIMEOUT_MAX_MS) return SCANNER_TIMEOUT_MAX_MS;
+  return n;
 }
