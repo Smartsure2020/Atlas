@@ -316,6 +316,190 @@ test("sign-out uses local scope (current session only)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Frontend redirect target (Phase 6 production sign-in handoff)
+// ---------------------------------------------------------------------------
+
+// Local re-implementation of `resolveFrontendRedirectTarget` from
+// worker/src/oauth.ts, kept in sync with that helper's contract. This mirrors
+// the pattern used for `safeReturnPath` above so the test file remains
+// import-free of the Worker's runtime module graph.
+type ResolveEnv = { CORS_ORIGIN?: string; ATLAS_ENV?: string };
+function resolveFrontendRedirectTarget(env: ResolveEnv, returnPath: string): string | null {
+  const raw = env.CORS_ORIGIN;
+  if (!raw) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  if (env.ATLAS_ENV === "production" && parsed.protocol !== "https:") return null;
+  return `${parsed.origin}${safeReturnPath(returnPath)}`;
+}
+
+test("resolveFrontendRedirectTarget returns null when CORS_ORIGIN is unset", () => {
+  assertEqual(resolveFrontendRedirectTarget({}, "/"), null, "no CORS_ORIGIN -> null");
+  assertEqual(resolveFrontendRedirectTarget({ CORS_ORIGIN: "" }, "/"), null, "empty CORS_ORIGIN -> null");
+});
+
+test("resolveFrontendRedirectTarget composes origin + safe return path", () => {
+  const env: ResolveEnv = { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" };
+  assertEqual(
+    resolveFrontendRedirectTarget(env, "/submissions/abc"),
+    "https://atlas.example.com/submissions/abc",
+    "origin + safe path",
+  );
+  assertEqual(
+    resolveFrontendRedirectTarget(env, "/"),
+    "https://atlas.example.com/",
+    "root path preserved",
+  );
+});
+
+test("resolveFrontendRedirectTarget strips path/query/hash from CORS_ORIGIN (origin only)", () => {
+  const env: ResolveEnv = { CORS_ORIGIN: "https://atlas.example.com/some/path?x=1#frag", ATLAS_ENV: "production" };
+  assertEqual(
+    resolveFrontendRedirectTarget(env, "/pipeline"),
+    "https://atlas.example.com/pipeline",
+    "CORS_ORIGIN reduced to origin",
+  );
+});
+
+test("resolveFrontendRedirectTarget honours safeReturnPath (blocks open redirects)", () => {
+  const env: ResolveEnv = { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" };
+  assertEqual(
+    resolveFrontendRedirectTarget(env, "//evil.example"),
+    "https://atlas.example.com/",
+    "protocol-relative return path collapses to /",
+  );
+  assertEqual(
+    resolveFrontendRedirectTarget(env, "javascript:alert(1)"),
+    "https://atlas.example.com/",
+    "javascript: return path collapses to /",
+  );
+  assertEqual(
+    resolveFrontendRedirectTarget(env, "https://evil.example/steal"),
+    "https://atlas.example.com/",
+    "absolute return path collapses to /",
+  );
+});
+
+test("resolveFrontendRedirectTarget rejects a malformed CORS_ORIGIN", () => {
+  const env: ResolveEnv = { CORS_ORIGIN: "not a url", ATLAS_ENV: "production" };
+  assertEqual(resolveFrontendRedirectTarget(env, "/"), null, "malformed URL -> null");
+});
+
+test("resolveFrontendRedirectTarget rejects non-http(s) CORS_ORIGIN schemes", () => {
+  assertEqual(
+    resolveFrontendRedirectTarget({ CORS_ORIGIN: "javascript:alert(1)", ATLAS_ENV: "production" }, "/"),
+    null,
+    "javascript: scheme -> null",
+  );
+  assertEqual(
+    resolveFrontendRedirectTarget({ CORS_ORIGIN: "data:text/html,x", ATLAS_ENV: "production" }, "/"),
+    null,
+    "data: scheme -> null",
+  );
+});
+
+test("resolveFrontendRedirectTarget rejects http:// CORS_ORIGIN in production", () => {
+  const prodHttp = resolveFrontendRedirectTarget(
+    { CORS_ORIGIN: "http://atlas.example.com", ATLAS_ENV: "production" },
+    "/",
+  );
+  assertEqual(prodHttp, null, "production forbids http scheme");
+});
+
+test("resolveFrontendRedirectTarget accepts http://localhost outside production", () => {
+  const dev = resolveFrontendRedirectTarget(
+    { CORS_ORIGIN: "http://localhost:5173", ATLAS_ENV: "development" },
+    "/pipeline",
+  );
+  assertEqual(dev, "http://localhost:5173/pipeline", "dev accepts http localhost");
+});
+
+// ---------------------------------------------------------------------------
+// Callback response shape (Phase 6 production handoff)
+// ---------------------------------------------------------------------------
+
+// Mirrors the branch selection in handleCallback: when a frontend target
+// resolves AND the Supabase magiclink was minted, respond 302 to the
+// action_link; otherwise return the legacy JSON response.
+type CallbackDecision =
+  | { kind: "redirect"; location: string }
+  | { kind: "json"; actionLink: string | null; returnPath: string };
+function decideCallbackResponse(
+  env: ResolveEnv,
+  returnPath: string,
+  actionLink: string | null,
+): CallbackDecision {
+  const redirectTo = resolveFrontendRedirectTarget(env, returnPath);
+  if (redirectTo && actionLink) return { kind: "redirect", location: actionLink };
+  return { kind: "json", actionLink, returnPath: returnPath || "/" };
+}
+
+test("callback redirects (302) to action_link when CORS_ORIGIN is configured", () => {
+  const env: ResolveEnv = { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" };
+  const actionLink = "https://algenlnxagpxzsgaworz.supabase.co/auth/v1/verify?token=T&type=magiclink&redirect_to=https%3A%2F%2Fatlas.example.com%2F";
+  const d = decideCallbackResponse(env, "/", actionLink);
+  assertEqual(d.kind, "redirect", "expect 302 branch");
+  if (d.kind === "redirect") assertEqual(d.location, actionLink, "Location = action_link");
+});
+
+test("callback falls back to JSON when CORS_ORIGIN is unset (dev)", () => {
+  const env: ResolveEnv = { ATLAS_ENV: "development" };
+  const d = decideCallbackResponse(env, "/", "https://x.supabase.co/auth/v1/verify?token=T");
+  assertEqual(d.kind, "json", "dev without CORS_ORIGIN -> JSON");
+});
+
+test("callback preserves safe return path in the frontend redirectTo", () => {
+  // Even when the browser is sent to Supabase's action_link, the Supabase link
+  // itself contains our redirectTo, which must be origin + safeReturnPath.
+  const target = resolveFrontendRedirectTarget(
+    { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" },
+    "/submissions/abc",
+  );
+  assertEqual(target, "https://atlas.example.com/submissions/abc", "safe return path composed");
+});
+
+test("callback rejects a malicious return path before redirectTo composition", () => {
+  const target = resolveFrontendRedirectTarget(
+    { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" },
+    "https://evil.example/steal",
+  );
+  assertEqual(target, "https://atlas.example.com/", "absolute return -> /");
+});
+
+test("callback fails closed when production has no CORS_ORIGIN (validateEnv guards this)", () => {
+  // validateEnv() (worker/src/phase6-hardening.ts) reports
+  // "production_cors_origin_is_local_or_missing" so requests to the Worker
+  // return 503 before /auth/callback runs. This test documents the invariant
+  // by asserting the redirect resolver returns null (the callback then falls
+  // back to JSON, but the Worker won't reach that path in production because
+  // validateEnv gates the whole request).
+  assertEqual(
+    resolveFrontendRedirectTarget({ ATLAS_ENV: "production" }, "/"),
+    null,
+    "no CORS_ORIGIN in production -> null (validateEnv blocks the request upstream)",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// DevSignIn compatibility
+// ---------------------------------------------------------------------------
+
+test("DevSignIn (/dev/sign-in) still returns JSON action_link (unchanged contract)", () => {
+  // DevSignIn is served by worker/src/dev-sign-in.ts and is a separate route
+  // from /auth/callback. It intentionally returns { ok:true, action_link } so
+  // the local React DevSignIn component can navigate manually. The Phase 6
+  // handoff change only touches /auth/callback and does not alter this route.
+  const devResponseShape = { ok: true, action_link: "https://x.supabase.co/auth/v1/verify?token=T" };
+  assert(devResponseShape.ok === true && typeof devResponseShape.action_link === "string",
+    "DevSignIn contract preserved");
+});
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 

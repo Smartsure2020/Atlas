@@ -129,6 +129,32 @@ export function safeReturnPath(input: string | null | undefined): string {
   return trimmed || "/";
 }
 
+/**
+ * Build the browser destination Supabase should redirect to after it verifies
+ * the magiclink. Composed from CORS_ORIGIN's origin (scheme + host + optional
+ * port) plus safeReturnPath(returnPath). Returns null when no acceptable
+ * frontend origin is configured — the caller then falls back to the legacy
+ * JSON response, which is safe because there is no attacker-controlled URL to
+ * redirect to. Production requires HTTPS; local (http://localhost) is accepted
+ * only in non-production environments.
+ */
+export function resolveFrontendRedirectTarget(
+  env: Env,
+  returnPath: string,
+): string | null {
+  const raw = env.CORS_ORIGIN;
+  if (!raw) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  if (isProductionEnv(env) && parsed.protocol !== "https:") return null;
+  return `${parsed.origin}${safeReturnPath(returnPath)}`;
+}
+
 /** Step 1: build the Microsoft sign-in URL and redirect the user to it. */
 export async function handleLogin(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -296,17 +322,34 @@ export async function handleCallback(
     metadata: { role },
   });
 
+  const returnPath = parsed.returnPath || "/";
+  const redirectTo = resolveFrontendRedirectTarget(env, returnPath);
+
   const { data: link } = await admin.auth.admin.generateLink({
     type: "magiclink",
     email,
+    ...(redirectTo ? { options: { redirectTo } } : {}),
   });
+  const actionLink = link?.properties?.action_link ?? null;
 
-  const returnPath = parsed.returnPath || "/";
+  // When a frontend origin is configured (staging + production), redirect the
+  // browser to the Supabase action_link so it can verify and hand off to the
+  // deployed SPA. Without CORS_ORIGIN there is no safe destination, so fall
+  // back to the legacy JSON response for local development.
+  if (redirectTo && actionLink) {
+    return withClearCookie(
+      new Response(null, {
+        status: 302,
+        headers: { Location: actionLink, "Cache-Control": "no-store" },
+      }),
+      env,
+    );
+  }
 
   return withClearCookie(json({
     ok: true,
     user: { id: userId, email, role },
-    action_link: link?.properties?.action_link ?? null,
+    action_link: actionLink,
     return_path: returnPath,
   }), env);
 }
