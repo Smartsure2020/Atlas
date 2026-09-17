@@ -3,18 +3,15 @@
  * ---------------------------------------------------------------------------
  * Tests the signed-cookie OAuth state mechanism: valid state, missing state,
  * altered state, expired state, replayed state, unsafe return URLs, and
- * production cookie attributes.
+ * production cookie attributes. Imports the actual production helpers from
+ * worker/src/oauth-redirect.ts so the assertions exercise the real code path
+ * rather than a copied re-implementation.
  */
 
-const SAFE_RETURN_PATH_RE = /^\/[a-zA-Z0-9/_-]*$/;
-function safeReturnPath(input: string | null | undefined): string {
-  if (!input) return "/";
-  const trimmed = input.trim();
-  if (!SAFE_RETURN_PATH_RE.test(trimmed)) return "/";
-  if (trimmed.includes("//")) return "/";
-  return trimmed || "/";
-}
-
+import {
+  resolveFrontendRedirectTarget,
+  safeReturnPath,
+} from "../worker/src/oauth-redirect.js";
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
 function test(name: string, fn: () => void | Promise<void>) { tests.push({ name, fn }); }
@@ -319,39 +316,29 @@ test("sign-out uses local scope (current session only)", () => {
 // Frontend redirect target (Phase 6 production sign-in handoff)
 // ---------------------------------------------------------------------------
 
-// Local re-implementation of `resolveFrontendRedirectTarget` from
-// worker/src/oauth.ts, kept in sync with that helper's contract. This mirrors
-// the pattern used for `safeReturnPath` above so the test file remains
-// import-free of the Worker's runtime module graph.
+// The helper under test is imported from worker/src/oauth-redirect.ts above.
+// Its signature takes `Env` (worker/src/config.ts). For focused unit tests we
+// only touch the two fields the helper actually reads.
 type ResolveEnv = { CORS_ORIGIN?: string; ATLAS_ENV?: string };
-function resolveFrontendRedirectTarget(env: ResolveEnv, returnPath: string): string | null {
-  const raw = env.CORS_ORIGIN;
-  if (!raw) return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
-  if (env.ATLAS_ENV === "production" && parsed.protocol !== "https:") return null;
-  return `${parsed.origin}${safeReturnPath(returnPath)}`;
+function callResolve(env: ResolveEnv, returnPath: string): string | null {
+  // Cast at the call boundary rather than duplicating the Env shape.
+  return resolveFrontendRedirectTarget(env as unknown as import("../worker/src/config.js").Env, returnPath);
 }
 
 test("resolveFrontendRedirectTarget returns null when CORS_ORIGIN is unset", () => {
-  assertEqual(resolveFrontendRedirectTarget({}, "/"), null, "no CORS_ORIGIN -> null");
-  assertEqual(resolveFrontendRedirectTarget({ CORS_ORIGIN: "" }, "/"), null, "empty CORS_ORIGIN -> null");
+  assertEqual(callResolve({}, "/"), null, "no CORS_ORIGIN -> null");
+  assertEqual(callResolve({ CORS_ORIGIN: "" }, "/"), null, "empty CORS_ORIGIN -> null");
 });
 
 test("resolveFrontendRedirectTarget composes origin + safe return path", () => {
   const env: ResolveEnv = { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" };
   assertEqual(
-    resolveFrontendRedirectTarget(env, "/submissions/abc"),
+    callResolve(env, "/submissions/abc"),
     "https://atlas.example.com/submissions/abc",
     "origin + safe path",
   );
   assertEqual(
-    resolveFrontendRedirectTarget(env, "/"),
+    callResolve(env, "/"),
     "https://atlas.example.com/",
     "root path preserved",
   );
@@ -360,7 +347,7 @@ test("resolveFrontendRedirectTarget composes origin + safe return path", () => {
 test("resolveFrontendRedirectTarget strips path/query/hash from CORS_ORIGIN (origin only)", () => {
   const env: ResolveEnv = { CORS_ORIGIN: "https://atlas.example.com/some/path?x=1#frag", ATLAS_ENV: "production" };
   assertEqual(
-    resolveFrontendRedirectTarget(env, "/pipeline"),
+    callResolve(env, "/pipeline"),
     "https://atlas.example.com/pipeline",
     "CORS_ORIGIN reduced to origin",
   );
@@ -369,17 +356,17 @@ test("resolveFrontendRedirectTarget strips path/query/hash from CORS_ORIGIN (ori
 test("resolveFrontendRedirectTarget honours safeReturnPath (blocks open redirects)", () => {
   const env: ResolveEnv = { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" };
   assertEqual(
-    resolveFrontendRedirectTarget(env, "//evil.example"),
+    callResolve(env, "//evil.example"),
     "https://atlas.example.com/",
     "protocol-relative return path collapses to /",
   );
   assertEqual(
-    resolveFrontendRedirectTarget(env, "javascript:alert(1)"),
+    callResolve(env, "javascript:alert(1)"),
     "https://atlas.example.com/",
     "javascript: return path collapses to /",
   );
   assertEqual(
-    resolveFrontendRedirectTarget(env, "https://evil.example/steal"),
+    callResolve(env, "https://evil.example/steal"),
     "https://atlas.example.com/",
     "absolute return path collapses to /",
   );
@@ -387,24 +374,24 @@ test("resolveFrontendRedirectTarget honours safeReturnPath (blocks open redirect
 
 test("resolveFrontendRedirectTarget rejects a malformed CORS_ORIGIN", () => {
   const env: ResolveEnv = { CORS_ORIGIN: "not a url", ATLAS_ENV: "production" };
-  assertEqual(resolveFrontendRedirectTarget(env, "/"), null, "malformed URL -> null");
+  assertEqual(callResolve(env, "/"), null, "malformed URL -> null");
 });
 
 test("resolveFrontendRedirectTarget rejects non-http(s) CORS_ORIGIN schemes", () => {
   assertEqual(
-    resolveFrontendRedirectTarget({ CORS_ORIGIN: "javascript:alert(1)", ATLAS_ENV: "production" }, "/"),
+    callResolve({ CORS_ORIGIN: "javascript:alert(1)", ATLAS_ENV: "production" }, "/"),
     null,
     "javascript: scheme -> null",
   );
   assertEqual(
-    resolveFrontendRedirectTarget({ CORS_ORIGIN: "data:text/html,x", ATLAS_ENV: "production" }, "/"),
+    callResolve({ CORS_ORIGIN: "data:text/html,x", ATLAS_ENV: "production" }, "/"),
     null,
     "data: scheme -> null",
   );
 });
 
 test("resolveFrontendRedirectTarget rejects http:// CORS_ORIGIN in production", () => {
-  const prodHttp = resolveFrontendRedirectTarget(
+  const prodHttp = callResolve(
     { CORS_ORIGIN: "http://atlas.example.com", ATLAS_ENV: "production" },
     "/",
   );
@@ -412,7 +399,7 @@ test("resolveFrontendRedirectTarget rejects http:// CORS_ORIGIN in production", 
 });
 
 test("resolveFrontendRedirectTarget accepts http://localhost outside production", () => {
-  const dev = resolveFrontendRedirectTarget(
+  const dev = callResolve(
     { CORS_ORIGIN: "http://localhost:5173", ATLAS_ENV: "development" },
     "/pipeline",
   );
@@ -434,7 +421,7 @@ function decideCallbackResponse(
   returnPath: string,
   actionLink: string | null,
 ): CallbackDecision {
-  const redirectTo = resolveFrontendRedirectTarget(env, returnPath);
+  const redirectTo = callResolve(env, returnPath);
   if (redirectTo && actionLink) return { kind: "redirect", location: actionLink };
   return { kind: "json", actionLink, returnPath: returnPath || "/" };
 }
@@ -456,7 +443,7 @@ test("callback falls back to JSON when CORS_ORIGIN is unset (dev)", () => {
 test("callback preserves safe return path in the frontend redirectTo", () => {
   // Even when the browser is sent to Supabase's action_link, the Supabase link
   // itself contains our redirectTo, which must be origin + safeReturnPath.
-  const target = resolveFrontendRedirectTarget(
+  const target = callResolve(
     { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" },
     "/submissions/abc",
   );
@@ -464,7 +451,7 @@ test("callback preserves safe return path in the frontend redirectTo", () => {
 });
 
 test("callback rejects a malicious return path before redirectTo composition", () => {
-  const target = resolveFrontendRedirectTarget(
+  const target = callResolve(
     { CORS_ORIGIN: "https://atlas.example.com", ATLAS_ENV: "production" },
     "https://evil.example/steal",
   );
@@ -479,7 +466,7 @@ test("callback fails closed when production has no CORS_ORIGIN (validateEnv guar
   // back to JSON, but the Worker won't reach that path in production because
   // validateEnv gates the whole request).
   assertEqual(
-    resolveFrontendRedirectTarget({ ATLAS_ENV: "production" }, "/"),
+    callResolve({ ATLAS_ENV: "production" }, "/"),
     null,
     "no CORS_ORIGIN in production -> null (validateEnv blocks the request upstream)",
   );

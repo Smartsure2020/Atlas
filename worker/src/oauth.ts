@@ -24,6 +24,12 @@ import { adminClient, audit, json } from "./auth";
 import { resolveRoleFromAllowlist, type Env } from "./config";
 import { generateOAuthState, verifyMicrosoftIdToken } from "./jwks";
 import { findUserByEmail } from "./user-directory";
+import {
+  resolveFrontendRedirectTarget,
+  safeReturnPath,
+} from "./oauth-redirect.js";
+
+export { resolveFrontendRedirectTarget, safeReturnPath };
 
 const MS_AUTHORIZE = (env: Env) =>
   `https://login.microsoftonline.com/${env.AZURE_TENANT_ID}/oauth2/v2.0/authorize`;
@@ -32,8 +38,6 @@ const MS_TOKEN = (env: Env) =>
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const STATE_COOKIE_NAME = "atlas_oauth_state";
-
-const SAFE_RETURN_PATH_RE = /^\/[a-zA-Z0-9/_-]*$/;
 
 function isProductionEnv(env: Env): boolean {
   return env.ATLAS_ENV === "production";
@@ -119,40 +123,6 @@ async function computeS256Challenge(verifier: string): Promise<string> {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
-}
-
-export function safeReturnPath(input: string | null | undefined): string {
-  if (!input) return "/";
-  const trimmed = input.trim();
-  if (!SAFE_RETURN_PATH_RE.test(trimmed)) return "/";
-  if (trimmed.includes("//")) return "/";
-  return trimmed || "/";
-}
-
-/**
- * Build the browser destination Supabase should redirect to after it verifies
- * the magiclink. Composed from CORS_ORIGIN's origin (scheme + host + optional
- * port) plus safeReturnPath(returnPath). Returns null when no acceptable
- * frontend origin is configured — the caller then falls back to the legacy
- * JSON response, which is safe because there is no attacker-controlled URL to
- * redirect to. Production requires HTTPS; local (http://localhost) is accepted
- * only in non-production environments.
- */
-export function resolveFrontendRedirectTarget(
-  env: Env,
-  returnPath: string,
-): string | null {
-  const raw = env.CORS_ORIGIN;
-  if (!raw) return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
-  if (isProductionEnv(env) && parsed.protocol !== "https:") return null;
-  return `${parsed.origin}${safeReturnPath(returnPath)}`;
 }
 
 /** Step 1: build the Microsoft sign-in URL and redirect the user to it. */
