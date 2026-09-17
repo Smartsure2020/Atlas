@@ -57,6 +57,7 @@
     "worker/src/cleanup-reference.ts",
     "worker/src/config.ts",
     "worker/src/malware-scan.ts",
+    "worker/src/oauth-redirect.ts",
     "worker/src/auth.ts",
     "worker/src/phase4-queue-selector.ts",
     "src/lib/review-edit.ts",

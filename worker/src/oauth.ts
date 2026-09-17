@@ -24,6 +24,12 @@ import { adminClient, audit, json } from "./auth";
 import { resolveRoleFromAllowlist, type Env } from "./config";
 import { generateOAuthState, verifyMicrosoftIdToken } from "./jwks";
 import { findUserByEmail } from "./user-directory";
+import {
+  resolveFrontendRedirectTarget,
+  safeReturnPath,
+} from "./oauth-redirect.js";
+
+export { resolveFrontendRedirectTarget, safeReturnPath };
 
 const MS_AUTHORIZE = (env: Env) =>
   `https://login.microsoftonline.com/${env.AZURE_TENANT_ID}/oauth2/v2.0/authorize`;
@@ -32,8 +38,6 @@ const MS_TOKEN = (env: Env) =>
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const STATE_COOKIE_NAME = "atlas_oauth_state";
-
-const SAFE_RETURN_PATH_RE = /^\/[a-zA-Z0-9/_-]*$/;
 
 function isProductionEnv(env: Env): boolean {
   return env.ATLAS_ENV === "production";
@@ -119,14 +123,6 @@ async function computeS256Challenge(verifier: string): Promise<string> {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
-}
-
-export function safeReturnPath(input: string | null | undefined): string {
-  if (!input) return "/";
-  const trimmed = input.trim();
-  if (!SAFE_RETURN_PATH_RE.test(trimmed)) return "/";
-  if (trimmed.includes("//")) return "/";
-  return trimmed || "/";
 }
 
 /** Step 1: build the Microsoft sign-in URL and redirect the user to it. */
@@ -296,17 +292,34 @@ export async function handleCallback(
     metadata: { role },
   });
 
+  const returnPath = parsed.returnPath || "/";
+  const redirectTo = resolveFrontendRedirectTarget(env, returnPath);
+
   const { data: link } = await admin.auth.admin.generateLink({
     type: "magiclink",
     email,
+    ...(redirectTo ? { options: { redirectTo } } : {}),
   });
+  const actionLink = link?.properties?.action_link ?? null;
 
-  const returnPath = parsed.returnPath || "/";
+  // When a frontend origin is configured (staging + production), redirect the
+  // browser to the Supabase action_link so it can verify and hand off to the
+  // deployed SPA. Without CORS_ORIGIN there is no safe destination, so fall
+  // back to the legacy JSON response for local development.
+  if (redirectTo && actionLink) {
+    return withClearCookie(
+      new Response(null, {
+        status: 302,
+        headers: { Location: actionLink, "Cache-Control": "no-store" },
+      }),
+      env,
+    );
+  }
 
   return withClearCookie(json({
     ok: true,
     user: { id: userId, email, role },
-    action_link: link?.properties?.action_link ?? null,
+    action_link: actionLink,
     return_path: returnPath,
   }), env);
 }
