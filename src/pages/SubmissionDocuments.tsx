@@ -62,7 +62,7 @@ export default function DocumentsTab({
     <section className="atlas-doc-groups" aria-labelledby={headingId}>
       <Card
         title="Client documents"
-        description="Everything attached to this submission. Atlas reads active documents during extraction; quarantined and pending files are excluded until they clear."
+        description="Everything attached to this submission, grouped by what the malware scan has confirmed: clean, in progress, failed, quarantined, or not yet confirmed."
         actions={
           canManage ? (
             <Button
@@ -236,7 +236,7 @@ function ActiveGroup({ documents }: { documents: DocumentRow[] }) {
         <EmptyState
           inline
           title="No active documents are on file"
-          body="Nothing here is currently readable — the sections above list the documents Atlas cannot use."
+          body="No document has a confirmed clean scan. Any documents that are blocked, being scanned, or without a confirmed scan result are listed above."
         />
       ) : (
         <DocumentList documents={documents} statusTone="active" />

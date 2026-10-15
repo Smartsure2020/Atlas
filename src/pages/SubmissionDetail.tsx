@@ -62,6 +62,7 @@ import RecommendationPanel from "./RecommendationPanel";
 import QuoteReviewPanel from "./QuoteReviewPanel";
 import MissingInfoPanel from "./MissingInfoPanel";
 import DocumentsTab from "./SubmissionDocuments";
+import { documentsTrustSummary, type DocumentRow } from "../lib/operations-evidence";
 import CommunicationsPanel from "./CommunicationsPanel";
 import AuditTimeline from "./AuditTimeline";
 import {
@@ -479,7 +480,14 @@ export default function SubmissionDetail({
     (item) => item.status === "open" || item.status === "requested"
   );
   const uncertainFieldCount = summary ? countByBand(summary, reviewed, ["uncertain", "conflicting", "missing"]) : 0;
-  const activeDocuments = documents.filter((document) => document.status !== "expired");
+  // Two different questions, two different numbers:
+  //  - attachedDocuments: how many non-expired files hang off this submission.
+  //    A navigation count for the Documents tab badge — not a trust claim.
+  //  - activeDocumentCount: how many of them are confirmed clean. This is what
+  //    every "Active documents" label means, using the same trust rules as the
+  //    Documents tab (pending, failed, infected and unconfirmed are excluded).
+  const attachedDocuments = documents.filter((document) => document.status !== "expired");
+  const activeDocumentCount = documentsTrustSummary(documents as DocumentRow[]).activeCount;
   const extractionConfidence = resolveExtractionConfidence(extraction);
 
   const nextAction = deriveNextAction({
@@ -510,7 +518,7 @@ export default function SubmissionDetail({
           count: openMissingInfo.length,
           attention: openMissingInfo.length > 0,
         },
-        { id: "documents", label: "Documents", count: activeDocuments.length },
+        { id: "documents", label: "Documents", count: attachedDocuments.length },
         { id: "history", label: "History" },
       ]
     : [
@@ -524,7 +532,7 @@ export default function SubmissionDetail({
           count: openMissingInfo.length,
           attention: openMissingInfo.length > 0,
         },
-        { id: "documents", label: "Documents", count: activeDocuments.length },
+        { id: "documents", label: "Documents", count: attachedDocuments.length },
         { id: "communications", label: "Communications" },
         { id: "history", label: "History" },
       ];
@@ -615,7 +623,7 @@ export default function SubmissionDetail({
               uncertainFields={uncertainFieldCount}
               redFlags={redFlags}
               missingFromExtraction={missingFromExtraction}
-              activeDocuments={activeDocuments.length}
+              activeDocuments={activeDocumentCount}
               extractionConfidence={extractionConfidence}
               onGoToTab={onTabChange}
               isBroker={isBroker}
@@ -795,7 +803,7 @@ export default function SubmissionDetail({
                   <RailCount label="Risk concerns raised" value={redFlags.length} onClick={() => onTabChange("risk")} />
                 </>
               )}
-              <RailCount label="Active documents" value={activeDocuments.length} onClick={() => onTabChange("documents")} />
+              <RailCount label="Active documents" value={activeDocumentCount} onClick={() => onTabChange("documents")} />
             </dl>
           </div>
 

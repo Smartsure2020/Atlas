@@ -325,6 +325,54 @@ describe("Submission documents", () => {
     });
   });
 
+  describe("copy never calls unconfirmed or legacy not_scanned documents categorically unreadable", () => {
+    // The worker deliberately still reads legacy `not_scanned` files in some
+    // extraction / review / shadow paths. The UI may say Atlas has no confirmed
+    // clean scan; it must not claim such a file is unreadable or excluded.
+    const OVERCLAIM = /unreadable|not readable|cannot be read|can't be read|excluded|cannot use|extraction is not run|no extraction/i;
+
+    function renderUnconfirmedOnly() {
+      const { scan_status: _drop, ...bare } = doc({ id: "u1", file_name: "bare.pdf" });
+      void _drop;
+      return renderTab({
+        documents: [
+          doc({ id: "n1", file_name: "legacy.pdf", scan_status: "not_scanned" }),
+          bare,
+        ],
+      });
+    }
+
+    it("says no document has a confirmed clean scan, without claiming anything is unusable", () => {
+      const { container } = renderUnconfirmedOnly();
+      const empty = screen.getByText(/No active documents are on file/i);
+      expect(empty).toBeInTheDocument();
+      expect(
+        screen.getByText(/No document has a confirmed clean scan/i)
+      ).toBeInTheDocument();
+      // The old wording asserted Atlas cannot use the documents listed above.
+      expect(screen.queryByText(/Nothing here is currently readable/i)).not.toBeInTheDocument();
+      expect(container.textContent).not.toMatch(OVERCLAIM);
+    });
+
+    it("the Client documents description makes no worker-policy claim", () => {
+      renderUnconfirmedOnly();
+      const description = screen.getByText(/Everything attached to this submission/i);
+      expect(description.textContent).toMatch(/not yet confirmed/i);
+      expect(description.textContent).not.toMatch(/Atlas reads active documents/i);
+      expect(description.textContent).not.toMatch(OVERCLAIM);
+    });
+
+    it("the unconfirmed group and trust strip describe the scan state, not extraction policy", () => {
+      renderUnconfirmedOnly();
+      const group = screen.getByRole("region", { name: /without a confirmed scan result/i });
+      expect(group.textContent).toMatch(/no confirmed clean malware-scan result/i);
+      expect(group.textContent).not.toMatch(OVERCLAIM);
+      // Not a blocking banner: it is a warning that the scan is unconfirmed.
+      expect(screen.getByText(/not confirmed clean/i)).toBeInTheDocument();
+      expect(screen.queryByText(/cannot be read yet/i)).not.toBeInTheDocument();
+    });
+  });
+
   it("orders trust groups with the unconfirmed group between pending and active", () => {
     const { scan_status: _drop, ...bare } = doc({ id: "u", file_name: "bare.pdf" });
     void _drop;
