@@ -432,6 +432,29 @@ test("Worker BROKER_SAFE_AUDIT_ACTIONS remains the explicit positive allow-list"
   for (const a of expected) assert(BROKER_SAFE_AUDIT_ACTIONS.has(a), `missing ${a}`);
 });
 
+test("Worker: malware_scan_completed is staff-only and never broker-safe", () => {
+  // The UI recognises this event for the staff timeline (src/lib/operations-evidence.ts),
+  // but recognising it client-side must NOT widen the broker projection. Its
+  // metadata carries the scanner identity, so it stays off the broker
+  // allow-list (and therefore needs no RLS migration).
+  assert(!isBrokerSafeAuditAction("malware_scan_completed"),
+    "malware_scan_completed must not be broker-safe");
+  assert(!BROKER_SAFE_AUDIT_ACTIONS.has("malware_scan_completed"),
+    "malware_scan_completed must not be in the broker allow-list");
+  const projected = projectAuditForBroker(
+    [{
+      id: "a1",
+      action: "malware_scan_completed",
+      actor: null,
+      metadata_json: { document_id: "d1", scanner: "scanner", bypassed: false },
+      created_at: "2026-08-14T10:00:00Z",
+    }],
+    "broker-1",
+    "broker@example.com"
+  );
+  assert(projected.length === 0, "broker projection must drop malware_scan_completed rows");
+});
+
 test("Worker: unknown future audit actions fail closed for broker", () => {
   const unknowns = [
     "some_new_underwriting_v3",

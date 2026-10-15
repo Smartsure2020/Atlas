@@ -418,6 +418,7 @@ export type DocumentGroupKey =
   | "quarantined"
   | "scan_failed"
   | "scan_pending"
+  | "scan_unverified"
   | "active"
   | "expired";
 
@@ -427,6 +428,7 @@ export interface DocumentRow {
   document_type?: string | null;
   status?: string | null;
   scan_status?: string | null;
+  scanned_at?: string | null;
   size_bytes?: number | null;
   created_at?: string;
   expires_at?: string | null;
@@ -447,14 +449,20 @@ export interface DocumentGroup {
  * lie for something the scanner never cleared. Scan-in-progress wins over
  * active so a document Atlas has not yet scanned is never presented as
  * "on file". Order of returned groups is fixed
- * (quarantined → scan_failed → scan_pending → active → expired) so the
- * caller can loop without a secondary sort.
+ * (quarantined → scan_failed → scan_pending → scan_unverified → active →
+ * expired) so the caller can loop without a secondary sort.
+ *
+ * Only a document whose scan_status is exactly "clean" is active. A missing,
+ * null, `not_scanned` or unrecognised scan state is never inferred to be safe:
+ * it lands in `scan_unverified` so the reader sees that Atlas has no
+ * confirmed clean result, rather than a readable-looking Active document.
  */
 export function groupDocuments(documents: readonly DocumentRow[]): DocumentGroup[] {
   const groups: Record<DocumentGroupKey, DocumentRow[]> = {
     quarantined: [],
     scan_failed: [],
     scan_pending: [],
+    scan_unverified: [],
     active: [],
     expired: [],
   };
@@ -475,12 +483,17 @@ export function groupDocuments(documents: readonly DocumentRow[]): DocumentGroup
       groups.expired.push(document);
       continue;
     }
-    groups.active.push(document);
+    if (document.scan_status === "clean") {
+      groups.active.push(document);
+      continue;
+    }
+    groups.scan_unverified.push(document);
   }
   return [
     { key: "quarantined", documents: groups.quarantined },
     { key: "scan_failed", documents: groups.scan_failed },
     { key: "scan_pending", documents: groups.scan_pending },
+    { key: "scan_unverified", documents: groups.scan_unverified },
     { key: "active", documents: groups.active },
     { key: "expired", documents: groups.expired },
   ];
@@ -619,6 +632,13 @@ export interface DocumentsTrustSummary {
   total: number;
   quarantinedCount: number;
   scanPendingCount: number;
+  /**
+   * Documents with no confirmed scan outcome: scan_status missing, null,
+   * `not_scanned` or an unrecognised value. Not blocking by itself (a legacy
+   * `not_scanned` file may still be read), but never counted as active.
+   */
+  scanUnverifiedCount: number;
+  /** Confirmed clean (scan_status === "clean") and not expired — nothing else. */
   activeCount: number;
   expiredCount: number;
   scanFailedCount: number;
@@ -635,6 +655,7 @@ export function documentsTrustSummary(
 ): DocumentsTrustSummary {
   let quarantined = 0;
   let scanPending = 0;
+  let scanUnverified = 0;
   let active = 0;
   let expired = 0;
   let scanFailed = 0;
@@ -652,12 +673,19 @@ export function documentsTrustSummary(
       expired += 1;
       continue;
     }
-    active += 1;
+    // A failed scan was counted above and is neither active nor unverified.
+    if (document.scan_status === "failed") continue;
+    if (document.scan_status === "clean") {
+      active += 1;
+      continue;
+    }
+    scanUnverified += 1;
   }
   return {
     total: documents.length,
     quarantinedCount: quarantined,
     scanPendingCount: scanPending,
+    scanUnverifiedCount: scanUnverified,
     activeCount: active,
     expiredCount: expired,
     scanFailedCount: scanFailed,
@@ -708,6 +736,15 @@ interface AuditEventMeta {
 const AUDIT_EVENTS: Record<string, AuditEventMeta> = {
   submission_created: { label: "Submission created", group: "changes", actorKind: "person", icon: "plus" },
   document_uploaded: { label: "Document uploaded", group: "documents", actorKind: "person", icon: "upload" },
+  // Written by the worker when the upload malware scan returns clean. The
+  // original `document_uploaded` event (scan_status: pending at upload time)
+  // is immutable history; this is the later, separate outcome event.
+  malware_scan_completed: {
+    label: "Malware scan completed — clean",
+    group: "documents",
+    actorKind: "system",
+    icon: "check-circle",
+  },
   extraction_run: { label: "Extraction run", group: "processing", actorKind: "system", icon: "refresh" },
   extraction_denied: {
     label: "Extraction refused — not an underwriting manager",

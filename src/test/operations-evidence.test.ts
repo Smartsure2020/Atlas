@@ -426,12 +426,13 @@ describe("processingExceptionMetrics", () => {
 /* ---------- groupDocuments / documentsTrustSummary ------------------------ */
 
 describe("groupDocuments", () => {
-  it("returns five buckets in a fixed order even when empty", () => {
+  it("returns six buckets in a fixed order even when empty", () => {
     const groups = groupDocuments([]);
     expect(groups.map((g) => g.key)).toEqual([
       "quarantined",
       "scan_failed",
       "scan_pending",
+      "scan_unverified",
       "active",
       "expired",
     ]);
@@ -458,11 +459,48 @@ describe("groupDocuments", () => {
       { id: "b", scan_status: "pending" },
       { id: "c", scan_status: "infected" },
       { id: "d", status: "expired", scan_status: "clean" },
-      { id: "e" }, // no scan status: treated as active
+      { id: "e" }, // no scan status: unverified, never active
     ];
     const groups = groupDocuments(rows);
     const total = groups.reduce((sum, g) => sum + g.documents.length, 0);
     expect(total).toBe(rows.length);
+  });
+
+  describe("only a confirmed clean scan is active", () => {
+    const bucketOf = (row: Record<string, unknown>) =>
+      groupDocuments([row as never]).find((g) => g.documents.length === 1)?.key;
+
+    it("clean -> active", () => {
+      expect(bucketOf({ id: "d", scan_status: "clean" })).toBe("active");
+    });
+
+    it("pending -> scan_pending, failed -> scan_failed, infected -> quarantined", () => {
+      expect(bucketOf({ id: "d", scan_status: "pending" })).toBe("scan_pending");
+      expect(bucketOf({ id: "d", scan_status: "failed" })).toBe("scan_failed");
+      expect(bucketOf({ id: "d", scan_status: "infected" })).toBe("quarantined");
+    });
+
+    it("missing, null, empty, not_scanned and unknown scan states are never active", () => {
+      const unverified: Record<string, unknown>[] = [
+        { id: "d" },
+        { id: "d", scan_status: null },
+        { id: "d", scan_status: undefined },
+        { id: "d", scan_status: "" },
+        { id: "d", scan_status: "not_scanned" },
+        { id: "d", scan_status: "some_future_state" },
+        { id: "d", scan_status: "CLEAN" },
+      ];
+      for (const row of unverified) {
+        expect(bucketOf(row), JSON.stringify(row)).toBe("scan_unverified");
+      }
+    });
+
+    it("an expired document stays in retention regardless of an unknown scan state", () => {
+      expect(bucketOf({ id: "d", status: "expired" })).toBe("expired");
+      expect(bucketOf({ id: "d", status: "expired", scan_status: "some_future_state" })).toBe(
+        "expired"
+      );
+    });
   });
 });
 
@@ -478,13 +516,28 @@ describe("documentsTrustSummary", () => {
     expect(summary.total).toBe(5);
     expect(summary.quarantinedCount).toBe(1);
     expect(summary.scanPendingCount).toBe(1);
-    // A "failed" scan is a blocking-but-visible outcome: it is not quarantined
-    // and not pending, so it lands in the active bucket alongside "clean".
-    // scanFailedCount is the parallel signal that a page can use to warn.
-    expect(summary.activeCount).toBe(2);
+    // A "failed" scan is a blocking outcome and is counted only in
+    // scanFailedCount — it is never active. Only the confirmed-clean
+    // document is active.
+    expect(summary.activeCount).toBe(1);
+    expect(summary.scanUnverifiedCount).toBe(0);
     expect(summary.expiredCount).toBe(1);
     expect(summary.scanFailedCount).toBe(1);
     expect(summary.hasBlockingIssue).toBe(true);
+  });
+
+  it("counts a missing or unknown scan state as unverified, not active", () => {
+    const summary = documentsTrustSummary([
+      { id: "a", scan_status: "clean" },
+      { id: "b" },
+      { id: "c", scan_status: null },
+      { id: "d", scan_status: "not_scanned" },
+      { id: "e", scan_status: "some_future_state" },
+    ]);
+    expect(summary.activeCount).toBe(1);
+    expect(summary.scanUnverifiedCount).toBe(4);
+    // Unverified is surfaced but is not by itself a blocking issue.
+    expect(summary.hasBlockingIssue).toBe(false);
   });
 
   it("does not block on scan-in-progress alone", () => {
@@ -565,6 +618,36 @@ describe("describeAuditEvent", () => {
       "danger"
     );
   });
+
+  it("recognises malware_scan_completed as a documents event from Atlas automation", () => {
+    const presentation = describeAuditEvent(
+      event({
+        action: "malware_scan_completed",
+        metadata: { document_id: "d1", scanner: "scanner", bypassed: false },
+      })
+    );
+    expect(presentation.group).toBe("documents");
+    expect(presentation.label).toBe("Malware scan completed — clean");
+    expect(presentation.actorKind).toBe("system");
+    expect(presentation.actorLabel).toBe("Atlas automation");
+    expect(presentation.tone).toBe("neutral");
+    // Not the unknown-event fallback.
+    expect(presentation.icon).not.toBe("info");
+  });
+
+  it("keeps document_uploaded unchanged as a person-authored documents event", () => {
+    const presentation = describeAuditEvent(
+      event({
+        action: "document_uploaded",
+        actor_email: "u@example.com",
+        metadata: { scan_status: "pending" },
+      })
+    );
+    expect(presentation.group).toBe("documents");
+    expect(presentation.label).toBe("Document uploaded");
+    expect(presentation.actorKind).toBe("person");
+    expect(presentation.metadataEntries).toEqual([["Scan status", "pending"]]);
+  });
 });
 
 describe("humaniseValue", () => {
@@ -611,6 +694,17 @@ describe("filterAuditEvents", () => {
     expect(filterAuditEvents(events, "decisions").map((e) => e.id)).toEqual(["b"]);
     expect(filterAuditEvents(events, "other").map((e) => e.id)).toEqual(["c"]);
     expect(filterAuditEvents(events, "communications")).toEqual([]);
+  });
+
+  it("keeps both document_uploaded and malware_scan_completed under 'documents', and out of 'other'", () => {
+    const events = [
+      event({ id: "up", action: "document_uploaded", metadata: { scan_status: "pending" } }),
+      event({ id: "scan", action: "malware_scan_completed" }),
+      event({ id: "ex", action: "extraction_run" }),
+      event({ id: "unk", action: "some_new_action" }),
+    ];
+    expect(filterAuditEvents(events, "documents").map((e) => e.id)).toEqual(["up", "scan"]);
+    expect(filterAuditEvents(events, "other").map((e) => e.id)).toEqual(["unk"]);
   });
 });
 

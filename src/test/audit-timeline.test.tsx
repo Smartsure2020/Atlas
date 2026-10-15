@@ -132,6 +132,74 @@ describe("Audit timeline", () => {
     expect(screen.queryByText(/Extraction run/i)).not.toBeInTheDocument();
   });
 
+  it("Documents filter shows both the upload (pending at the time) and the later clean scan", async () => {
+    getAuditTimelineMock.mockResolvedValue({
+      ok: true,
+      events: [
+        event({
+          id: "up",
+          action: "document_uploaded",
+          actor_email: "u@example.com",
+          metadata: { scan_status: "pending" },
+          created_at: "2026-08-14T10:00:00Z",
+        }),
+        event({
+          id: "scan",
+          action: "malware_scan_completed",
+          metadata: { document_id: "d1", scanner: "scanner", bypassed: false },
+          created_at: "2026-08-14T10:00:30Z",
+        }),
+        event({ id: "ex", action: "extraction_run", created_at: "2026-08-14T10:05:00Z" }),
+      ],
+    });
+    render(<AuditTimeline submissionId="sub_1" />);
+    await screen.findByText(/Malware scan completed — clean/i);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Documents$/i }));
+
+    // Both document events remain, in chronological order, and the original
+    // upload record still reads as pending-at-upload (history is not rewritten).
+    expect(screen.getByText("Document uploaded")).toBeInTheDocument();
+    expect(screen.getByText(/Malware scan completed — clean/i)).toBeInTheDocument();
+    const text = document.body.textContent ?? "";
+    expect(text.indexOf("Document uploaded")).toBeLessThan(
+      text.indexOf("Malware scan completed — clean")
+    );
+    // An unrelated processing event is filtered out.
+    expect(screen.queryByText(/Extraction run/i)).not.toBeInTheDocument();
+    expect(getAuditTimelineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("attributes malware_scan_completed to Atlas automation, not an unknown actor", async () => {
+    getAuditTimelineMock.mockResolvedValue({
+      ok: true,
+      events: [event({ id: "scan", action: "malware_scan_completed" })],
+    });
+    render(<AuditTimeline submissionId="sub_1" />);
+    await screen.findByText(/Malware scan completed — clean/i);
+    expect(screen.getByText(/Atlas automation/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Actor not recorded/i)).not.toBeInTheDocument();
+  });
+
+  it("no longer files malware_scan_completed under Other activity", async () => {
+    getAuditTimelineMock.mockResolvedValue({
+      ok: true,
+      events: [
+        event({ id: "scan", action: "malware_scan_completed" }),
+        event({ id: "u1", action: "some_new_action" }),
+      ],
+    });
+    render(<AuditTimeline submissionId="sub_1" />);
+    await screen.findByText(/Malware scan completed — clean/i);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Other activity/i }));
+    // Unknown-event behaviour is unchanged: still listed here, humanised.
+    expect(screen.getByText(/Some new action/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Malware scan completed/i)).not.toBeInTheDocument();
+  });
+
   it("distinguishes person, system and unknown actors", async () => {
     getAuditTimelineMock.mockResolvedValue({
       ok: true,
