@@ -236,6 +236,176 @@ describe("Submission documents", () => {
     expect(screen.getByText(/Some new state/i)).toBeInTheDocument();
   });
 
+  describe("'On file' is reserved for a confirmed clean scan", () => {
+    it("clean -> green 'On file' in the Active documents group", () => {
+      renderTab({ documents: [doc({ id: "c1", file_name: "clean.pdf", scan_status: "clean" })] });
+      const badge = screen.getByText(/^On file$/i);
+      expect(badge).toBeInTheDocument();
+      expect(
+        screen.getByRole("region", { name: /Active documents/i })
+      ).toContainElement(screen.getByText("clean.pdf"));
+      expect(screen.queryByText(/Scan result not confirmed/i)).not.toBeInTheDocument();
+    });
+
+    it.each([
+      ["pending", /Scan in progress/i],
+      ["failed", /Scan could not complete/i],
+      ["infected", /Quarantined by malware scan/i],
+    ])("%s -> never 'On file'", (scan_status, heading) => {
+      renderTab({ documents: [doc({ id: "x", file_name: "x.pdf", scan_status })] });
+      expect(screen.queryByText(/^On file$/i)).not.toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+      // The only document is unreadable, so Active documents must be empty.
+      expect(screen.getByText(/No active documents are on file/i)).toBeInTheDocument();
+    });
+
+    it("failed (scanner_http_404 in production) is shown as a scan failure, not On file", () => {
+      renderTab({
+        documents: [doc({ id: "f1", file_name: "prod.pdf", scan_status: "failed" })],
+      });
+      expect(screen.queryByText(/^On file$/i)).not.toBeInTheDocument();
+      expect(screen.getByText("Scan failed")).toBeInTheDocument();
+      expect(screen.getByText(/Some documents cannot be read yet/i)).toBeInTheDocument();
+    });
+
+    it.each([
+      ["a missing scan_status", {}],
+      ["a null scan_status", { scan_status: null }],
+      ["an empty scan_status", { scan_status: "" }],
+      ["a not_scanned scan_status", { scan_status: "not_scanned" }],
+      ["an unknown future scan_status", { scan_status: "some_future_state" }],
+    ])("%s -> never 'On file' and never a normal Active document", (_label, over) => {
+      // Build the row by hand so a "missing" scan_status really is absent
+      // (the shared factory defaults it to "clean").
+      const { scan_status: _drop, ...base } = doc({ id: "u1", file_name: "mystery.pdf" });
+      void _drop;
+      renderTab({ documents: [{ ...base, ...over }] });
+
+      expect(screen.queryByText(/^On file$/i)).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: /Scan result not confirmed/i })
+      ).toBeInTheDocument();
+
+      // The document sits in the unconfirmed group, not under Active documents.
+      const unverified = screen.getByRole("region", {
+        name: /without a confirmed scan result/i,
+      });
+      expect(unverified).toContainElement(screen.getByText("mystery.pdf"));
+      const active = screen.getByRole("region", { name: /Active documents/i });
+      expect(active).not.toContainElement(screen.getByText("mystery.pdf"));
+      expect(screen.getByText(/No active documents are on file/i)).toBeInTheDocument();
+
+      // The trust strip warns, and does not claim the file is merely "scanning".
+      expect(screen.getByText(/not confirmed clean/i)).toBeInTheDocument();
+      expect(screen.queryByText(/still being scanned/i)).not.toBeInTheDocument();
+    });
+
+    it("a missing/null scan state reads as unavailable — not pending, not failed", () => {
+      const { scan_status: _drop, ...base } = doc({ id: "u1", file_name: "mystery.pdf" });
+      void _drop;
+      renderTab({ documents: [base, doc({ id: "u2", file_name: "null.pdf", scan_status: null })] });
+      expect(screen.getAllByText("Scan status unavailable")).toHaveLength(2);
+      expect(screen.queryByText("Scan failed")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Malware scan pending/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: /Scan in progress/i })).not.toBeInTheDocument();
+    });
+
+    it("an unconfirmed document does not hide a confirmed clean one beside it", () => {
+      renderTab({
+        documents: [
+          doc({ id: "c", file_name: "clean.pdf", scan_status: "clean" }),
+          doc({ id: "n", file_name: "null.pdf", scan_status: null }),
+        ],
+      });
+      // Exactly one green badge, and it belongs to the clean file.
+      expect(screen.getAllByText(/^On file$/i)).toHaveLength(1);
+      const active = screen.getByRole("region", { name: /Active documents/i });
+      expect(active).toContainElement(screen.getByText("clean.pdf"));
+      expect(active).not.toContainElement(screen.getByText("null.pdf"));
+    });
+  });
+
+  describe("copy never calls unconfirmed or legacy not_scanned documents categorically unreadable", () => {
+    // The worker deliberately still reads legacy `not_scanned` files in some
+    // extraction / review / shadow paths. The UI may say Atlas has no confirmed
+    // clean scan; it must not claim such a file is unreadable or excluded.
+    const OVERCLAIM = /unreadable|not readable|cannot be read|can't be read|excluded|cannot use|extraction is not run|no extraction/i;
+
+    function renderUnconfirmedOnly() {
+      const { scan_status: _drop, ...bare } = doc({ id: "u1", file_name: "bare.pdf" });
+      void _drop;
+      return renderTab({
+        documents: [
+          doc({ id: "n1", file_name: "legacy.pdf", scan_status: "not_scanned" }),
+          bare,
+        ],
+      });
+    }
+
+    it("says no document has a confirmed clean scan, without claiming anything is unusable", () => {
+      const { container } = renderUnconfirmedOnly();
+      const empty = screen.getByText(/No active documents are on file/i);
+      expect(empty).toBeInTheDocument();
+      expect(
+        screen.getByText(/No document has a confirmed clean scan/i)
+      ).toBeInTheDocument();
+      // The old wording asserted Atlas cannot use the documents listed above.
+      expect(screen.queryByText(/Nothing here is currently readable/i)).not.toBeInTheDocument();
+      expect(container.textContent).not.toMatch(OVERCLAIM);
+    });
+
+    it("the Client documents description makes no worker-policy claim", () => {
+      renderUnconfirmedOnly();
+      const description = screen.getByText(/Everything attached to this submission/i);
+      expect(description.textContent).toMatch(/not yet confirmed/i);
+      expect(description.textContent).not.toMatch(/Atlas reads active documents/i);
+      expect(description.textContent).not.toMatch(OVERCLAIM);
+    });
+
+    it("the unconfirmed group and trust strip describe the scan state, not extraction policy", () => {
+      renderUnconfirmedOnly();
+      const group = screen.getByRole("region", { name: /without a confirmed scan result/i });
+      expect(group.textContent).toMatch(/no confirmed clean malware-scan result/i);
+      expect(group.textContent).not.toMatch(OVERCLAIM);
+      // Not a blocking banner: it is a warning that the scan is unconfirmed.
+      expect(screen.getByText(/not confirmed clean/i)).toBeInTheDocument();
+      expect(screen.queryByText(/cannot be read yet/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it("orders trust groups with the unconfirmed group between pending and active", () => {
+    const { scan_status: _drop, ...bare } = doc({ id: "u", file_name: "bare.pdf" });
+    void _drop;
+    renderTab({
+      documents: [
+        doc({ id: "a", file_name: "active.pdf", scan_status: "clean" }),
+        bare,
+        doc({ id: "p", file_name: "pending.pdf", scan_status: "pending" }),
+        doc({ id: "f", file_name: "failed.pdf", scan_status: "failed" }),
+        doc({ id: "q", file_name: "bad.pdf", scan_status: "infected" }),
+        doc({ id: "e", file_name: "old.pdf", status: "expired", scan_status: "clean" }),
+      ],
+    });
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    expect(headings).toEqual([
+      expect.stringMatching(/Quarantined/i),
+      expect.stringMatching(/Scan could not complete/i),
+      expect.stringMatching(/Scan in progress/i),
+      expect.stringMatching(/Scan result not confirmed/i),
+      expect.stringMatching(/Active documents/i),
+      expect.stringMatching(/Expired documents/i),
+    ]);
+  });
+
+  it("is axe-clean with an unconfirmed-scan group present", async () => {
+    const { scan_status: _drop, ...bare } = doc({ id: "u", file_name: "bare.pdf" });
+    void _drop;
+    const { container } = renderTab({
+      documents: [doc({ id: "a", file_name: "active.pdf", scan_status: "clean" }), bare],
+    });
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("is axe-clean in a mixed populated state", async () => {
     const { container } = renderTab({
       documents: [

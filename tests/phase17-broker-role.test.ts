@@ -359,6 +359,48 @@ test("handleGetSubmission: broker projection scrubs broker_email_body", () => {
     "broker_email_body (raw pasted broker email) must be scrubbed");
 });
 
+// Post-Phase-6 document scan-state contract. The Documents tab decides whether
+// a file may be shown as readable ("On file") from scan_status, so the detail
+// endpoint MUST return the authoritative scan outcome. Without it the SPA saw
+// every document as scan-less and rendered a failed scan as "On file".
+function documentSelectColumns(): string[] {
+  const m = SUB_ENDPOINT.match(/\.from\("atlas_documents"\)\s*\.select\(\s*"([^"]+)"\s*\)/);
+  assert(m, "handleGetSubmission must select from atlas_documents with a literal column list");
+  return m[1].split(",").map((c) => c.trim());
+}
+
+test("handleGetSubmission: document query returns scan_status and scanned_at", () => {
+  const cols = documentSelectColumns();
+  assert(cols.includes("scan_status"), "scan_status must be selected so the UI can fail safe");
+  assert(cols.includes("scanned_at"), "scanned_at must be selected alongside scan_status");
+});
+
+test("handleGetSubmission: document query preserves the existing document fields", () => {
+  const cols = documentSelectColumns();
+  for (const c of ["id", "file_name", "document_type", "status", "expires_at", "created_at"]) {
+    assert(cols.includes(c), `existing document field ${c} must remain selected`);
+  }
+});
+
+test("handleGetSubmission: scanner failure detail and storage internals are never selected", () => {
+  const cols = documentSelectColumns();
+  for (const c of ["scan_error", "storage_path", "file_hash", "storage_bucket"]) {
+    assert(!cols.includes(c), `${c} must not be returned to the browser`);
+  }
+});
+
+test("handleGetSubmission: broker and staff responses share the same scan-aware document list", () => {
+  // The broker branch returns the same `documents` variable (not a re-query
+  // and not a field-stripping map), so brokers see the truthful scan state of
+  // their own submission's files rather than a scan-less list.
+  const brokerBranch = SUB_ENDPOINT.match(/user\.role === "broker"[\s\S]*?extraction: null/);
+  assert(brokerBranch, "broker branch not found");
+  assert(/documents: documents \?\? \[\]/.test(brokerBranch[0]),
+    "broker branch must return the shared document list");
+  assert(!/scan_error/.test(SUB_ENDPOINT),
+    "scan_error must not appear anywhere in the submission detail endpoint");
+});
+
 // ---------------------------------------------------------------------------
 // List projection: broker list responses MUST NOT expose active_job
 // ---------------------------------------------------------------------------

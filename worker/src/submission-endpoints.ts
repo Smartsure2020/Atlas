@@ -55,9 +55,14 @@ export async function handleGetSubmission(
     };
   }
 
+  // scan_status / scanned_at are the authoritative malware-scan outcome the UI
+  // needs to decide whether a document may be presented as readable. The
+  // scanner's failure-detail column is deliberately NOT selected: it stays
+  // internal and is never returned to the browser (brokers receive this same
+  // document list).
   const { data: documents } = await admin
     .from("atlas_documents")
-    .select("id, file_name, document_type, status, expires_at, created_at")
+    .select("id, file_name, document_type, status, scan_status, scanned_at, expires_at, created_at")
     .eq("submission_id", submissionId)
     .order("created_at", { ascending: true });
 

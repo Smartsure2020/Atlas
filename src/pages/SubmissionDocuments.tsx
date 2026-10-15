@@ -12,13 +12,17 @@
  * but keeps its extracted information on the record. Reading the sections
  * top-to-bottom should teach a person what state the submission's evidence
  * is in without them clicking on any row.
+ *
+ * Safety invariant: only a document whose scan_status is exactly "clean" is
+ * presented as active / "On file". A missing, null or unrecognised scan state
+ * is shown as unconfirmed, never promoted to a green badge.
  */
 
 import { useId, useMemo } from "react";
 import { Button, Card, EmptyState, Notice, StatusBadge } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { EMPTY, formatDateTime, formatFileSize, pluralise, truncateMiddle } from "../lib/format";
-import { documentTypeLabel, scanStatus } from "../lib/status";
+import { documentTypeLabel, scanStatus, type StatusMeta } from "../lib/status";
 import {
   documentsTrustSummary,
   groupDocuments,
@@ -46,17 +50,19 @@ export default function DocumentsTab({
   const quarantined = groups.find((g) => g.key === "quarantined")?.documents ?? [];
   const scanFailed = groups.find((g) => g.key === "scan_failed")?.documents ?? [];
   const pending = groups.find((g) => g.key === "scan_pending")?.documents ?? [];
+  const unverified = groups.find((g) => g.key === "scan_unverified")?.documents ?? [];
   const active = groups.find((g) => g.key === "active")?.documents ?? [];
   const expired = groups.find((g) => g.key === "expired")?.documents ?? [];
 
   const headingId = useId();
-  const showTrustStrip = summary.hasBlockingIssue || summary.scanPendingCount > 0;
+  const showTrustStrip =
+    summary.hasBlockingIssue || summary.scanPendingCount > 0 || summary.scanUnverifiedCount > 0;
 
   return (
     <section className="atlas-doc-groups" aria-labelledby={headingId}>
       <Card
         title="Client documents"
-        description="Everything attached to this submission. Atlas reads active documents during extraction; quarantined and pending files are excluded until they clear."
+        description="Everything attached to this submission, grouped by what the malware scan has confirmed: clean, in progress, failed, quarantined, or not yet confirmed."
         actions={
           canManage ? (
             <Button
@@ -93,6 +99,8 @@ export default function DocumentsTab({
 
             {pending.length > 0 && <ScanPendingGroup documents={pending} />}
 
+            {unverified.length > 0 && <ScanUnverifiedGroup documents={unverified} />}
+
             <ActiveGroup documents={active} />
 
             {expired.length > 0 && <ExpiredGroup documents={expired} />}
@@ -124,15 +132,18 @@ function TrustStrip({ summary }: { summary: DocumentsTrustSummary }) {
       `${pluralise(summary.scanPendingCount, "scan")} still in progress`
     );
   }
+  if (summary.scanUnverifiedCount > 0) {
+    parts.push(
+      `${pluralise(summary.scanUnverifiedCount, "document")} with no confirmed scan result`
+    );
+  }
+  const title = summary.hasBlockingIssue
+    ? "Some documents cannot be read yet"
+    : summary.scanUnverifiedCount > 0
+      ? "Some documents are not confirmed clean"
+      : "Some documents are still being scanned";
   return (
-    <Notice
-      tone={summary.hasBlockingIssue ? "danger" : "warning"}
-      title={
-        summary.hasBlockingIssue
-          ? "Some documents cannot be read yet"
-          : "Some documents are still being scanned"
-      }
-    >
+    <Notice tone={summary.hasBlockingIssue ? "danger" : "warning"} title={title}>
       {parts.join(". ") + "."}
     </Notice>
   );
@@ -197,6 +208,26 @@ function ScanPendingGroup({ documents }: { documents: DocumentRow[] }) {
   );
 }
 
+function ScanUnverifiedGroup({ documents }: { documents: DocumentRow[] }) {
+  const n = documents.length;
+  const noun = n === 1 ? "document" : "documents";
+  const pronoun = n === 1 ? "its" : "their";
+  return (
+    <section
+      className="atlas-doc-groups__section"
+      aria-label="Documents without a confirmed scan result"
+    >
+      <h3 className="atlas-doc-groups__heading atlas-doc-groups__heading--warning">
+        Scan result not confirmed
+      </h3>
+      <p className="atlas-doc-groups__hint">
+        {`Atlas has no confirmed clean malware-scan result for ${n} ${noun} — the scan state is missing, not scanned, or not recognised. Atlas cannot vouch for ${pronoun} contents until a scan reports clean.`}
+      </p>
+      <DocumentList documents={documents} statusTone="unverified" />
+    </section>
+  );
+}
+
 function ActiveGroup({ documents }: { documents: DocumentRow[] }) {
   return (
     <section className="atlas-doc-groups__section" aria-label="Active documents">
@@ -205,7 +236,7 @@ function ActiveGroup({ documents }: { documents: DocumentRow[] }) {
         <EmptyState
           inline
           title="No active documents are on file"
-          body="Nothing here is currently readable — the sections above list the documents Atlas cannot use."
+          body="No document has a confirmed clean scan. Any documents that are blocked, being scanned, or without a confirmed scan result are listed above."
         />
       ) : (
         <DocumentList documents={documents} statusTone="active" />
@@ -234,7 +265,7 @@ function ExpiredGroup({ documents }: { documents: DocumentRow[] }) {
    badge chosen from the semantic tone the group carries.
    =========================================================================== */
 
-type StatusTone = "active" | "pending" | "quarantined" | "scan_failed" | "expired";
+type StatusTone = "active" | "pending" | "quarantined" | "scan_failed" | "unverified" | "expired";
 
 function DocumentList({
   documents,
@@ -303,12 +334,26 @@ function RowStatus({ document, tone }: { document: DocumentRow; tone: StatusTone
       />
     );
   }
-  // Active tone: only claim "On file" when the scan says clean or was not
-  // reported at all. A "failed" scan is surfaced explicitly rather than
-  // silently promoted to green — the reader must decide whether to trust it.
-  const scan = document.scan_status;
-  if (!scan || scan === "clean") {
+  // "On file" is only ever claimed for a confirmed clean scan. Anything else —
+  // including a missing/null/unknown state reaching here by a caller mistake —
+  // falls through to the unconfirmed badge instead of a green one.
+  if (tone === "active" && document.scan_status === "clean") {
     return <StatusBadge status={{ label: "On file", tone: "success" }} />;
   }
-  return <StatusBadge status={scanStatus(scan)} />;
+  return <StatusBadge status={unconfirmedScanStatus(document.scan_status)} />;
+}
+
+/**
+ * Badge for a document with no confirmed scan outcome. A missing/null state is
+ * reported as unavailable (not "pending" or "failed" — Atlas does not know).
+ * A present-but-unrecognised value is shown readably via the shared helper,
+ * which maps it to a neutral, never-green badge.
+ */
+function unconfirmedScanStatus(scan: string | null | undefined): StatusMeta {
+  if (typeof scan === "string" && scan.trim() !== "") return scanStatus(scan);
+  return {
+    label: "Scan status unavailable",
+    tone: "warning",
+    description: "Atlas has no malware-scan result recorded for this document.",
+  };
 }
