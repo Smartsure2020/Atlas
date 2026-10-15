@@ -30,6 +30,7 @@ import {
   LEVEL2_EXCLUDED_JOB_TYPES,
   selectClaimableJobs,
 } from "./phase4-queue-selector";
+import { runBackgroundStages, toScheduledAt } from "./background-schedule";
 export { findActiveStorageReference } from "./cleanup-reference";
 export type { StorageReferenceCheck } from "./cleanup-reference";
 export { LEVEL2_EXCLUDED_JOB_TYPES, selectClaimableJobs } from "./phase4-queue-selector";
@@ -577,19 +578,35 @@ async function processApprovedCleanup(env: Env, admin: ReturnType<typeof adminCl
   }
 }
 
-export async function runBackgroundMaintenance(env: Env): Promise<void> {
-  const admin = adminClient(env);
-  const stages: [string, Promise<unknown>][] = [
-    ["job_processing", processQueuedJobs(env)],
-    ["cleanup_detection", detectCleanupCandidates(env, admin)],
-    ["approved_cleanup", processApprovedCleanup(env, admin)],
-    ["signal_monitoring", monitorSignals(env, admin)],
-    ["alert_escalation", escalateAlerts(env, admin)],
-  ];
-  const results = await Promise.allSettled(stages.map(([, stage]) => stage));
-  results.forEach((result, index) => {
-    if (result.status === "rejected") {
-      console.error("atlas_background_stage_failed", stages[index][0], result.reason);
-    }
-  });
+/**
+ * Scheduled entry point (cron fires every minute).
+ *
+ * CPU isolation: every workload shares this one invocation's CPU budget, so
+ * they MUST NOT run concurrently. Stages are lazy thunks executed strictly in
+ * sequence by runBackgroundStages (see background-schedule.ts): job
+ * processing runs first on every tick; the maintenance stages run only on
+ * their cadence minute, after job processing has settled. Do not start any
+ * stage here before it is awaited by the sequencer.
+ *
+ * The cleanup safety gates (ATLAS_CLEANUP_APPROVED, manager approval and
+ * reference revalidation) live inside processApprovedCleanup /
+ * findActiveStorageReference and are unchanged — cadence only controls how
+ * often those stages are attempted.
+ */
+export async function runBackgroundMaintenance(env: Env, scheduledAt?: Date | number): Promise<void> {
+  const summary = await runBackgroundStages(
+    {
+      job_processing: () => processQueuedJobs(env),
+      signal_monitoring: () => monitorSignals(env, adminClient(env)),
+      alert_escalation: () => escalateAlerts(env, adminClient(env)),
+      approved_cleanup: () => processApprovedCleanup(env, adminClient(env)),
+      cleanup_detection: () => detectCleanupCandidates(env, adminClient(env)),
+    },
+    toScheduledAt(scheduledAt),
+  );
+  // Job processing runs every tick; only log when maintenance also ran so the
+  // cadence is observable in `wrangler tail` without a line per minute.
+  if (summary.attempted.length > 1) {
+    console.log("atlas_background_maintenance_ran", { stages: summary.attempted.slice(1), failed: summary.failed });
+  }
 }

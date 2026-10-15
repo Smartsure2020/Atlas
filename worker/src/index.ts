@@ -148,8 +148,10 @@ export default {
     }
     return withCors(await route(request, env, ctx), env, request.headers.get("Origin"));
   },
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runBackgroundMaintenance(env).catch((error) => {
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // scheduledTime drives the deterministic maintenance cadence; job
+    // processing runs on every tick regardless (see background-schedule.ts).
+    ctx.waitUntil(runBackgroundMaintenance(env, event.scheduledTime).catch((error) => {
       console.error("atlas_background_maintenance_failed", { error_name: (error as Error)?.name });
     }));
     // Phase 5A Graph intake — fails closed on missing flag / config. When
