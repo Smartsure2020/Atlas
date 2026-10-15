@@ -60,6 +60,7 @@
     "worker/src/oauth-redirect.ts",
     "worker/src/auth.ts",
     "worker/src/phase4-queue-selector.ts",
+    "worker/src/background-schedule.ts",
     "src/lib/review-edit.ts",
     "src/lib/upload.ts",
     "scripts/benchmark-pipeline.ts"
