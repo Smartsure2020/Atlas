@@ -634,8 +634,9 @@ export interface DocumentsTrustSummary {
   scanPendingCount: number;
   /**
    * Documents with no confirmed scan outcome: scan_status missing, null,
-   * `not_scanned` or an unrecognised value. Not blocking by itself (a legacy
-   * `not_scanned` file may still be read), but never counted as active.
+   * `not_scanned` or an unrecognised value. Not blocking by itself, but never
+   * counted as active — and the worker never reads such a file as extraction,
+   * quote-review or shadow-pipeline input (only exact `clean` is trusted).
    */
   scanUnverifiedCount: number;
   /** Confirmed clean (scan_status === "clean") and not expired — nothing else. */

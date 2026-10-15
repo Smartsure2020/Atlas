@@ -760,28 +760,20 @@ async function loadDocumentsForShadow(
       return { ok: false, classification: "permanent", code: "document_missing", reason: "submission_not_found" };
     }
 
+    // Document trust boundary: only exact scan_status = "clean" documents may
+    // reach the hybrid pipeline, enforced by the query. A query error is a
+    // transient failure — there is deliberately NO fallback query without the
+    // scan_status predicate.
     const docsQuery = await admin
       .from("atlas_documents")
       .select("id, file_name, storage_path, document_type, status, scan_status, created_at, file_hash")
       .eq("submission_id", body.submissionId)
       .eq("status", "active")
-      .in("scan_status", ["clean", "not_scanned"]);
-
-    let docs: DocumentRow[] = [];
+      .eq("scan_status", "clean");
     if (docsQuery.error) {
-      // Older schemas without file_hash / scan_status. Retry with legacy columns.
-      const legacyDocs = await admin
-        .from("atlas_documents")
-        .select("id, file_name, storage_path, document_type, status, created_at")
-        .eq("submission_id", body.submissionId)
-        .eq("status", "active");
-      if (legacyDocs.error) {
-        return { ok: false, classification: "transient", code: "database_transient", reason: "documents_select_failed" };
-      }
-      docs = (legacyDocs.data ?? []) as DocumentRow[];
-    } else {
-      docs = (docsQuery.data ?? []) as DocumentRow[];
+      return { ok: false, classification: "transient", code: "database_transient", reason: "documents_select_failed" };
     }
+    const docs = (docsQuery.data ?? []) as DocumentRow[];
     return {
       ok: true,
       submission: {
