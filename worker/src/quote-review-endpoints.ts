@@ -2,7 +2,9 @@ import { adminClient, audit, json, type AtlasUser } from "./auth";
 import type { Env } from "./config";
 import type { AppetiteRow } from "./matcher-types";
 import { TAXONOMY_VERSION } from "./taxonomy";
+import { logOperationError } from "./phase6-hardening";
 import { buildQuoteReview } from "./quote-review";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   beginJob,
   buildQuoteReviewFingerprint,
@@ -18,6 +20,36 @@ interface RunQuoteReviewInput {
   insurer_id?: string | null;
   force?: boolean;
   background_job_id?: string;
+}
+
+export type LoadAvailableDocumentsOutcome =
+  | { ok: true; availableDocuments: string[] }
+  | { ok: false };
+
+/**
+ * Names (document type + file name) of the documents a quote review may treat
+ * as available supporting evidence.
+ *
+ * Document trust boundary: only active documents whose scan_status is exactly
+ * "clean" count, enforced by the database query. not_scanned, pending, failed,
+ * infected, NULL and unrecognised scan states never count. A failed query is
+ * reported as `{ ok: false }` — it is NOT the same as "no documents".
+ */
+export async function loadAvailableDocuments(
+  admin: SupabaseClient,
+  submissionId: string
+): Promise<LoadAvailableDocumentsOutcome> {
+  const { data: docs, error } = await admin
+    .from("atlas_documents")
+    .select("document_type, file_name")
+    .eq("submission_id", submissionId)
+    .eq("status", "active")
+    .eq("scan_status", "clean");
+  if (error) return { ok: false };
+  const availableDocuments = ((docs ?? []) as { document_type: string | null; file_name: string | null }[])
+    .flatMap((d) => [d.document_type, d.file_name])
+    .filter((x: string | null): x is string => typeof x === "string" && x.trim().length > 0);
+  return { ok: true, availableDocuments };
 }
 
 export async function handleRunQuoteReview(
@@ -80,15 +112,20 @@ export async function handleRunQuoteReview(
     );
   }
 
-  const { data: docs } = await admin
-    .from("atlas_documents")
-    .select("document_type, file_name, scan_status")
-    .eq("submission_id", submissionId)
-    .eq("status", "active")
-    .in("scan_status", ["clean", "not_scanned"]);
-  const availableDocuments = ((docs ?? []) as { document_type: string | null; file_name: string | null; scan_status?: string | null }[])
-    .flatMap((d) => [d.document_type, d.file_name])
-    .filter((x: string | null): x is string => typeof x === "string" && x.trim().length > 0);
+  const documents = await loadAvailableDocuments(admin, submissionId);
+  if (!documents.ok) {
+    // Fail closed: an unknown document set must never be treated as an empty
+    // one. No job, no quote review row.
+    logOperationError({
+      endpoint: "quote_review",
+      operation: "load_clean_documents",
+      code: "document_trust_check_unavailable",
+      submissionId,
+      status: 503,
+    });
+    return json({ error: "document_trust_check_unavailable", detail: "retry_later" }, 503);
+  }
+  const availableDocuments = documents.availableDocuments;
 
   let query = admin
     .from("atlas_insurer_appetite")
@@ -112,6 +149,7 @@ export async function handleRunQuoteReview(
     activeRuleIds: ((appetiteRaw ?? []) as unknown as { id: string; updated_at?: string | null }[]).map(
       (a) => `${a.id}:${a.updated_at ?? ""}`
     ),
+    availableDocuments,
   });
   const job = await beginJob(
     admin,

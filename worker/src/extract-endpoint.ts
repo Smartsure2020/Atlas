@@ -18,7 +18,7 @@
  */
 
 import { adminClient, audit, json, type AtlasUser } from "./auth";
-import { roleCanRunExtraction } from "./phase6-hardening";
+import { logOperationError, roleCanRunExtraction } from "./phase6-hardening";
 import {
   EXTRACTION_MODEL,
   EXTRACTION_SYSTEM_PROMPT,
@@ -72,35 +72,46 @@ interface LoadedDocsResult {
   docs: DocumentRow[];
 }
 
-async function loadSubmissionInputs(
+export type LoadSubmissionInputsOutcome =
+  | { ok: true; loaded: LoadedDocsResult }
+  | { ok: false; reason: "submission_not_found" | "documents_query_failed" };
+
+/**
+ * Loads everything extraction is allowed to read for a submission.
+ *
+ * Document trust boundary: only documents whose scan_status is exactly
+ * "clean" are ever returned, enforced by the database query itself. A
+ * not_scanned, pending, failed, infected, NULL or unrecognised scan state is
+ * never trusted. If the scan-aware query fails there is NO fallback to an
+ * unfiltered query — the caller gets `documents_query_failed` and must stop.
+ * "Zero clean documents" (a successful empty result) is a different outcome:
+ * extraction may still proceed from the pasted broker email alone.
+ */
+export async function loadSubmissionInputs(
   admin: SupabaseClient,
   submissionId: string
-): Promise<LoadedDocsResult | null> {
+): Promise<LoadSubmissionInputsOutcome> {
   const { data: submission } = await admin
     .from("atlas_submissions")
     .select("id, broker_email_body")
     .eq("id", submissionId)
     .single();
-  if (!submission) return null;
+  if (!submission) return { ok: false, reason: "submission_not_found" };
 
-  const { data: docsWithHash, error: docsHashError } = await admin
+  const { data: docs, error: docsError } = await admin
     .from("atlas_documents")
     .select("id, file_name, storage_path, document_type, status, scan_status, created_at, file_hash")
     .eq("submission_id", submissionId)
     .eq("status", "active")
-    .in("scan_status", ["clean", "not_scanned"]);
-  const { data: docsLegacy } = docsHashError
-    ? await admin
-        .from("atlas_documents")
-        .select("id, file_name, storage_path, document_type, status, created_at")
-        .eq("submission_id", submissionId)
-        .eq("status", "active")
-    : { data: null };
-  const raw = (docsWithHash ?? docsLegacy ?? []) as DocumentRow[];
+    .eq("scan_status", "clean");
+  if (docsError) return { ok: false, reason: "documents_query_failed" };
 
   return {
-    submissionBrokerEmail: submission.broker_email_body ?? null,
-    docs: raw,
+    ok: true,
+    loaded: {
+      submissionBrokerEmail: submission.broker_email_body ?? null,
+      docs: (docs ?? []) as DocumentRow[],
+    },
   };
 }
 
@@ -162,8 +173,21 @@ export async function handleExtract(
   }
 
   const admin = adminClient(env);
-  const loaded = await loadSubmissionInputs(admin, submissionId);
-  if (!loaded) return json({ error: "submission_not_found" }, 404);
+  const inputs = await loadSubmissionInputs(admin, submissionId);
+  if (!inputs.ok) {
+    if (inputs.reason === "submission_not_found") return json({ error: "submission_not_found" }, 404);
+    // Fail closed: without a trustworthy (clean-only) document list we neither
+    // create a job nor call any extraction provider.
+    logOperationError({
+      endpoint: "extract",
+      operation: "load_clean_documents",
+      code: "document_trust_check_unavailable",
+      submissionId,
+      status: 503,
+    });
+    return json({ error: "document_trust_check_unavailable", detail: "retry_later" }, 503);
+  }
+  const loaded = inputs.loaded;
 
   const inputFp = buildExtractionFingerprintV2({
     submissionId,

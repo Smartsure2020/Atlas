@@ -42,6 +42,8 @@ import {
 import { composeExplanation, verifyPolish } from "./explanation-composer";
 import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
+import { logOperationError } from "./phase6-hardening";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   beginJob,
   buildRecommendationFingerprint,
@@ -235,6 +237,37 @@ function buildRiskSummary(reviewed: Record<string, unknown>): string {
   return parts.join("\n");
 }
 
+export type LoadAvailableDocumentTypesOutcome =
+  | { ok: true; availableDocs: string[] }
+  | { ok: false };
+
+/**
+ * document_type values the matcher may treat as evidence that a required
+ * document is on file.
+ *
+ * Document trust boundary: only active documents whose scan_status is exactly
+ * "clean" count, enforced by the database query. not_scanned, pending, failed,
+ * infected, NULL and unrecognised scan states never count, nor does an
+ * inactive (expired) document. A failed query is reported as `{ ok: false }` —
+ * it is NOT the same as "no documents".
+ */
+export async function loadAvailableDocumentTypes(
+  admin: SupabaseClient,
+  submissionId: string
+): Promise<LoadAvailableDocumentTypesOutcome> {
+  const { data: docs, error } = await admin
+    .from("atlas_documents")
+    .select("document_type")
+    .eq("submission_id", submissionId)
+    .eq("status", "active")
+    .eq("scan_status", "clean");
+  if (error) return { ok: false };
+  const availableDocs = ((docs ?? []) as { document_type: string | null }[])
+    .map((d) => d.document_type)
+    .filter((x: string | null): x is string => typeof x === "string" && x.length > 0);
+  return { ok: true, availableDocs };
+}
+
 // ----------------------------------------------------------------------------
 // POST /api/submissions/:id/recommend
 // ----------------------------------------------------------------------------
@@ -268,14 +301,20 @@ export async function handleRunRecommendation(
   }
 
   // ---- Build documents-available list ----
-  const { data: docs } = await admin
-    .from("atlas_documents")
-    .select("document_type")
-    .eq("submission_id", submissionId);
-  const docList = (docs ?? []) as { document_type: string | null }[];
-  const availableDocs: string[] = docList
-    .map((d) => d.document_type)
-    .filter((x: string | null): x is string => typeof x === "string" && x.length > 0);
+  const documents = await loadAvailableDocumentTypes(admin, submissionId);
+  if (!documents.ok) {
+    // Fail closed: an unknown document set must never be treated as an empty
+    // one. No job, no recommendation row.
+    logOperationError({
+      endpoint: "recommend",
+      operation: "load_clean_documents",
+      code: "document_trust_check_unavailable",
+      submissionId,
+      status: 503,
+    });
+    return json({ error: "document_trust_check_unavailable", detail: "retry_later" }, 503);
+  }
+  const availableDocs = documents.availableDocs;
 
   // Overall confidence provenance is resolved from reviewed_json /
   // extracted_json / the legacy numeric column WITHOUT mutating the
@@ -323,6 +362,7 @@ export async function handleRunRecommendation(
     activeRuleIds: ((appetiteRaw ?? []) as unknown as { id: string; updated_at?: string | null }[]).map(
       (a) => `${a.id}:${a.updated_at ?? ""}`
     ),
+    availableDocuments: availableDocs,
   });
   const job = await beginJob(
     admin,

@@ -50,11 +50,26 @@ export function buildExtractionFingerprint(input: {
   });
 }
 
+/**
+ * Canonical form of the trusted (active + exact-clean) document evidence a
+ * recommendation or quote review consumed: exact strings, de-duplicated and
+ * sorted. Both consumers only test membership (`hasRequiredDoc` in the matcher,
+ * `availableDocs.some` in buildQuoteReview), so order and duplicates carry no
+ * meaning. Case is deliberately NOT folded — the consumers normalise
+ * internally and the fingerprint must not depend on how they do it; a spurious
+ * miss only recomputes, a spurious hit would serve a stale result.
+ */
+function canonicalDocumentEvidence(documents: readonly string[]): string[] {
+  return [...new Set(documents)].sort();
+}
+
 export function buildRecommendationFingerprint(input: {
   submissionId: string;
   extractionId: string;
   reviewedAt?: string | null;
   activeRuleIds: string[];
+  /** The exact `availableDocs` handed to deriveRisk(): trusted documents only. */
+  availableDocuments: string[];
 }) {
   return inputFingerprint({
     type: "recommendation",
@@ -62,6 +77,7 @@ export function buildRecommendationFingerprint(input: {
     extraction_id: input.extractionId,
     reviewed_at: input.reviewedAt ?? null,
     active_rule_ids: [...input.activeRuleIds].sort(),
+    available_documents: canonicalDocumentEvidence(input.availableDocuments),
   });
 }
 
@@ -71,6 +87,8 @@ export function buildQuoteReviewFingerprint(input: {
   recommendationId?: string | null;
   insurerId?: string | null;
   activeRuleIds: string[];
+  /** The exact `availableDocuments` handed to buildQuoteReview(): trusted documents only. */
+  availableDocuments: string[];
 }) {
   return inputFingerprint({
     type: "quote_review",
@@ -79,6 +97,7 @@ export function buildQuoteReviewFingerprint(input: {
     recommendation_id: input.recommendationId ?? null,
     insurer_id: input.insurerId ?? null,
     active_rule_ids: [...input.activeRuleIds].sort(),
+    available_documents: canonicalDocumentEvidence(input.availableDocuments),
   });
 }
 

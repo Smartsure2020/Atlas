@@ -21,7 +21,7 @@ import {
   validateIngestion,
 } from "./appetite-ingestion";
 import type { Env } from "./config";
-import { roleCanManageAppetite, validateUploadInput, MAX_GUIDELINE_UPLOAD_BYTES } from "./phase6-hardening";
+import { roleCanManageAppetite, validateUploadInput, logOperationError, MAX_GUIDELINE_UPLOAD_BYTES } from "./phase6-hardening";
 import {
   beginJob,
   buildGuidelineFingerprint,
@@ -358,14 +358,32 @@ export async function handleProcessInsurerDoc(
   const admin = adminClient(env);
 
   // Fetch document + insurer name (denormalised onto appetite rows for reads).
-  const { data: doc } = await admin
+  // maybeSingle(): genuine absence is `data: null, error: null` (404), so a
+  // database failure can never masquerade as "document not found".
+  const { data: doc, error: docError } = await admin
     .from("atlas_insurer_documents")
     .select("id, insurer_id, file_name, storage_path, processing_status, scan_status")
     .eq("id", documentId)
-    .single();
+    .maybeSingle();
+  if (docError) {
+    // Fail closed: without the document's scan state we cannot establish trust.
+    logOperationError({
+      endpoint: "insurer_document_process",
+      operation: "load_guideline_document",
+      code: "document_trust_check_unavailable",
+      documentId,
+      status: 503,
+    });
+    return json({ error: "document_trust_check_unavailable", detail: "retry_later" }, 503);
+  }
   if (!doc) return json({ error: "document_not_found" }, 404);
+  // Document trust boundary: ONLY an exact scan_status of "clean" may be
+  // downloaded and sent to Anthropic. pending/infected keep their specific
+  // codes; failed, not_scanned, NULL, empty and unrecognised values all land on
+  // the generic not-trusted response.
   if (doc.scan_status === "pending") return json({ error: "malware_scan_pending" }, 409);
   if (doc.scan_status === "infected") return json({ error: "malware_detected" }, 409);
+  if (doc.scan_status !== "clean") return json({ error: "document_not_trusted" }, 409);
 
   const { data: insurer } = await admin
     .from("atlas_insurers")

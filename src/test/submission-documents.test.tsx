@@ -326,9 +326,10 @@ describe("Submission documents", () => {
   });
 
   describe("copy never calls unconfirmed or legacy not_scanned documents categorically unreadable", () => {
-    // The worker deliberately still reads legacy `not_scanned` files in some
-    // extraction / review / shadow paths. The UI may say Atlas has no confirmed
-    // clean scan; it must not claim such a file is unreadable or excluded.
+    // The worker feeds only exact `clean` files into extraction, review and
+    // shadow processing, but this copy is about scan state, not processing. The
+    // UI may say Atlas has no confirmed clean scan; it must not claim such a
+    // file is unreadable or excluded.
     const OVERCLAIM = /unreadable|not readable|cannot be read|can't be read|excluded|cannot use|extraction is not run|no extraction/i;
 
     function renderUnconfirmedOnly() {
