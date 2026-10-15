@@ -60,6 +60,15 @@ import { matchInsurers } from "../worker/src/matcher.js";
 import type { AppetiteRow } from "../worker/src/matcher-types.js";
 import { buildQuoteReview } from "../worker/src/quote-review.js";
 
+// supabase-js builds a Realtime client eagerly inside createClient(), and on
+// Node < 22 (CI runs Node 20) that throws "without native WebSocket support"
+// unless a global WebSocket exists. Workers have one natively. These tests never
+// open a socket, so a never-used stand-in is enough; Node 22+ keeps its real one.
+const runtimeGlobals = globalThis as { WebSocket?: unknown };
+if (typeof runtimeGlobals.WebSocket === "undefined") {
+  runtimeGlobals.WebSocket = class UnusedWebSocket {};
+}
+
 // ---------------------------------------------------------------------------
 // Test scaffolding
 // ---------------------------------------------------------------------------
