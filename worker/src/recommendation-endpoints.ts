@@ -58,6 +58,14 @@ import {
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
+interface RecommendationEndpointDependencies {
+  buildEvidence: typeof buildRecommendationEvidence;
+}
+
+const DEFAULT_RECOMMENDATION_DEPENDENCIES: RecommendationEndpointDependencies = {
+  buildEvidence: buildRecommendationEvidence,
+};
+
 // ----------------------------------------------------------------------------
 // Risk derivation: turn the reviewed extraction into the matcher's inputs.
 // Kept narrow and explicit so the matcher's substring matching has clean text
@@ -277,7 +285,8 @@ export async function handleRunRecommendation(
   submissionId: string,
   request: Request,
   env: Env,
-  user: AtlasUser
+  user: AtlasUser,
+  dependencies: RecommendationEndpointDependencies = DEFAULT_RECOMMENDATION_DEPENDENCIES
 ): Promise<Response> {
   const body = (await request.json().catch(() => ({}))) as { force?: boolean; background_job_id?: string };
   const admin = adminClient(env);
@@ -518,22 +527,31 @@ export async function handleRunRecommendation(
   // name the exact persisted recommendation without a second write.
   const recommendationId = crypto.randomUUID();
   const generatedAt = new Date().toISOString();
-  const evidence = buildRecommendationEvidence({
-    recommendationId,
-    submissionId,
-    extractionId: extraction.id,
-    reviewedAt: extraction.reviewed_at ?? null,
-    generatedAt,
-    matcherVersion: MATCHER_VERSION,
-    taxonomyVersion: TAXONOMY_VERSION,
-    explanationMode: mode,
-    explanationSource: reasoningSource,
-    recommendationInputFingerprint: inputFp,
-    reviewed: reviewedJson,
-    matcherInput: risk,
-    matcherResult: result,
-    activeAppetite: appetite,
-  });
+  let evidence;
+  try {
+    evidence = dependencies.buildEvidence({
+      recommendationId,
+      submissionId,
+      extractionId: extraction.id,
+      reviewedAt: extraction.reviewed_at ?? null,
+      generatedAt,
+      matcherVersion: MATCHER_VERSION,
+      taxonomyVersion: TAXONOMY_VERSION,
+      explanationMode: mode,
+      explanationSource: reasoningSource,
+      recommendationInputFingerprint: inputFp,
+      reviewed: reviewedJson,
+      matcherInput: risk,
+      matcherResult: result,
+      activeAppetite: appetite,
+    });
+  } catch {
+    await failJob(admin, job.jobId, {
+      errorCode: "recommendation_evidence_failed",
+      errorMessage: "Could not build recommendation evidence.",
+    });
+    return json({ error: "recommendation_evidence_failed" }, 500);
+  }
 
   const recommendationRow = {
     id: recommendationId,

@@ -79,6 +79,14 @@ export interface RiskFeature {
  *  document-derived features with a generic source label. */
 export type FeatureInput = string | RiskFeature;
 
+export type MatcherRuleEffect =
+  | "preferred"
+  | "standard"
+  | "caution"
+  | "referral"
+  | "hard_decline"
+  | "soft_decline_referral";
+
 export interface MatchInputRisk {
   /** All taxonomy candidates that describe what COVER this submission needs.
    *  Built in deriveRisk() from cover_sections, secondary_risk_types, and
@@ -112,6 +120,9 @@ export interface MatchInputRisk {
 export interface MatchedRuleRef {
   appetite_id: string;
   matched_strings: string[];
+  /** Authoritative semantic effect. Evidence consumers must copy this value;
+   * they must never reconstruct hard/soft decline meaning heuristically. */
+  effect?: MatcherRuleEffect;
   /** Exact additive score delta emitted by the authoritative matcher. Null for
    * hard outcomes (for example a decline that zeroes the score). */
   score_contribution?: number | null;
@@ -139,10 +150,27 @@ export interface MatchedRuleRef {
 }
 
 export interface RequiredDocumentEvidence {
-  appetite_id: string;
-  scope: "product" | "portfolio";
   document_type: string;
   present: boolean;
+  appetite_ids: string[];
+  scopes: ("product" | "portfolio")[];
+  /** Actual confidence delta applied once for this canonical document gap. */
+  confidence_adjustment: number;
+}
+
+export interface ScoreReconciliation {
+  component_subtotal: number;
+  hard_decline_adjustment: number;
+  clamp_adjustment: number;
+  final_score: number;
+}
+
+export interface ConfidenceReconciliation {
+  input_confidence: number | null;
+  input_confidence_available: boolean;
+  required_document_adjustment: number;
+  manual_review_cap_adjustment: number;
+  final_confidence: number | null;
 }
 
 export interface InsurerScore {
@@ -167,6 +195,8 @@ export interface InsurerScore {
   matched_rules: MatchedRuleRef[];
   /** Present on new matcher outputs; optional keeps historical fixtures/payloads readable. */
   required_document_evidence?: RequiredDocumentEvidence[];
+  score_reconciliation?: ScoreReconciliation;
+  confidence_reconciliation?: ConfidenceReconciliation;
   scoring_notes: string[];
   missing_required_documents: string[];
   unmatched_sections: string[];
@@ -300,12 +330,17 @@ function ruleRef(
   rule: AppetiteRow,
   list: MatchedRuleRef["list"],
   matched_strings: string[] = [],
-  options: { hits?: FeatureHit[]; scoreContribution?: number | null } = {}
+  options: {
+    effect: MatcherRuleEffect;
+    hits?: FeatureHit[];
+    scoreContribution?: number | null;
+  }
 ): MatchedRuleRef {
   return {
     appetite_id: rule.id,
     list,
     matched_strings,
+    effect: options.effect,
     score_contribution: options.scoreContribution ?? null,
     matched_inputs: (options.hits ?? []).map((hit) => ({
       value: hit.candidate,
@@ -414,7 +449,13 @@ export function matchInsurers(
       notes.push(
         `Base ${usedRule.appetite_level} (${usedRule.product_line} × ${usedRule.risk_type}) → ${score}`
       );
-      matched.push(ruleRef(usedRule, "base", [], { scoreContribution: score }));
+      matched.push(ruleRef(usedRule, "base", [], {
+        effect:
+          usedRule.appetite_level === "declined"
+            ? "hard_decline"
+            : usedRule.appetite_level,
+        scoreContribution: score,
+      }));
 
       const declinedHits = findMatches(features, usedRule.declined_risks);
       const declinedDocumentHits = declinedHits.filter((h) => !h.ai_only);
@@ -424,10 +465,11 @@ export function matchInsurers(
           `Declined-risk match (product) → ruled out: ${declinedDocumentHits.map(hitLabel).join("; ")}`
         );
         matched.push(ruleRef(usedRule, "declined", declinedDocumentHits.map((h) => h.candidate), {
+          effect: "hard_decline",
           hits: declinedDocumentHits,
           scoreContribution: null,
         }));
-        scored.push(ruleOut(insurerId, insurerName, usedRule.id, matched, notes));
+        scored.push(ruleOut(insurerId, insurerName, usedRule.id, matched, notes, score));
         continue;
       }
       if (declinedAiOnlyHits.length > 0) {
@@ -442,6 +484,7 @@ export function matchInsurers(
             `needs human confirmation before ruling out: ${declinedAiOnlyHits.map(hitLabel).join("; ")}`
         );
         matched.push(ruleRef(usedRule, "declined", declinedAiOnlyHits.map((h) => h.candidate), {
+          effect: "soft_decline_referral",
           hits: declinedAiOnlyHits,
           scoreContribution: -drop,
         }));
@@ -449,7 +492,7 @@ export function matchInsurers(
 
       if (usedRule.appetite_level === "declined") {
         notes.push("Insurer's appetite for this line/type is declined.");
-        scored.push(ruleOut(insurerId, insurerName, usedRule.id, matched, notes));
+        scored.push(ruleOut(insurerId, insurerName, usedRule.id, matched, notes, score));
         continue;
       }
 
@@ -459,6 +502,7 @@ export function matchInsurers(
         score += lift;
         notes.push(`Preferred-risk matches +${lift}: ${preferredHits.map(hitLabel).join("; ")}`);
         matched.push(ruleRef(usedRule, "preferred", preferredHits.map((h) => h.candidate), {
+          effect: "preferred",
           hits: preferredHits,
           scoreContribution: lift,
         }));
@@ -470,6 +514,7 @@ export function matchInsurers(
         score -= drop;
         notes.push(`Caution-risk matches -${drop}: ${cautionHits.map(hitLabel).join("; ")}`);
         matched.push(ruleRef(usedRule, "caution", cautionHits.map((h) => h.candidate), {
+          effect: "caution",
           hits: cautionHits,
           scoreContribution: -drop,
         }));
@@ -495,6 +540,7 @@ export function matchInsurers(
         referralRequired = true;
         notes.push(`Referral triggers (product) -${drop}: ${referralHits.map(hitLabel).join("; ")}`);
         matched.push(ruleRef(usedRule, "referral", referralHits.map((h) => h.candidate), {
+          effect: "referral",
           hits: referralHits,
           scoreContribution: -drop,
         }));
@@ -512,6 +558,7 @@ export function matchInsurers(
           `Portfolio declined-risk match → ruled out: ${pDeclinedDocument.map(hitLabel).join("; ")}`
         );
         matched.push(ruleRef(pf, "portfolio_declined", pDeclinedDocument.map((h) => h.candidate), {
+          effect: "hard_decline",
           hits: pDeclinedDocument,
           scoreContribution: null,
         }));
@@ -530,6 +577,7 @@ export function matchInsurers(
             `needs human confirmation before ruling out: ${pDeclinedAiOnly.map(hitLabel).join("; ")}`
         );
         matched.push(ruleRef(pf, "portfolio_declined", pDeclinedAiOnly.map((h) => h.candidate), {
+          effect: "soft_decline_referral",
           hits: pDeclinedAiOnly,
           scoreContribution: -drop,
         }));
@@ -540,6 +588,7 @@ export function matchInsurers(
         score -= drop;
         notes.push(`Portfolio caution-risk matches -${drop}: ${pCaution.map(hitLabel).join("; ")}`);
         matched.push(ruleRef(pf, "portfolio_caution", pCaution.map((h) => h.candidate), {
+          effect: "caution",
           hits: pCaution,
           scoreContribution: -drop,
         }));
@@ -551,6 +600,7 @@ export function matchInsurers(
         referralRequired = true;
         notes.push(`Portfolio referral triggers -${drop}: ${pReferral.map(hitLabel).join("; ")}`);
         matched.push(ruleRef(pf, "portfolio_referral", pReferral.map((h) => h.candidate), {
+          effect: "referral",
           hits: pReferral,
           scoreContribution: -drop,
         }));
@@ -558,7 +608,7 @@ export function matchInsurers(
     }
 
     if (portfolioRuledOut) {
-      scored.push(ruleOut(insurerId, insurerName, portfolioRuledOutRule, matched, notes));
+      scored.push(ruleOut(insurerId, insurerName, portfolioRuledOutRule, matched, notes, score));
       continue;
     }
 
@@ -566,12 +616,6 @@ export function matchInsurers(
     const required: { source: "product" | "portfolio"; appetiteId: string; doc: string }[] = [];
     if (usedRule) for (const d of usedRule.required_documents) required.push({ source: "product", appetiteId: usedRule.id, doc: d });
     for (const pf of portfolioRules) for (const d of pf.required_documents) required.push({ source: "portfolio", appetiteId: pf.id, doc: d });
-    const requiredDocumentEvidence: RequiredDocumentEvidence[] = required.map((r) => ({
-      appetite_id: r.appetiteId,
-      scope: r.source,
-      document_type: r.doc,
-      present: hasRequiredDoc(risk.available_documents, r.doc),
-    }));
     const seen = new Set<string>();
     for (const r of required) {
       if (seen.has(r.doc.toLowerCase())) continue;
@@ -607,13 +651,42 @@ export function matchInsurers(
       confidence = 0.7;
       confidenceAvailable = true;
     }
+    const confidenceBeforeDocuments = confidence;
     if (missingDocs.length > 0) {
       const drop = Math.min(missingDocs.length * DOC_GAP_CONFIDENCE_PENALTY, DOC_GAP_CONFIDENCE_CAP);
       confidence = Math.max(0, confidence - drop);
       notes.push(`Required documents not evidenced: ${missingDocs.join("; ")} (confidence -${drop.toFixed(2)})`);
     }
 
-    score = Math.max(0, Math.min(100, score));
+    const requiredByDocument = new Map<string, RequiredDocumentEvidence>();
+    for (const item of required) {
+      const key = item.doc.toLowerCase();
+      const current = requiredByDocument.get(key) ?? {
+        document_type: item.doc,
+        present: hasRequiredDoc(risk.available_documents, item.doc),
+        appetite_ids: [],
+        scopes: [],
+        confidence_adjustment: 0,
+      };
+      if (!current.appetite_ids.includes(item.appetiteId)) current.appetite_ids.push(item.appetiteId);
+      if (!current.scopes.includes(item.source)) current.scopes.push(item.source);
+      requiredByDocument.set(key, current);
+    }
+    let remainingDocumentAdjustment = confidence - confidenceBeforeDocuments;
+    for (const item of requiredByDocument.values()) {
+      if (!item.present && remainingDocumentAdjustment < 0) {
+        const applied = Math.max(remainingDocumentAdjustment, -DOC_GAP_CONFIDENCE_PENALTY);
+        item.confidence_adjustment = applied;
+        remainingDocumentAdjustment -= applied;
+      }
+      item.appetite_ids.sort();
+      item.scopes.sort();
+    }
+    const requiredDocumentEvidence = [...requiredByDocument.values()];
+
+    const componentSubtotal = score;
+    score = Math.max(0, Math.min(100, componentSubtotal));
+    const clampAdjustment = score - componentSubtotal;
 
     const manualReviewRequired = !usedRule;
     const unmatched = manualReviewRequired
@@ -629,7 +702,9 @@ export function matchInsurers(
     const seniorReview = !manualReviewRequired && score <= CAUTION_BAND_MAX && referralRequired;
     if (seniorReview) notes.push("Caution-band score with referral flag → senior review required.");
 
+    const confidenceBeforeManualReviewCap = confidence;
     if (manualReviewRequired) confidence = Math.min(confidence, 0.35);
+    const manualReviewCapAdjustment = confidence - confidenceBeforeManualReviewCap;
 
     const ruleStatus: InsurerScore["rule_status"] =
       band === "insufficient_rule_match"
@@ -653,6 +728,19 @@ export function matchInsurers(
       scored_against_appetite_id: usedRule?.id ?? null,
       matched_rules: matched,
       required_document_evidence: requiredDocumentEvidence,
+      score_reconciliation: {
+        component_subtotal: componentSubtotal,
+        hard_decline_adjustment: 0,
+        clamp_adjustment: clampAdjustment,
+        final_score: score,
+      },
+      confidence_reconciliation: {
+        input_confidence: confidenceAvailable ? confidenceBeforeDocuments : null,
+        input_confidence_available: confidenceAvailable,
+        required_document_adjustment: confidenceBeforeManualReviewCap - confidenceBeforeDocuments,
+        manual_review_cap_adjustment: manualReviewCapAdjustment,
+        final_confidence: confidenceAvailable ? confidence : null,
+      },
       scoring_notes: notes,
       missing_required_documents: missingDocs,
       unmatched_sections: unmatched.unmatchedSections,
@@ -690,7 +778,8 @@ function ruleOut(
   insurer_name: string,
   scored_against: string | null,
   matched_rules: MatchedRuleRef[],
-  scoring_notes: string[]
+  scoring_notes: string[],
+  component_subtotal: number
 ): InsurerScore {
   return {
     insurer_id,
@@ -710,6 +799,19 @@ function ruleOut(
     scored_against_appetite_id: scored_against,
     matched_rules,
     required_document_evidence: [],
+    score_reconciliation: {
+      component_subtotal,
+      hard_decline_adjustment: -component_subtotal,
+      clamp_adjustment: 0,
+      final_score: 0,
+    },
+    confidence_reconciliation: {
+      input_confidence: null,
+      input_confidence_available: false,
+      required_document_adjustment: 0,
+      manual_review_cap_adjustment: 0,
+      final_confidence: null,
+    },
     scoring_notes,
     missing_required_documents: [],
     unmatched_sections: [],

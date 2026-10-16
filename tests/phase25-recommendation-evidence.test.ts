@@ -155,9 +155,15 @@ function effects(evidence: RecommendationEvidenceV1) {
   return evidence.insurers[0].rule_evidence.map((item) => item.effect);
 }
 
+function firstScored(evidence: RecommendationEvidenceV1) {
+  const outcome = evidence.insurers[0];
+  assert(outcome.status === "scored", "first insurer should be scored");
+  return outcome;
+}
+
 test("1. preferred match carries exact rule provenance and authoritative positive contribution", () => {
   const { evidence } = buildEvidence({ rules: [appetite({ preferred_risks: ["transport fleet"] })] });
-  const preferred = evidence.insurers[0].rule_evidence.find((item) => item.effect === "preferred_match" && item.matcher_component === "preferred");
+  const preferred = firstScored(evidence).rule_evidence.find((item) => item.effect === "preferred" && item.matcher_component === "preferred");
   assert(preferred, "preferred evidence should exist");
   eq(preferred.rule_id, "rule-1", "rule id");
   eq(preferred.source_document_id, "document-1", "source document id");
@@ -168,16 +174,17 @@ test("1. preferred match carries exact rule provenance and authoritative positiv
 test("2. caution evidence is machine-readable and linked to the exact rule", () => {
   const { evidence } = buildEvidence({ rules: [appetite({ caution_risks: ["medium"] })] });
   assert(effects(evidence).includes("caution"), "caution effect should exist");
-  const caution = evidence.insurers[0].rule_evidence.find((item) => item.matcher_component === "caution");
+  const outcome = firstScored(evidence);
+  const caution = outcome.rule_evidence.find((item) => item.matcher_component === "caution");
   eq(caution?.score_contribution, -10, "caution contribution");
-  assert(evidence.insurers[0].outcome_reasons.cautions.includes(caution!.evidence_id), "outcome cites caution evidence");
+  assert(outcome.outcome_reasons.cautions.includes(caution!.evidence_id), "outcome cites caution evidence");
 });
 
 test("3. document-backed decline is represented as a hard decline without invented additive score", () => {
   const { evidence } = buildEvidence({ rules: [appetite({ declined_risks: ["transport fleet"] })] });
-  const outcome = evidence.insurers[0];
+  const outcome = firstScored(evidence);
   eq(outcome.ruled_out, true, "insurer ruled out");
-  const decline = outcome.rule_evidence.find((item) => item.effect === "decline");
+  const decline = outcome.rule_evidence.find((item) => item.effect === "hard_decline");
   assert(decline, "decline evidence should exist");
   eq(decline.score_contribution, null, "hard outcome has no fabricated additive delta");
   assert(outcome.outcome_reasons.declines.includes(decline.evidence_id), "outcome cites decline evidence");
@@ -185,7 +192,7 @@ test("3. document-backed decline is represented as a hard decline without invent
 
 test("4. referral trigger evidence is explicit and rule-linked", () => {
   const { evidence } = buildEvidence({ rules: [appetite({ referral_triggers: ["transport fleet"] })] });
-  const outcome = evidence.insurers[0];
+  const outcome = firstScored(evidence);
   eq(outcome.referral_required, true, "referral flag");
   const referral = outcome.rule_evidence.find((item) => item.effect === "referral");
   assert(referral, "referral evidence should exist");
@@ -194,22 +201,25 @@ test("4. referral trigger evidence is explicit and rule-linked", () => {
 
 test("5. required document present is linked to its appetite rule", () => {
   const { evidence } = buildEvidence({ rules: [appetite({ required_documents: ["Claims history"] })] });
-  const doc = evidence.insurers[0].rule_evidence.find((item) => item.effect === "required_document_present");
+  const outcome = firstScored(evidence);
+  const doc = outcome.rule_evidence.find((item) => item.effect === "required_document_present");
   assert(doc, "present document evidence should exist");
   eq(doc.rule_id, "rule-1", "document check rule id");
   eq(doc.required_document, "Claims history", "required document label");
 });
 
-test("6. required document missing is explicit and appears in weakened reasons", () => {
+test("6. required document missing is explicit but is not mislabeled as a score reason", () => {
   const { evidence } = buildEvidence({
     matcherRisk: risk({ available_documents: [] }),
     rules: [appetite({ required_documents: ["Claims history"] })],
   });
-  const outcome = evidence.insurers[0];
+  const outcome = firstScored(evidence);
   const doc = outcome.rule_evidence.find((item) => item.effect === "required_document_missing");
   assert(doc, "missing document evidence should exist");
-  assert(outcome.outcome_reasons.required_documents_missing.includes(doc.evidence_id), "missing list cites evidence");
-  assert(outcome.outcome_reasons.weakened_by.includes(doc.evidence_id), "missing document weakens outcome");
+  const required = outcome.required_documents.find((item) => item.document_type === "Claims history");
+  assert(required, "dedicated required-document outcome exists");
+  assert(outcome.outcome_reasons.required_documents_missing.includes(required.evidence_id), "missing list cites dedicated outcome");
+  assert(!outcome.outcome_reasons.weakened_by.includes(doc.evidence_id), "confidence-only document gap is not a score reason");
 });
 
 type DocumentRow = { document_type: string; submission_id: string; status: string; scan_status: unknown };
@@ -257,12 +267,12 @@ test("8. pending, failed, infected, not_scanned, null, and expired documents nev
 
 test("9. source_document_id is preserved point in time", () => {
   const { evidence } = buildEvidence();
-  assert(evidence.insurers[0].rule_evidence.every((item) => item.source_document_id === "document-1"), "source id preserved");
+  assert(firstScored(evidence).rule_evidence.every((item) => item.source_document_id === "document-1"), "source id preserved");
 });
 
 test("10. page, section, quote, and filename are preserved when available", () => {
   const { evidence } = buildEvidence();
-  const rule = evidence.insurers[0].rule_evidence[0];
+  const rule = firstScored(evidence).rule_evidence[0];
   eq(rule.source_page, 7, "page");
   eq(rule.source_section, "Commercial motor", "section");
   eq(rule.source_quote, "Transport fleets are considered.", "quote");
@@ -271,7 +281,7 @@ test("10. page, section, quote, and filename are preserved when available", () =
 
 test("11. missing provenance stays null and is surfaced as a quality gap", () => {
   const { evidence } = buildEvidence({ rules: [appetite({ source_document_id: null, source_file_name: null, source_page: null, source_section: null, source_quote: null })] });
-  const rule = evidence.insurers[0].rule_evidence[0];
+  const rule = firstScored(evidence).rule_evidence[0];
   eq(rule.source_document_id, null, "source id remains null");
   eq(rule.source_page, null, "page remains null");
   eq(rule.source_section, null, "section remains null");
@@ -289,6 +299,11 @@ test("12. insurer with no active appetite data remains represented", () => {
   assert(missing, "no-data insurer present");
   eq(missing.no_appetite_data, true, "no-data state");
   eq(missing.rank, null, "no invented rank");
+  eq(missing.status, "no_appetite_data", "explicit no-data status");
+  eq(missing.score, null, "no invented score");
+  for (const absent of ["confidence", "manual_review_required", "senior_review_required", "matcher_notes", "scored_against_rule_id"]) {
+    assert(!(absent in missing), `no-data outcome must omit ${absent}`);
+  }
 });
 
 test("13. building evidence cannot alter matcher ranking or scores", () => {
@@ -321,7 +336,7 @@ test("14. semantically identical input produces deterministic evidence ordering"
     activeAppetite: rules,
   });
   deepEq(second.trusted_documents, first.evidence.trusted_documents, "trusted document ordering");
-  deepEq(second.insurers[0].rule_evidence, first.evidence.insurers[0].rule_evidence, "rule evidence ordering");
+  deepEq(firstScored(second).rule_evidence, firstScored(first.evidence).rule_evidence, "rule evidence ordering");
 });
 
 test("15. appetite rule changes retain existing fingerprint invalidation behavior", () => {
@@ -359,7 +374,107 @@ test("17. evidence payload contains no storage path, signed URL, token, secret, 
   }
 });
 
-test("18. evidence migration is independently verifiable, additive, nullable, and does not rewrite history", () => {
+test("18. persisted evidence redacts all client free text while retaining source and confidence metadata", () => {
+  const sentinels = [
+    "PERSON_SENTINEL_9QX", "ID_SENTINEL_8QX", "PHONE_SENTINEL_7QX",
+    "BANK_SENTINEL_6QX", "ADDRESS_SENTINEL_5QX", "POLICY_SENTINEL_4QX",
+  ];
+  const reviewedJson = reviewed();
+  const client = reviewedJson.extracted_client as Record<string, unknown>;
+  client.occupation_or_business_description = reviewedField(`${sentinels[0]} ${sentinels[1]} ${sentinels[2]}`);
+  client.risk_address = reviewedField(`${sentinels[3]} ${sentinels[4]}`);
+  const cover = reviewedJson.current_cover as Record<string, unknown>;
+  cover.endorsements = reviewedField([sentinels[5]]);
+  reviewedJson.red_flags = [{ issue: sentinels.join(" ") }];
+  const { evidence } = buildEvidence({
+    reviewedJson,
+    matcherRisk: risk({
+      features: [
+        { text: sentinels.join(" "), source: "occupation/business description" },
+        { text: sentinels[5], source: "red flag", ai_inferred: true },
+      ],
+    }),
+  });
+  const serialised = JSON.stringify(evidence);
+  for (const sentinel of sentinels) assert(!serialised.includes(sentinel), `redact ${sentinel}`);
+  assert(evidence.matcher_input.features.every((item) => item.value_retained === false), "features declare redaction");
+  assert(evidence.reviewed_risk_facts.every((item) => item.present && item.value_retained === false), "facts retain presence only");
+});
+
+test("19. score reconciliation exposes subtotal, hard-decline adjustment, clamp, and final score", () => {
+  const belowCap = firstScored(buildEvidence({
+    rules: [appetite({ preferred_risks: ["transport fleet"] })],
+  }).evidence);
+  deepEq(belowCap.score_reconciliation, {
+    component_subtotal: 75,
+    hard_decline_adjustment: 0,
+    clamp_adjustment: 0,
+    final_score: 75,
+  }, "unclamped reconciliation");
+
+  const clamped = firstScored(buildEvidence({
+    rules: [appetite({ appetite_level: "preferred", preferred_risks: ["transport fleet"] })],
+  }).evidence);
+  deepEq(clamped.score_reconciliation, {
+    component_subtotal: 105,
+    hard_decline_adjustment: 0,
+    clamp_adjustment: -5,
+    final_score: 100,
+  }, "clamped reconciliation");
+
+  const declined = firstScored(buildEvidence({
+    rules: [appetite({ declined_risks: ["transport fleet"] })],
+  }).evidence);
+  deepEq(declined.score_reconciliation, {
+    component_subtotal: 70,
+    hard_decline_adjustment: -70,
+    clamp_adjustment: 0,
+    final_score: 0,
+  }, "hard-decline reconciliation");
+  for (const item of [belowCap, clamped, declined]) {
+    const score = item.score_reconciliation;
+    eq(score.component_subtotal + score.hard_decline_adjustment + score.clamp_adjustment, score.final_score, "score arithmetic");
+    eq(score.final_score, item.score, "final score matches outcome");
+  }
+});
+
+test("20. confidence reconciliation and duplicate required-document semantics apply one penalty", () => {
+  const product = appetite({ required_documents: ["Claims history"] });
+  const portfolio = appetite({
+    id: "portfolio-rule",
+    product_line: "*",
+    risk_type: "*",
+    required_documents: ["Claims history"],
+  });
+  const outcome = firstScored(buildEvidence({
+    matcherRisk: risk({ available_documents: [] }),
+    rules: [product, portfolio],
+  }).evidence);
+  deepEq(outcome.confidence_reconciliation, {
+    input_confidence: 0.9,
+    input_confidence_available: true,
+    required_document_adjustment: -0.09999999999999998,
+    manual_review_cap_adjustment: 0,
+    final_confidence: 0.8,
+  }, "confidence arithmetic");
+  eq(outcome.required_documents.length, 1, "one canonical document outcome");
+  eq(outcome.required_documents[0].rule_evidence_ids.length, 2, "both governing rules linked");
+  eq(outcome.required_documents[0].confidence_adjustment, -0.09999999999999998, "penalty applied once");
+});
+
+test("21. AI-only declined match is authoritatively a soft-decline referral, never a hard decline", () => {
+  const outcome = firstScored(buildEvidence({
+    matcherRisk: risk({ features: [{ text: "volatile AI inference", source: "red flag", ai_inferred: true }] }),
+    rules: [appetite({ declined_risks: ["volatile ai inference"] })],
+  }).evidence);
+  const soft = outcome.rule_evidence.find((item) => item.effect === "soft_decline_referral");
+  assert(soft, "soft decline effect copied from matcher");
+  assert(outcome.outcome_reasons.referrals.includes(soft.evidence_id), "soft decline is a referral");
+  assert(!outcome.outcome_reasons.declines.includes(soft.evidence_id), "soft decline is not a hard decline");
+  eq(outcome.ruled_out, false, "AI-only match does not rule out");
+});
+
+test("22. evidence migration is independently verifiable, additive, nullable, and does not rewrite history", () => {
   const sql = readFileSync(resolve("supabase/migrations/0037_recommendation_evidence_contract.sql"), "utf8").toLowerCase();
   assert(/add column if not exists evidence_json jsonb\s*;/.test(sql), "migration adds nullable jsonb column");
   assert(!/evidence_json jsonb\s+not null/.test(sql), "historical rows must not be forced non-null");
@@ -389,6 +504,23 @@ test("mutation guard: required-document evidence comes from matcher output, not 
     matcherInput: matcherRisk, matcherResult: result, activeAppetite: rules,
   });
   assert(!effects(evidence).includes("required_document_present"), "builder must not independently recreate matcher evidence");
+});
+
+test("mutation guard: builder rejects matcher rules that omit the authoritative effect", () => {
+  const { result, matcherRisk, rules } = buildEvidence({ rules: [appetite({ preferred_risks: ["transport fleet"] })] });
+  delete result.insurers[0].matched_rules[0].effect;
+  let threw = false;
+  try {
+    buildRecommendationEvidence({
+      recommendationId: REC, submissionId: SUB, extractionId: EXT, reviewedAt: null, generatedAt: GENERATED,
+      matcherVersion: MATCHER_VERSION, taxonomyVersion: TAXONOMY_VERSION, explanationMode: "deterministic",
+      explanationSource: "deterministic", recommendationInputFingerprint: "fp", reviewed: reviewed(),
+      matcherInput: matcherRisk, matcherResult: result, activeAppetite: rules,
+    });
+  } catch (error) {
+    threw = String((error as Error).message).startsWith("matcher_effect_missing:");
+  }
+  assert(threw, "missing matcher effect must fail closed");
 });
 
 let failures = 0;

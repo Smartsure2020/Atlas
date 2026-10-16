@@ -7,33 +7,46 @@
  */
 
 import type {
+  ConfidenceReconciliation,
   InsurerScore,
   MatchInputRisk,
+  MatcherRuleEffect,
   MatchedRuleRef,
+  ScoreReconciliation,
 } from "./matcher.js";
 import type { AppetiteRow, AppetiteLevel } from "./matcher-types.js";
 
 export const RECOMMENDATION_EVIDENCE_SCHEMA_VERSION = "recommendation-evidence-v1";
 
 export type EvidenceEffect =
-  | "preferred_match"
-  | "standard_match"
-  | "caution"
-  | "decline"
-  | "referral"
+  | MatcherRuleEffect
   | "required_document_present"
-  | "required_document_missing"
-  | "other";
+  | "required_document_missing";
 
 export interface ReviewedRiskEvidence {
   field_path: string;
   label: string;
-  display_value: string;
+  present: true;
+  value_retained: false;
   source_category: "reviewed_extraction" | "reviewed_ai_inference" | "extraction_metadata";
   matcher_roles: ("product_candidate" | "risk_candidate" | "feature" | "confidence")[];
   ai_inferred: boolean;
   confidence: number | null;
   confidence_available: boolean;
+}
+
+export interface PersistedMatcherInput {
+  product_candidates: string[];
+  section_candidates?: string[];
+  risk_candidates: string[];
+  features: {
+    source: string;
+    ai_inferred: boolean;
+    value_retained: false;
+  }[];
+  available_documents: string[];
+  overall_confidence: number;
+  overall_confidence_available?: boolean;
 }
 
 export interface RuleEvidence {
@@ -47,9 +60,8 @@ export interface RuleEvidence {
   effect: EvidenceEffect;
   matcher_component: MatchedRuleRef["list"] | "required_document";
   score_contribution: number | null;
-  matched_values: string[];
+  matched_value_count: number;
   matched_input_sources: {
-    value: string;
     source_labels: string[];
     ai_inferred_only: boolean;
   }[];
@@ -61,6 +73,14 @@ export interface RuleEvidence {
   source_section: string | null;
   source_quote: string | null;
   rule_notes: string | null;
+}
+
+export interface RequiredDocumentOutcomeEvidence {
+  evidence_id: string;
+  document_type: string;
+  present: boolean;
+  rule_evidence_ids: string[];
+  confidence_adjustment: number;
 }
 
 export interface EvidenceQualityGap {
@@ -79,23 +99,27 @@ export interface EvidenceQualityGap {
   missing: string[];
 }
 
-export interface InsurerOutcomeEvidence {
+export interface ScoredInsurerOutcomeEvidence {
   insurer_id: string;
   insurer_name: string;
-  rank: number | null;
-  score: number | null;
-  band: InsurerScore["band"] | "no_appetite_data";
-  rule_status: InsurerScore["rule_status"] | "no_appetite_data";
+  status: "scored";
+  rank: number;
+  score: number;
+  band: InsurerScore["band"];
+  rule_status: InsurerScore["rule_status"];
   confidence: number | null;
   confidence_available: boolean;
   referral_required: boolean;
   manual_review_required: boolean;
   senior_review_required: boolean;
   ruled_out: boolean;
-  no_appetite_data: boolean;
+  no_appetite_data: false;
   scored_against_rule_id: string | null;
   unresolved_rule_ids: string[];
   rule_evidence: RuleEvidence[];
+  required_documents: RequiredDocumentOutcomeEvidence[];
+  score_reconciliation: ScoreReconciliation;
+  confidence_reconciliation: ConfidenceReconciliation;
   outcome_reasons: {
     why_ranked: string[];
     strengthened_by: string[];
@@ -114,6 +138,27 @@ export interface InsurerOutcomeEvidence {
   matcher_notes: string[];
 }
 
+export interface NoDataInsurerOutcomeEvidence {
+  insurer_id: string;
+  insurer_name: string;
+  status: "no_appetite_data";
+  status_code: "no_active_appetite_data";
+  no_appetite_data: true;
+  rank: null;
+  score: null;
+  band: "no_appetite_data";
+  rule_status: "no_appetite_data";
+  rule_evidence: [];
+  required_documents: [];
+  outcome_reasons: {
+    evidence_gaps: string[];
+  };
+}
+
+export type InsurerOutcomeEvidence =
+  | ScoredInsurerOutcomeEvidence
+  | NoDataInsurerOutcomeEvidence;
+
 export interface RecommendationEvidenceV1 {
   schema_version: typeof RECOMMENDATION_EVIDENCE_SCHEMA_VERSION;
   provenance: {
@@ -128,8 +173,8 @@ export interface RecommendationEvidenceV1 {
     explanation_source: string;
     recommendation_input_fingerprint: string;
   };
-  /** Canonical snapshot of the exact values handed to matchInsurers(). */
-  matcher_input: MatchInputRisk;
+  /** Privacy-minimised copy. Runtime matcher input remains unchanged. */
+  matcher_input: PersistedMatcherInput;
   reviewed_risk_facts: ReviewedRiskEvidence[];
   trusted_documents: {
     document_type: string;
@@ -157,13 +202,17 @@ function field(record: Record<string, unknown>, key: string): FieldShape | null 
     : null;
 }
 
-function displayValue(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (Array.isArray(value)) return value.map(displayValue).filter(Boolean).join(", ");
+function hasDisplayValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (Array.isArray(value)) return value.some(hasDisplayValue);
   if (typeof value === "object") {
-    return Object.values(value as Record<string, unknown>).map(displayValue).filter(Boolean).join(", ");
+    return Object.values(value as Record<string, unknown>).some(hasDisplayValue);
   }
-  return String(value).trim();
+  return String(value).trim().length > 0;
+}
+
+function compareCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 const FACT_FIELDS: {
@@ -195,15 +244,15 @@ export function buildReviewedRiskEvidence(
     const section = (reviewed[spec.section] as Record<string, unknown> | null) ?? {};
     const source = field(section, spec.key);
     if (!source) continue;
-    const value = displayValue(source.value);
-    if (!value) continue;
+    if (!hasDisplayValue(source.value)) continue;
     const confidence = typeof source.confidence === "number" && Number.isFinite(source.confidence)
       ? source.confidence
       : null;
     facts.push({
       field_path: `${spec.section}.${spec.key}`,
       label: spec.label,
-      display_value: value,
+      present: true,
+      value_retained: false,
       source_category: "reviewed_extraction",
       matcher_roles: [...spec.roles],
       ai_inferred: false,
@@ -215,12 +264,12 @@ export function buildReviewedRiskEvidence(
   const redFlags = Array.isArray(reviewed.red_flags) ? reviewed.red_flags : [];
   redFlags.forEach((raw, index) => {
     if (!raw || typeof raw !== "object") return;
-    const issue = displayValue((raw as { issue?: unknown }).issue);
-    if (!issue) return;
+    if (!hasDisplayValue((raw as { issue?: unknown }).issue)) return;
     facts.push({
       field_path: `red_flags[${index}].issue`,
       label: "Red flag",
-      display_value: issue,
+      present: true,
+      value_retained: false,
       source_category: "reviewed_ai_inference",
       matcher_roles: ["feature"],
       ai_inferred: true,
@@ -232,7 +281,8 @@ export function buildReviewedRiskEvidence(
   facts.push({
     field_path: "overall_confidence",
     label: "Overall extraction confidence",
-    display_value: risk.overall_confidence_available === false ? "unavailable" : String(risk.overall_confidence),
+    present: true,
+    value_retained: false,
     source_category: "extraction_metadata",
     matcher_roles: ["confidence"],
     ai_inferred: false,
@@ -242,46 +292,36 @@ export function buildReviewedRiskEvidence(
   return facts;
 }
 
-function canonicalRisk(risk: MatchInputRisk): MatchInputRisk {
-  const uniqueSorted = (values: string[]) => [...new Set(values)].sort((a, b) => a.localeCompare(b));
+function canonicalRisk(risk: MatchInputRisk): PersistedMatcherInput {
+  const uniqueSorted = (values: string[]) => [...new Set(values)].sort(compareCodeUnits);
   return {
     product_candidates: [...risk.product_candidates],
     section_candidates: risk.section_candidates ? [...risk.section_candidates] : undefined,
     risk_candidates: [...risk.risk_candidates],
-    features: risk.features.map((feature) => typeof feature === "string" ? feature : { ...feature }),
+    features: risk.features.map((feature) => ({
+      source: typeof feature === "string" ? "feature" : feature.source,
+      ai_inferred: typeof feature === "string" ? false : feature.ai_inferred === true,
+      value_retained: false as const,
+    })),
     available_documents: uniqueSorted(risk.available_documents),
     overall_confidence: risk.overall_confidence,
     overall_confidence_available: risk.overall_confidence_available,
   };
 }
 
-function effectFor(ref: MatchedRuleRef, appetiteLevel: AppetiteLevel): EvidenceEffect {
-  if (ref.list === "preferred") return "preferred_match";
-  if (ref.list === "caution" || ref.list === "portfolio_caution") return "caution";
-  if (ref.list === "referral" || ref.list === "portfolio_referral") return "referral";
-  if (ref.list === "declined" || ref.list === "portfolio_declined") return "decline";
-  if (ref.list === "base") {
-    if (appetiteLevel === "preferred") return "preferred_match";
-    if (appetiteLevel === "standard") return "standard_match";
-    if (appetiteLevel === "caution") return "caution";
-    return "decline";
-  }
-  return "other";
-}
-
 const EFFECT_ORDER: Record<EvidenceEffect, number> = {
-  preferred_match: 0,
-  standard_match: 1,
+  preferred: 0,
+  standard: 1,
   caution: 2,
-  decline: 3,
-  referral: 4,
-  required_document_present: 5,
-  required_document_missing: 6,
-  other: 7,
+  referral: 3,
+  soft_decline_referral: 4,
+  hard_decline: 5,
+  required_document_present: 6,
+  required_document_missing: 7,
 };
 
-function evidenceId(ruleId: string, component: string, suffix: string): string {
-  return `rule:${ruleId}:${component}:${suffix || "rule"}`;
+function evidenceId(ruleId: string, component: string, suffix?: string): string {
+  return `rule:${ruleId}:${component}${suffix ? `:${suffix}` : ""}`;
 }
 
 function snapshotRule(
@@ -296,10 +336,15 @@ function snapshotRule(
     requiredDocument?: string | null;
   }
 ): RuleEvidence {
-  const matchedValues = [...new Set(input.matchedValues ?? [])].sort((a, b) => a.localeCompare(b));
-  const suffix = input.requiredDocument ?? matchedValues.join("|");
+  const matchedValues = [...new Set(input.matchedValues ?? [])].sort(compareCodeUnits);
+  const sourceGroups = new Map<string, RuleEvidence["matched_input_sources"][number]>();
+  for (const item of input.matchedInputs ?? []) {
+    const sourceLabels = [...new Set(item.source_labels)].sort(compareCodeUnits);
+    const key = `${sourceLabels.join("\u0000")}:${item.ai_inferred_only ? "1" : "0"}`;
+    sourceGroups.set(key, { source_labels: sourceLabels, ai_inferred_only: item.ai_inferred_only });
+  }
   return {
-    evidence_id: evidenceId(rule.id, input.component, suffix),
+    evidence_id: evidenceId(rule.id, input.component, input.requiredDocument?.toLowerCase()),
     rule_id: rule.id,
     insurer_id: rule.insurer_id,
     insurer_name: insurerName,
@@ -309,14 +354,10 @@ function snapshotRule(
     effect: input.effect,
     matcher_component: input.component,
     score_contribution: input.scoreContribution,
-    matched_values: matchedValues,
-    matched_input_sources: (input.matchedInputs ?? [])
-      .map((item) => ({
-        value: item.value,
-        source_labels: [...new Set(item.source_labels)].sort((a, b) => a.localeCompare(b)),
-        ai_inferred_only: item.ai_inferred_only,
-      }))
-      .sort((a, b) => a.value.localeCompare(b.value)),
+    matched_value_count: matchedValues.length,
+    matched_input_sources: [...sourceGroups.entries()]
+      .sort(([a], [b]) => compareCodeUnits(a, b))
+      .map(([, item]) => item),
     required_document: input.requiredDocument ?? null,
     source: rule.source,
     source_document_id: rule.source_document_id ?? null,
@@ -331,43 +372,62 @@ function snapshotRule(
 function ruleEvidenceFor(
   insurer: InsurerScore,
   appetiteById: Map<string, AppetiteRow>
-): { evidence: RuleEvidence[]; unresolvedRuleIds: string[] } {
+): {
+  evidence: RuleEvidence[];
+  unresolvedRuleIds: string[];
+  requiredDocuments: RequiredDocumentOutcomeEvidence[];
+} {
   const evidence: RuleEvidence[] = [];
   const unresolvedRuleIds: string[] = [];
   for (const ref of insurer.matched_rules) {
+    if (!ref.effect) throw new Error(`matcher_effect_missing:${ref.appetite_id}:${ref.list}`);
     const rule = appetiteById.get(ref.appetite_id);
     if (!rule) {
       unresolvedRuleIds.push(ref.appetite_id);
       continue;
     }
     evidence.push(snapshotRule(rule, insurer.insurer_name, {
-      effect: effectFor(ref, rule.appetite_level),
+      effect: ref.effect,
       component: ref.list,
       scoreContribution: ref.score_contribution ?? null,
       matchedValues: ref.matched_strings,
       matchedInputs: ref.matched_inputs ?? [],
     }));
   }
+  const requiredDocuments: RequiredDocumentOutcomeEvidence[] = [];
   for (const doc of insurer.required_document_evidence ?? []) {
-    const rule = appetiteById.get(doc.appetite_id);
-    if (!rule) {
-      unresolvedRuleIds.push(doc.appetite_id);
-      continue;
+    const ruleEvidenceIds: string[] = [];
+    for (const appetiteId of doc.appetite_ids) {
+      const rule = appetiteById.get(appetiteId);
+      if (!rule) {
+        unresolvedRuleIds.push(appetiteId);
+        continue;
+      }
+      const snapshot = snapshotRule(rule, insurer.insurer_name, {
+        effect: doc.present ? "required_document_present" : "required_document_missing",
+        component: "required_document",
+        scoreContribution: null,
+        requiredDocument: doc.document_type,
+      });
+      evidence.push(snapshot);
+      ruleEvidenceIds.push(snapshot.evidence_id);
     }
-    evidence.push(snapshotRule(rule, insurer.insurer_name, {
-      effect: doc.present ? "required_document_present" : "required_document_missing",
-      component: "required_document",
-      scoreContribution: null,
-      requiredDocument: doc.document_type,
-    }));
+    requiredDocuments.push({
+      evidence_id: `required-document:${doc.document_type.toLowerCase()}`,
+      document_type: doc.document_type,
+      present: doc.present,
+      rule_evidence_ids: [...new Set(ruleEvidenceIds)].sort(compareCodeUnits),
+      confidence_adjustment: doc.confidence_adjustment,
+    });
   }
   return {
     evidence: evidence.sort((a, b) =>
-      a.rule_id.localeCompare(b.rule_id)
+      compareCodeUnits(a.rule_id, b.rule_id)
       || EFFECT_ORDER[a.effect] - EFFECT_ORDER[b.effect]
-      || a.evidence_id.localeCompare(b.evidence_id)
+      || compareCodeUnits(a.evidence_id, b.evidence_id)
     ),
-    unresolvedRuleIds: [...new Set(unresolvedRuleIds)].sort((a, b) => a.localeCompare(b)),
+    unresolvedRuleIds: [...new Set(unresolvedRuleIds)].sort(compareCodeUnits),
+    requiredDocuments: requiredDocuments.sort((a, b) => compareCodeUnits(a.evidence_id, b.evidence_id)),
   };
 }
 
@@ -379,14 +439,22 @@ function outcomeFor(
   insurer: InsurerScore,
   rank: number,
   rules: RuleEvidence[],
-  unresolvedRuleIds: string[]
-): InsurerOutcomeEvidence {
+  unresolvedRuleIds: string[],
+  requiredDocuments: RequiredDocumentOutcomeEvidence[]
+): ScoredInsurerOutcomeEvidence {
+  if (!insurer.score_reconciliation) {
+    throw new Error(`matcher_score_reconciliation_missing:${insurer.insurer_id}`);
+  }
+  if (!insurer.confidence_reconciliation) {
+    throw new Error(`matcher_confidence_reconciliation_missing:${insurer.insurer_id}`);
+  }
   const missingRuleIds = new Set(
     rules.filter((rule) => rule.source_document_id === null).map((rule) => rule.rule_id)
   );
   return {
     insurer_id: insurer.insurer_id,
     insurer_name: insurer.insurer_name,
+    status: "scored",
     rank,
     score: insurer.score,
     band: insurer.band,
@@ -401,24 +469,27 @@ function outcomeFor(
     scored_against_rule_id: insurer.scored_against_appetite_id,
     unresolved_rule_ids: unresolvedRuleIds,
     rule_evidence: rules,
+    required_documents: requiredDocuments,
+    score_reconciliation: { ...insurer.score_reconciliation },
+    confidence_reconciliation: { ...insurer.confidence_reconciliation },
     outcome_reasons: {
-      why_ranked: ids(rules, (rule) => ["preferred_match", "standard_match", "caution"].includes(rule.effect)),
-      strengthened_by: ids(rules, (rule) => rule.effect === "preferred_match" || rule.effect === "required_document_present"),
-      weakened_by: ids(rules, (rule) => rule.effect === "caution" || rule.effect === "required_document_missing" || (rule.score_contribution ?? 0) < 0),
+      why_ranked: ids(rules, (rule) => ["preferred", "standard", "caution"].includes(rule.effect)),
+      strengthened_by: ids(rules, (rule) => (rule.score_contribution ?? 0) > 0),
+      weakened_by: ids(rules, (rule) => (rule.score_contribution ?? 0) < 0),
       cautions: ids(rules, (rule) => rule.effect === "caution"),
-      referrals: ids(rules, (rule) => rule.effect === "referral" || (rule.effect === "decline" && !insurer.ruled_out)),
-      declines: ids(rules, (rule) => rule.effect === "decline"),
-      required_documents_present: ids(rules, (rule) => rule.effect === "required_document_present"),
-      required_documents_missing: ids(rules, (rule) => rule.effect === "required_document_missing"),
+      referrals: ids(rules, (rule) => rule.effect === "referral" || rule.effect === "soft_decline_referral"),
+      declines: ids(rules, (rule) => rule.effect === "hard_decline"),
+      required_documents_present: requiredDocuments.filter((doc) => doc.present).map((doc) => doc.evidence_id),
+      required_documents_missing: requiredDocuments.filter((doc) => !doc.present).map((doc) => doc.evidence_id),
       evidence_gaps: [
         ...[...missingRuleIds].map((ruleId) => `rule:${ruleId}:source_document_missing`),
         ...unresolvedRuleIds.map((ruleId) => `rule:${ruleId}:snapshot_missing`),
         ...(insurer.manual_review_required ? [`insurer:${insurer.insurer_id}:taxonomy_match_missing`] : []),
       ].sort(),
     },
-    unmatched_sections: [...insurer.unmatched_sections].sort((a, b) => a.localeCompare(b)),
-    unmatched_product_candidates: [...insurer.unmatched_product_candidates].sort((a, b) => a.localeCompare(b)),
-    nearby_rule_matches: [...insurer.nearby_rule_matches].sort((a, b) => a.localeCompare(b)),
+    unmatched_sections: [...insurer.unmatched_sections].sort(compareCodeUnits),
+    unmatched_product_candidates: [...insurer.unmatched_product_candidates].sort(compareCodeUnits),
+    nearby_rule_matches: [...insurer.nearby_rule_matches].sort(compareCodeUnits),
     matcher_notes: [...insurer.scoring_notes],
   };
 }
@@ -427,29 +498,18 @@ function noDataOutcome(insurer: { insurer_id: string; insurer_name: string }): I
   return {
     insurer_id: insurer.insurer_id,
     insurer_name: insurer.insurer_name,
+    status: "no_appetite_data",
+    status_code: "no_active_appetite_data",
     rank: null,
     score: null,
     band: "no_appetite_data",
     rule_status: "no_appetite_data",
-    confidence: null,
-    confidence_available: false,
-    referral_required: false,
-    manual_review_required: true,
-    senior_review_required: true,
-    ruled_out: false,
     no_appetite_data: true,
-    scored_against_rule_id: null,
-    unresolved_rule_ids: [],
     rule_evidence: [],
+    required_documents: [],
     outcome_reasons: {
-      why_ranked: [], strengthened_by: [], weakened_by: [], cautions: [], referrals: [], declines: [],
-      required_documents_present: [], required_documents_missing: [],
       evidence_gaps: [`insurer:${insurer.insurer_id}:appetite_data_missing`],
     },
-    unmatched_sections: [],
-    unmatched_product_candidates: [],
-    nearby_rule_matches: [],
-    matcher_notes: ["No active appetite data was available for this insurer."],
   };
 }
 
@@ -460,13 +520,14 @@ function qualityGaps(
   const gaps: EvidenceQualityGap[] = [];
   const seenRules = new Map<string, RuleEvidence>();
   for (const insurer of insurers) {
-    if (insurer.no_appetite_data) {
+    if (insurer.status === "no_appetite_data") {
       gaps.push({
         code: "insurer_appetite_data_missing", scope: "insurer", insurer_id: insurer.insurer_id,
         rule_id: null, field_path: null, missing: ["active_appetite_rule"],
       });
+      continue;
     }
-    if (insurer.manual_review_required && !insurer.no_appetite_data) {
+    if (insurer.manual_review_required) {
       gaps.push({
         code: "taxonomy_match_missing", scope: "insurer", insurer_id: insurer.insurer_id,
         rule_id: null, field_path: null, missing: ["matched_product_rule"],
@@ -496,7 +557,7 @@ function qualityGaps(
         });
       }
     }
-    if (rule.matched_values.length > 0 && rule.matched_input_sources.length === 0) {
+    if (rule.matched_value_count > 0 && rule.matched_input_sources.length === 0) {
       gaps.push({
         code: "matched_input_source_missing", scope: "rule", insurer_id: rule.insurer_id,
         rule_id: rule.rule_id, field_path: null, missing: ["matched_input_sources"],
@@ -512,10 +573,10 @@ function qualityGaps(
     }
   }
   return gaps.sort((a, b) =>
-    a.code.localeCompare(b.code)
-    || (a.insurer_id ?? "").localeCompare(b.insurer_id ?? "")
-    || (a.rule_id ?? "").localeCompare(b.rule_id ?? "")
-    || (a.field_path ?? "").localeCompare(b.field_path ?? "")
+    compareCodeUnits(a.code, b.code)
+    || compareCodeUnits(a.insurer_id ?? "", b.insurer_id ?? "")
+    || compareCodeUnits(a.rule_id ?? "", b.rule_id ?? "")
+    || compareCodeUnits(a.field_path ?? "", b.field_path ?? "")
   );
 }
 
@@ -541,11 +602,11 @@ export function buildRecommendationEvidence(input: {
   const appetiteById = new Map(input.activeAppetite.map((rule) => [rule.id, rule]));
   const facts = buildReviewedRiskEvidence(input.reviewed, input.matcherInput);
   const scored = input.matcherResult.insurers.map((insurer, index) => {
-    const { evidence, unresolvedRuleIds } = ruleEvidenceFor(insurer, appetiteById);
-    return outcomeFor(insurer, index + 1, evidence, unresolvedRuleIds);
+    const { evidence, unresolvedRuleIds, requiredDocuments } = ruleEvidenceFor(insurer, appetiteById);
+    return outcomeFor(insurer, index + 1, evidence, unresolvedRuleIds, requiredDocuments);
   });
   const noData = [...input.matcherResult.no_data_for]
-    .sort((a, b) => a.insurer_name.localeCompare(b.insurer_name) || a.insurer_id.localeCompare(b.insurer_id))
+    .sort((a, b) => compareCodeUnits(a.insurer_name, b.insurer_name) || compareCodeUnits(a.insurer_id, b.insurer_id))
     .map(noDataOutcome);
   const insurers = [...scored, ...noData];
   const gaps = qualityGaps(facts, insurers);
@@ -567,7 +628,7 @@ export function buildRecommendationEvidence(input: {
     matcher_input: canonicalRisk(input.matcherInput),
     reviewed_risk_facts: facts,
     trusted_documents: [...new Set(input.matcherInput.available_documents)]
-      .sort((a, b) => a.localeCompare(b))
+      .sort(compareCodeUnits)
       .map((documentType) => ({
         document_type: documentType,
         evidence_label: documentType,
