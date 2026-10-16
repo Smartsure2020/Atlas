@@ -12,6 +12,7 @@ import { api } from "./atlas";
 export interface ScoredInsurer {
   insurer_id: string;
   insurer_name: string;
+  rank?: number;
   score: number;
   band: "preferred" | "standard" | "caution" | "declined" | "ruled_out" | "insufficient_rule_match";
   rule_status: "preferred" | "standard" | "caution" | "declined" | "referral" | "ruled_out" | "insufficient_rule_match";
@@ -36,6 +37,7 @@ export interface ScoredInsurer {
       source_labels: string[];
       ai_inferred_only: boolean;
     }[];
+    matched_rule_terms?: { term: string; input_source: string | null }[];
     effect?: MatcherRuleEffect;
     rule_product_line?: string;
     rule_risk_type?: string;
@@ -106,6 +108,7 @@ interface EvidenceRule {
   matcher_component: string;
   score_contribution: number | null;
   matched_value_count: number;
+  matched_rule_terms: { term: string; input_source: string | null }[];
   matched_input_sources: { source_labels: string[]; ai_inferred_only: boolean }[];
   required_document: string | null;
   source: "ai_extracted" | "manual";

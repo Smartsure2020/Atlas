@@ -87,6 +87,13 @@ export type MatcherRuleEffect =
   | "hard_decline"
   | "soft_decline_referral";
 
+export interface MatchedRuleTerm {
+  /** Exact insurer-owned term from the appetite rule list. */
+  term: string;
+  /** Authoritative matcher feature-source label; null is never guessed. */
+  input_source: string | null;
+}
+
 export interface MatchInputRisk {
   /** All taxonomy candidates that describe what COVER this submission needs.
    *  Built in deriveRisk() from cover_sections, secondary_risk_types, and
@@ -132,6 +139,8 @@ export interface MatchedRuleRef {
     source_labels: string[];
     ai_inferred_only: boolean;
   }[];
+  /** Additive evidence output pairing insurer-owned terms with hit sources. */
+  matched_rule_terms?: MatchedRuleTerm[];
   rule_product_line?: string;
   rule_risk_type?: string;
   source_quote?: string | null;
@@ -176,6 +185,8 @@ export interface ConfidenceReconciliation {
 export interface InsurerScore {
   insurer_id: string;
   insurer_name: string;
+  /** Authoritative one-based rank assigned after the matcher finishes sorting. */
+  rank?: number;
   score: number;
   band: AppetiteLevel | "ruled_out" | "insufficient_rule_match";
   rule_status: AppetiteLevel | "referral" | "ruled_out" | "insufficient_rule_match";
@@ -347,6 +358,11 @@ function ruleRef(
       source_labels: [...hit.sources],
       ai_inferred_only: hit.ai_only,
     })),
+    matched_rule_terms: (options.hits ?? []).flatMap<MatchedRuleTerm>((hit) =>
+      hit.sources.length > 0
+        ? hit.sources.map((source) => ({ term: hit.candidate, input_source: source }))
+        : [{ term: hit.candidate, input_source: null }]
+    ),
     rule_product_line: rule.product_line,
     rule_risk_type: rule.risk_type,
     source_quote: rule.source_quote ?? null,
@@ -753,6 +769,7 @@ export function matchInsurers(
     if (a.ruled_out !== b.ruled_out) return a.ruled_out ? 1 : -1;
     return b.score - a.score;
   });
+  scored.forEach((insurer, index) => { insurer.rank = index + 1; });
 
   return { insurers: scored, no_data_for: noData };
 }

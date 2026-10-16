@@ -132,7 +132,17 @@ function buildEvidence(args: {
   const rules = args.rules ?? [appetite()];
   const result = matchInsurers(matcherRisk, rules);
   result.no_data_for = args.noData ?? [];
-  const evidence = buildRecommendationEvidence({
+  const evidence = rebuildEvidence(result, matcherRisk, rules, args.reviewedJson);
+  return { evidence, result, matcherRisk, rules };
+}
+
+function rebuildEvidence(
+  result: ReturnType<typeof matchInsurers>,
+  matcherRisk: MatchInputRisk,
+  rules: AppetiteRow[],
+  reviewedJson: Record<string, unknown> = reviewed()
+): RecommendationEvidenceV1 {
+  return buildRecommendationEvidence({
     recommendationId: REC,
     submissionId: SUB,
     extractionId: EXT,
@@ -143,12 +153,11 @@ function buildEvidence(args: {
     explanationMode: "deterministic",
     explanationSource: "deterministic",
     recommendationInputFingerprint: "fp_test",
-    reviewed: args.reviewedJson ?? reviewed(),
+    reviewed: reviewedJson,
     matcherInput: matcherRisk,
     matcherResult: result,
     activeAppetite: rules,
   });
-  return { evidence, result, matcherRisk, rules };
 }
 
 function effects(evidence: RecommendationEvidenceV1) {
@@ -390,15 +399,19 @@ test("18. persisted evidence redacts all client free text while retaining source
     reviewedJson,
     matcherRisk: risk({
       features: [
-        { text: sentinels.join(" "), source: "occupation/business description" },
+        { text: `${sentinels.join(" ")} transport fleet`, source: "occupation/business description" },
         { text: sentinels[5], source: "red flag", ai_inferred: true },
       ],
     }),
+    rules: [appetite({ preferred_risks: ["transport fleet"] })],
   });
   const serialised = JSON.stringify(evidence);
   for (const sentinel of sentinels) assert(!serialised.includes(sentinel), `redact ${sentinel}`);
   assert(evidence.matcher_input.features.every((item) => item.value_retained === false), "features declare redaction");
   assert(evidence.reviewed_risk_facts.every((item) => item.present && item.value_retained === false), "facts retain presence only");
+  deepEq(firstScored(evidence).rule_evidence.flatMap((item) => item.matched_rule_terms), [
+    { term: "transport fleet", input_source: "occupation/business description" },
+  ], "only the insurer-owned term and stable source survive");
 });
 
 test("19. score reconciliation exposes subtotal, hard-decline adjustment, clamp, and final score", () => {
@@ -474,7 +487,147 @@ test("21. AI-only declined match is authoritatively a soft-decline referral, nev
   eq(outcome.ruled_out, false, "AI-only match does not rule out");
 });
 
-test("22. evidence migration is independently verifiable, additive, nullable, and does not rewrite history", () => {
+test("22. insurer-owned matched terms retain authoritative term/source pairing for every effect", () => {
+  const cases = [
+    {
+      label: "preferred",
+      matcherRisk: risk({ features: [{ text: "transport fleet", source: "occupation/business description" }] }),
+      rule: appetite({ preferred_risks: ["transport fleet"] }),
+      effect: "preferred",
+      expected: { term: "transport fleet", input_source: "occupation/business description" },
+    },
+    {
+      label: "caution",
+      matcherRisk: risk({ features: [{ text: "medium complexity", source: "complexity level" }] }),
+      rule: appetite({ caution_risks: ["medium"] }),
+      effect: "caution",
+      expected: { term: "medium", input_source: "complexity level" },
+    },
+    {
+      label: "hard decline",
+      matcherRisk: risk({ features: [{ text: "transport fleet", source: "occupation/business description" }] }),
+      rule: appetite({ declined_risks: ["transport fleet"] }),
+      effect: "hard_decline",
+      expected: { term: "transport fleet", input_source: "occupation/business description" },
+    },
+    {
+      label: "soft decline referral",
+      matcherRisk: risk({ features: [{ text: "volatile inference", source: "red flag", ai_inferred: true }] }),
+      rule: appetite({ declined_risks: ["volatile inference"] }),
+      effect: "soft_decline_referral",
+      expected: { term: "volatile inference", input_source: "red flag [AI]" },
+    },
+    {
+      label: "referral",
+      matcherRisk: risk({ features: [{ text: "high value", source: "sum insured" }] }),
+      rule: appetite({ referral_triggers: ["high value"] }),
+      effect: "referral",
+      expected: { term: "high value", input_source: "sum insured" },
+    },
+  ] as const;
+  for (const item of cases) {
+    const outcome = firstScored(buildEvidence({ matcherRisk: item.matcherRisk, rules: [item.rule] }).evidence);
+    const evidence = outcome.rule_evidence.find((ruleEvidence) => ruleEvidence.effect === item.effect);
+    assert(evidence, `${item.label} evidence exists`);
+    deepEq(evidence.matched_rule_terms, [item.expected], `${item.label} term/source pairing`);
+  }
+});
+
+test("23. matcher-authored ranks are copied exactly and no-data rank remains null", () => {
+  const { evidence, result } = buildEvidence({
+    rules: [
+      appetite({ id: "preferred", insurer_id: "insurer-a", insurer_name: "A", appetite_level: "preferred" }),
+      appetite({ id: "standard", insurer_id: "insurer-b", insurer_name: "B", appetite_level: "standard" }),
+    ],
+    noData: [{ insurer_id: "insurer-c", insurer_name: "C" }],
+  });
+  deepEq(result.insurers.map((item) => item.rank), [1, 2], "matcher authoritative ranks");
+  deepEq(evidence.insurers.filter((item) => item.status === "scored").map((item) => item.rank), [1, 2], "evidence exact ranks");
+  const noData = evidence.insurers.find((item) => item.status === "no_appetite_data");
+  assert(noData, "no-data insurer exists");
+  eq(noData.rank, null, "no-data rank stays null");
+});
+
+test("24. evidence builder fails closed when the matcher omits its authoritative rank", () => {
+  const built = buildEvidence();
+  delete built.result.insurers[0].rank;
+  let error: unknown;
+  try {
+    rebuildEvidence(built.result, built.matcherRisk, built.rules);
+  } catch (caught) {
+    error = caught;
+  }
+  assert(error instanceof Error, "missing matcher rank is rejected");
+  eq(error.message, "matcher_rank_missing:insurer-1", "stable missing-rank failure");
+});
+
+test("25. evidence builder copies matcher-owned term pairs without reconstructing them", () => {
+  const built = buildEvidence({ rules: [appetite({ preferred_risks: ["transport fleet"] })] });
+  const preferred = built.result.insurers[0].matched_rules.find((item) => item.effect === "preferred");
+  assert(preferred, "preferred matcher rule exists");
+  preferred.matched_rule_terms = [];
+  const evidence = rebuildEvidence(built.result, built.matcherRisk, built.rules);
+  const copied = firstScored(evidence).rule_evidence.find((item) => item.effect === "preferred");
+  assert(copied, "preferred evidence exists");
+  deepEq(copied.matched_rule_terms, [], "builder does not infer term pairs from matched strings or client input");
+});
+
+test("26. manual-review confidence cap adjustment is copied and reconciles to the final confidence", () => {
+  const outcome = firstScored(buildEvidence({
+    matcherRisk: risk({ overall_confidence: 0.9, overall_confidence_available: true }),
+    rules: [appetite({ product_line: "cyber", risk_type: "technology" })],
+  }).evidence);
+  eq(outcome.manual_review_required, true, "manual review path selected");
+  deepEq(outcome.confidence_reconciliation, {
+    input_confidence: 0.9,
+    input_confidence_available: true,
+    required_document_adjustment: 0,
+    manual_review_cap_adjustment: -0.55,
+    final_confidence: 0.35,
+  }, "authoritative manual-review cap reconciliation");
+  eq(outcome.confidence, 0.35, "outcome final confidence");
+});
+
+test("27. present required document remains dedicated evidence and never becomes a score strength", () => {
+  const outcome = firstScored(buildEvidence({
+    rules: [appetite({ required_documents: ["Claims history"] })],
+  }).evidence);
+  const documentOutcome = outcome.required_documents.find((item) => item.document_type === "Claims history");
+  assert(documentOutcome?.present, "document is present in dedicated evidence");
+  const documentRules = outcome.rule_evidence.filter((item) => item.effect === "required_document_present");
+  assert(documentRules.length > 0, "present document rule linkage exists");
+  for (const item of documentRules) {
+    assert(!outcome.outcome_reasons.strengthened_by.includes(item.evidence_id), "document presence is not a score strength");
+  }
+  assert(!outcome.outcome_reasons.strengthened_by.includes(documentOutcome.evidence_id), "document outcome is not a score strength");
+});
+
+test("28. non-ASCII canonical ordering uses stable code-unit order for terms, sources, and documents", () => {
+  const terms = ["éclair", "alpha_beta", "Zulu", "alpha-beta"];
+  const sources = ["é-source", "a_source", "Z-source", "a-source"];
+  const matcherRisk = risk({
+    features: sources.map((source) => ({ text: terms.join(" "), source })),
+    available_documents: ["éclair", "alpha_beta", "Zulu", "alpha-beta"],
+  });
+  const rules = [appetite({ preferred_risks: terms })];
+  const first = buildEvidence({ matcherRisk, rules });
+  const expectedTerms = ["Zulu", "alpha-beta", "alpha_beta", "éclair"];
+  const expectedSources = ["Z-source", "a-source", "a_source", "é-source"];
+  const preferred = firstScored(first.evidence).rule_evidence.find((item) => item.effect === "preferred");
+  assert(preferred, "preferred evidence exists");
+  deepEq([...new Set(preferred.matched_rule_terms.map((item) => item.term))], expectedTerms, "term code-unit order");
+  deepEq(preferred.matched_rule_terms.filter((item) => item.term === "Zulu").map((item) => item.input_source), expectedSources, "source code-unit order");
+  deepEq(first.evidence.trusted_documents.map((item) => item.document_type), expectedTerms, "document code-unit order");
+
+  const reversed = structuredClone(first.result);
+  for (const ref of reversed.insurers[0].matched_rules) ref.matched_rule_terms?.reverse();
+  const reversedRisk = risk({ ...matcherRisk, available_documents: [...matcherRisk.available_documents].reverse() });
+  const second = rebuildEvidence(reversed, reversedRisk, rules);
+  deepEq(firstScored(second).rule_evidence, firstScored(first.evidence).rule_evidence, "serialization stable after input reversal");
+  deepEq(second.trusted_documents, first.evidence.trusted_documents, "document serialization stable after input reversal");
+});
+
+test("29. evidence migration is independently verifiable, additive, nullable, and does not rewrite history", () => {
   const sql = readFileSync(resolve("supabase/migrations/0037_recommendation_evidence_contract.sql"), "utf8").toLowerCase();
   assert(/add column if not exists evidence_json jsonb\s*;/.test(sql), "migration adds nullable jsonb column");
   assert(!/evidence_json jsonb\s+not null/.test(sql), "historical rows must not be forced non-null");

@@ -112,7 +112,7 @@ function tables(): Record<string, Row[]> {
   };
 }
 
-function installRestStub(seed: Record<string, Row[]>) {
+function installRestStub(seed: Record<string, Row[]>, options: { projectSelect?: boolean } = {}) {
   const original = globalThis.fetch;
   const requests: Recorded[] = [];
   const parse = (body: BodyInit | null | undefined): unknown => {
@@ -146,6 +146,16 @@ function installRestStub(seed: Record<string, Row[]>) {
           rows = rows.filter((row) => expected.includes(String(row[key])));
         }
       });
+      const select = url.searchParams.get("select");
+      if (options.projectSelect && select) {
+        const fields = select.split(",").map((item) => item.trim()).filter(Boolean);
+        rows = rows.map((row) => Object.fromEntries(fields.map((fieldSpec) => {
+          const separator = fieldSpec.indexOf(":");
+          const output = separator >= 0 ? fieldSpec.slice(0, separator) : fieldSpec;
+          const source = separator >= 0 ? fieldSpec.slice(separator + 1) : fieldSpec;
+          return [output, row[source]];
+        })));
+      }
       if (wantsObject) {
         return rows.length === 1 ? response(rows[0]) : response({ code: "PGRST116", message: "0 rows" }, 406);
       }
@@ -196,15 +206,17 @@ test("1. handler persists and returns an identity-linked, privacy-safe evidence 
     const scored = (evidence.insurers as Row[]).filter((item) => item.status === "scored");
     const reasoning = row.reasoning_json as Row;
     const top = reasoning.top as Row;
-    const persistedOrder = [top, ...(row.secondary_options_json as Row[]), ...(row.not_recommended_json as Row[])]
-      .map((item) => item.insurer_id);
-    deepEq(scored.map((item) => item.insurer_id), persistedOrder, "authoritative matcher order is retained");
+    const persistedOrderRows = [top, ...(row.secondary_options_json as Row[]), ...(row.not_recommended_json as Row[])];
+    deepEq(scored.map((item) => item.insurer_id), persistedOrderRows.map((item) => item.insurer_id), "authoritative matcher order is retained");
+    deepEq(scored.map((item) => item.rank), [1, 2], "first and later matcher ranks are exact");
+    deepEq(scored.map((item) => item.rank), persistedOrderRows.map((item) => item.rank), "evidence copies matcher-authored ranks");
     const firstRule = ((scored[0].rule_evidence as Row[])[0]);
     eq(firstRule.source_document_id, "guide-a", "active rule provenance persisted");
     eq(firstRule.source_page, 3, "active rule locator persisted");
 
     const noData = (evidence.insurers as Row[]).find((item) => item.status === "no_appetite_data");
     assert(noData, "no-data insurer is explicit");
+    eq(noData.rank, null, "no-data insurer has no rank");
     eq(noData.score, null, "no fabricated score");
     for (const absent of ["manual_review_required", "senior_review_required", "matcher_notes", "confidence"]) {
       assert(!(absent in noData), `no-data omits ${absent}`);
@@ -216,11 +228,14 @@ test("1. handler persists and returns an identity-linked, privacy-safe evidence 
       assert(!serialised.includes(forbidden), `evidence excludes ${forbidden}`);
     }
 
-    const getStub = installRestStub({ atlas_recommendations: [row] });
+    const getStub = installRestStub({ atlas_recommendations: [row] }, { projectSelect: true });
     try {
       const get = await handleGetRecommendation(SUB, env(), MANAGER);
       eq(get.status, 200, "GET succeeds");
       const getBody = await get.json() as { recommendation: Row };
+      const getRequest = getStub.requests.find((item) => item.method === "GET" && item.table === "atlas_recommendations");
+      assert(getRequest, "recommendation GET request recorded");
+      assert((getRequest.url.searchParams.get("select") ?? "").split(",").includes("evidence_json"), "GET explicitly selects evidence_json");
       deepEq(getBody.recommendation.evidence_json, evidence, "GET returns persisted evidence unchanged");
     } finally {
       getStub.restore();
@@ -230,7 +245,27 @@ test("1. handler persists and returns an identity-linked, privacy-safe evidence 
   }
 });
 
-test("2. evidence-builder failure fails the job and performs no recommendation, audit, or completion write", async () => {
+test("2. GET explicitly selects and preserves a historical null evidence packet", async () => {
+  const historical = {
+    id: "historical-recommendation", submission_id: SUB, status: "completed",
+    reasoning_json: {}, secondary_options_json: [], not_recommended_json: [],
+    evidence_json: null,
+  };
+  const stub = installRestStub({ atlas_recommendations: [historical] }, { projectSelect: true });
+  try {
+    const get = await handleGetRecommendation(SUB, env(), MANAGER);
+    eq(get.status, 200, "historical GET succeeds");
+    const body = await get.json() as { recommendation: Row };
+    const getRequest = stub.requests.find((item) => item.method === "GET" && item.table === "atlas_recommendations");
+    assert(getRequest, "historical recommendation GET recorded");
+    assert((getRequest.url.searchParams.get("select") ?? "").split(",").includes("evidence_json"), "historical GET explicitly selects evidence_json");
+    eq(body.recommendation.evidence_json, null, "historical null remains valid");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("3. evidence-builder failure fails the job and performs no recommendation, audit, or completion write", async () => {
   const stub = installRestStub(tables());
   try {
     const res = await handleRunRecommendation(SUB, request(), env(), MANAGER, {

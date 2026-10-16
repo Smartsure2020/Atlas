@@ -11,6 +11,7 @@ import type {
   InsurerScore,
   MatchInputRisk,
   MatcherRuleEffect,
+  MatchedRuleTerm,
   MatchedRuleRef,
   ScoreReconciliation,
 } from "./matcher.js";
@@ -61,6 +62,7 @@ export interface RuleEvidence {
   matcher_component: MatchedRuleRef["list"] | "required_document";
   score_contribution: number | null;
   matched_value_count: number;
+  matched_rule_terms: MatchedRuleTerm[];
   matched_input_sources: {
     source_labels: string[];
     ai_inferred_only: boolean;
@@ -332,6 +334,7 @@ function snapshotRule(
     component: RuleEvidence["matcher_component"];
     scoreContribution: number | null;
     matchedValues?: string[];
+    matchedRuleTerms?: MatchedRuleTerm[];
     matchedInputs?: RuleEvidence["matched_input_sources"];
     requiredDocument?: string | null;
   }
@@ -342,6 +345,11 @@ function snapshotRule(
     const sourceLabels = [...new Set(item.source_labels)].sort(compareCodeUnits);
     const key = `${sourceLabels.join("\u0000")}:${item.ai_inferred_only ? "1" : "0"}`;
     sourceGroups.set(key, { source_labels: sourceLabels, ai_inferred_only: item.ai_inferred_only });
+  }
+  const ruleTermPairs = new Map<string, MatchedRuleTerm>();
+  for (const item of input.matchedRuleTerms ?? []) {
+    const key = `${item.term}\u0000${item.input_source ?? "\u0000"}`;
+    ruleTermPairs.set(key, { term: item.term, input_source: item.input_source ?? null });
   }
   return {
     evidence_id: evidenceId(rule.id, input.component, input.requiredDocument?.toLowerCase()),
@@ -355,6 +363,10 @@ function snapshotRule(
     matcher_component: input.component,
     score_contribution: input.scoreContribution,
     matched_value_count: matchedValues.length,
+    matched_rule_terms: [...ruleTermPairs.values()].sort((a, b) =>
+      compareCodeUnits(a.term, b.term)
+      || compareCodeUnits(a.input_source ?? "", b.input_source ?? "")
+    ),
     matched_input_sources: [...sourceGroups.entries()]
       .sort(([a], [b]) => compareCodeUnits(a, b))
       .map(([, item]) => item),
@@ -391,6 +403,7 @@ function ruleEvidenceFor(
       component: ref.list,
       scoreContribution: ref.score_contribution ?? null,
       matchedValues: ref.matched_strings,
+      matchedRuleTerms: ref.matched_rule_terms ?? [],
       matchedInputs: ref.matched_inputs ?? [],
     }));
   }
@@ -437,11 +450,13 @@ function ids(evidence: RuleEvidence[], predicate: (item: RuleEvidence) => boolea
 
 function outcomeFor(
   insurer: InsurerScore,
-  rank: number,
   rules: RuleEvidence[],
   unresolvedRuleIds: string[],
   requiredDocuments: RequiredDocumentOutcomeEvidence[]
 ): ScoredInsurerOutcomeEvidence {
+  if (!Number.isInteger(insurer.rank) || (insurer.rank ?? 0) < 1) {
+    throw new Error(`matcher_rank_missing:${insurer.insurer_id}`);
+  }
   if (!insurer.score_reconciliation) {
     throw new Error(`matcher_score_reconciliation_missing:${insurer.insurer_id}`);
   }
@@ -455,7 +470,7 @@ function outcomeFor(
     insurer_id: insurer.insurer_id,
     insurer_name: insurer.insurer_name,
     status: "scored",
-    rank,
+    rank: insurer.rank!,
     score: insurer.score,
     band: insurer.band,
     rule_status: insurer.rule_status,
@@ -601,9 +616,9 @@ export function buildRecommendationEvidence(input: {
 }): RecommendationEvidenceV1 {
   const appetiteById = new Map(input.activeAppetite.map((rule) => [rule.id, rule]));
   const facts = buildReviewedRiskEvidence(input.reviewed, input.matcherInput);
-  const scored = input.matcherResult.insurers.map((insurer, index) => {
+  const scored = input.matcherResult.insurers.map((insurer) => {
     const { evidence, unresolvedRuleIds, requiredDocuments } = ruleEvidenceFor(insurer, appetiteById);
-    return outcomeFor(insurer, index + 1, evidence, unresolvedRuleIds, requiredDocuments);
+    return outcomeFor(insurer, evidence, unresolvedRuleIds, requiredDocuments);
   });
   const noData = [...input.matcherResult.no_data_for]
     .sort((a, b) => compareCodeUnits(a.insurer_name, b.insurer_name) || compareCodeUnits(a.insurer_id, b.insurer_id))

@@ -5,9 +5,9 @@
 Starting point: `main` at `e232b70`, with a clean working tree. Production was
 not read or mutated by this change.
 
-The remediation pass starts from local Phase 1A commit `6bef2dd`. It does not
-deploy a Worker, apply a migration, enable Graph, or change the legacy document
-pipeline.
+The remediation chain starts from local Phase 1A commit `6bef2dd`; this final
+narrow follow-up starts from `111e406`. It does not deploy a Worker, apply a
+migration, enable Graph, or change the legacy document pipeline.
 
 Before Phase 1A, `atlas_recommendations` persisted:
 
@@ -67,8 +67,10 @@ contract exposes the field additively.
 5. `insurers[]`
    - rank/score/band/status and referral/review/decline state;
    - point-in-time rule snapshots with exact rule ID, appetite data, score delta
-     emitted by the matcher, redacted match count/source labels, and nullable
-     source document/file/page/section/quote fields;
+     emitted by the matcher, redacted match count/source labels, matcher-authored
+     `matched_rule_terms` pairs (insurer-owned appetite term plus authoritative
+     input-source label), and nullable source document/file/page/section/quote
+     fields;
    - authoritative matcher effects, including distinct `hard_decline` and
      `soft_decline_referral` values; the evidence builder never infers them;
    - score reconciliation (`component_subtotal`, hard-decline adjustment,
@@ -96,13 +98,18 @@ text, reviewed display values, matched values, and matched-input values. That
 could duplicate names, identifiers, phone numbers, banking details, addresses,
 or policy references in a second JSON column.
 
-After remediation, `evidence_json` retains only taxonomy candidates, field
+After remediation, `evidence_json` does not copy raw free-text feature values or
+reviewed display values. It retains canonical taxonomy candidates, field
 presence, feature source labels, AI-inference markers, confidence provenance,
 trusted document types, matcher-authored effects/counts, and appetite-rule
-provenance. Client free text is never copied into the evidence packet. Rule
-source excerpts remain because they are insurer appetite provenance, not client
-submission text. The older `reasoning_json.matcher_input` compatibility snapshot
-is unchanged in Phase 1A and is explicitly tracked for Phase 2 privacy work.
+provenance. `matched_rule_terms` retains only insurer-owned appetite terms paired
+with authoritative matcher source labels; the evidence builder neither derives
+those terms from client text nor guesses missing labels. Taxonomy candidates may
+reflect a reviewed classification, so they are not described as raw client free
+text. Rule source excerpts remain because they are insurer appetite provenance,
+not client submission text. The older `reasoning_json.matcher_input`
+compatibility snapshot is unchanged in Phase 1A and is explicitly tracked for
+Phase 2 privacy work.
 
 ## Release order (not performed by Phase 1A)
 
