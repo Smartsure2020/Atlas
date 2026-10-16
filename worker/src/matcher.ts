@@ -112,6 +112,15 @@ export interface MatchInputRisk {
 export interface MatchedRuleRef {
   appetite_id: string;
   matched_strings: string[];
+  /** Exact additive score delta emitted by the authoritative matcher. Null for
+   * hard outcomes (for example a decline that zeroes the score). */
+  score_contribution?: number | null;
+  /** Structured linkage back to the reviewed matcher features that hit. */
+  matched_inputs?: {
+    value: string;
+    source_labels: string[];
+    ai_inferred_only: boolean;
+  }[];
   rule_product_line?: string;
   rule_risk_type?: string;
   source_quote?: string | null;
@@ -127,6 +136,13 @@ export interface MatchedRuleRef {
     | "portfolio_caution"
     | "portfolio_declined"
     | "portfolio_referral";
+}
+
+export interface RequiredDocumentEvidence {
+  appetite_id: string;
+  scope: "product" | "portfolio";
+  document_type: string;
+  present: boolean;
 }
 
 export interface InsurerScore {
@@ -149,6 +165,8 @@ export interface InsurerScore {
   ruled_out: boolean;
   scored_against_appetite_id: string | null;
   matched_rules: MatchedRuleRef[];
+  /** Present on new matcher outputs; optional keeps historical fixtures/payloads readable. */
+  required_document_evidence?: RequiredDocumentEvidence[];
   scoring_notes: string[];
   missing_required_documents: string[];
   unmatched_sections: string[];
@@ -281,12 +299,19 @@ function isPortfolio(r: AppetiteRow): boolean {
 function ruleRef(
   rule: AppetiteRow,
   list: MatchedRuleRef["list"],
-  matched_strings: string[] = []
+  matched_strings: string[] = [],
+  options: { hits?: FeatureHit[]; scoreContribution?: number | null } = {}
 ): MatchedRuleRef {
   return {
     appetite_id: rule.id,
     list,
     matched_strings,
+    score_contribution: options.scoreContribution ?? null,
+    matched_inputs: (options.hits ?? []).map((hit) => ({
+      value: hit.candidate,
+      source_labels: [...hit.sources],
+      ai_inferred_only: hit.ai_only,
+    })),
     rule_product_line: rule.product_line,
     rule_risk_type: rule.risk_type,
     source_quote: rule.source_quote ?? null,
@@ -389,7 +414,7 @@ export function matchInsurers(
       notes.push(
         `Base ${usedRule.appetite_level} (${usedRule.product_line} × ${usedRule.risk_type}) → ${score}`
       );
-      matched.push(ruleRef(usedRule, "base"));
+      matched.push(ruleRef(usedRule, "base", [], { scoreContribution: score }));
 
       const declinedHits = findMatches(features, usedRule.declined_risks);
       const declinedDocumentHits = declinedHits.filter((h) => !h.ai_only);
@@ -398,7 +423,10 @@ export function matchInsurers(
         notes.push(
           `Declined-risk match (product) → ruled out: ${declinedDocumentHits.map(hitLabel).join("; ")}`
         );
-        matched.push(ruleRef(usedRule, "declined", declinedDocumentHits.map((h) => h.candidate)));
+        matched.push(ruleRef(usedRule, "declined", declinedDocumentHits.map((h) => h.candidate), {
+          hits: declinedDocumentHits,
+          scoreContribution: null,
+        }));
         scored.push(ruleOut(insurerId, insurerName, usedRule.id, matched, notes));
         continue;
       }
@@ -413,7 +441,10 @@ export function matchInsurers(
           `Declined-risk terms matched only in AI-inferred red flags -${drop} → referral, ` +
             `needs human confirmation before ruling out: ${declinedAiOnlyHits.map(hitLabel).join("; ")}`
         );
-        matched.push(ruleRef(usedRule, "declined", declinedAiOnlyHits.map((h) => h.candidate)));
+        matched.push(ruleRef(usedRule, "declined", declinedAiOnlyHits.map((h) => h.candidate), {
+          hits: declinedAiOnlyHits,
+          scoreContribution: -drop,
+        }));
       }
 
       if (usedRule.appetite_level === "declined") {
@@ -427,7 +458,10 @@ export function matchInsurers(
         const lift = Math.min(preferredHits.length * PREFERRED_PER_MATCH, PREFERRED_MATCH_CAP);
         score += lift;
         notes.push(`Preferred-risk matches +${lift}: ${preferredHits.map(hitLabel).join("; ")}`);
-        matched.push(ruleRef(usedRule, "preferred", preferredHits.map((h) => h.candidate)));
+        matched.push(ruleRef(usedRule, "preferred", preferredHits.map((h) => h.candidate), {
+          hits: preferredHits,
+          scoreContribution: lift,
+        }));
       }
 
       const cautionHits = findMatches(features, usedRule.caution_risks);
@@ -435,7 +469,10 @@ export function matchInsurers(
         const drop = cautionHits.length * CAUTION_PER_MATCH;
         score -= drop;
         notes.push(`Caution-risk matches -${drop}: ${cautionHits.map(hitLabel).join("; ")}`);
-        matched.push(ruleRef(usedRule, "caution", cautionHits.map((h) => h.candidate)));
+        matched.push(ruleRef(usedRule, "caution", cautionHits.map((h) => h.candidate), {
+          hits: cautionHits,
+          scoreContribution: -drop,
+        }));
       }
     } else {
       // No product-specific rule could be matched to any candidate. Don't
@@ -457,7 +494,10 @@ export function matchInsurers(
         score -= drop;
         referralRequired = true;
         notes.push(`Referral triggers (product) -${drop}: ${referralHits.map(hitLabel).join("; ")}`);
-        matched.push(ruleRef(usedRule, "referral", referralHits.map((h) => h.candidate)));
+        matched.push(ruleRef(usedRule, "referral", referralHits.map((h) => h.candidate), {
+          hits: referralHits,
+          scoreContribution: -drop,
+        }));
       }
     }
 
@@ -471,7 +511,10 @@ export function matchInsurers(
         notes.push(
           `Portfolio declined-risk match → ruled out: ${pDeclinedDocument.map(hitLabel).join("; ")}`
         );
-        matched.push(ruleRef(pf, "portfolio_declined", pDeclinedDocument.map((h) => h.candidate)));
+        matched.push(ruleRef(pf, "portfolio_declined", pDeclinedDocument.map((h) => h.candidate), {
+          hits: pDeclinedDocument,
+          scoreContribution: null,
+        }));
         portfolioRuledOut = true;
         portfolioRuledOutRule = pf.id;
         break;
@@ -486,14 +529,20 @@ export function matchInsurers(
           `Portfolio declined-risk terms matched only in AI-inferred red flags -${drop} → referral, ` +
             `needs human confirmation before ruling out: ${pDeclinedAiOnly.map(hitLabel).join("; ")}`
         );
-        matched.push(ruleRef(pf, "portfolio_declined", pDeclinedAiOnly.map((h) => h.candidate)));
+        matched.push(ruleRef(pf, "portfolio_declined", pDeclinedAiOnly.map((h) => h.candidate), {
+          hits: pDeclinedAiOnly,
+          scoreContribution: -drop,
+        }));
       }
       const pCaution = findMatches(features, pf.caution_risks);
       if (pCaution.length > 0) {
         const drop = pCaution.length * CAUTION_PER_MATCH;
         score -= drop;
         notes.push(`Portfolio caution-risk matches -${drop}: ${pCaution.map(hitLabel).join("; ")}`);
-        matched.push(ruleRef(pf, "portfolio_caution", pCaution.map((h) => h.candidate)));
+        matched.push(ruleRef(pf, "portfolio_caution", pCaution.map((h) => h.candidate), {
+          hits: pCaution,
+          scoreContribution: -drop,
+        }));
       }
       const pReferral = findMatches(features, pf.referral_triggers);
       if (pReferral.length > 0) {
@@ -501,7 +550,10 @@ export function matchInsurers(
         score -= drop;
         referralRequired = true;
         notes.push(`Portfolio referral triggers -${drop}: ${pReferral.map(hitLabel).join("; ")}`);
-        matched.push(ruleRef(pf, "portfolio_referral", pReferral.map((h) => h.candidate)));
+        matched.push(ruleRef(pf, "portfolio_referral", pReferral.map((h) => h.candidate), {
+          hits: pReferral,
+          scoreContribution: -drop,
+        }));
       }
     }
 
@@ -511,9 +563,15 @@ export function matchInsurers(
     }
 
     const missingDocs: string[] = [];
-    const required: { source: string; doc: string }[] = [];
-    if (usedRule) for (const d of usedRule.required_documents) required.push({ source: "product", doc: d });
-    for (const pf of portfolioRules) for (const d of pf.required_documents) required.push({ source: "portfolio", doc: d });
+    const required: { source: "product" | "portfolio"; appetiteId: string; doc: string }[] = [];
+    if (usedRule) for (const d of usedRule.required_documents) required.push({ source: "product", appetiteId: usedRule.id, doc: d });
+    for (const pf of portfolioRules) for (const d of pf.required_documents) required.push({ source: "portfolio", appetiteId: pf.id, doc: d });
+    const requiredDocumentEvidence: RequiredDocumentEvidence[] = required.map((r) => ({
+      appetite_id: r.appetiteId,
+      scope: r.source,
+      document_type: r.doc,
+      present: hasRequiredDoc(risk.available_documents, r.doc),
+    }));
     const seen = new Set<string>();
     for (const r of required) {
       if (seen.has(r.doc.toLowerCase())) continue;
@@ -594,6 +652,7 @@ export function matchInsurers(
       ruled_out: false,
       scored_against_appetite_id: usedRule?.id ?? null,
       matched_rules: matched,
+      required_document_evidence: requiredDocumentEvidence,
       scoring_notes: notes,
       missing_required_documents: missingDocs,
       unmatched_sections: unmatched.unmatchedSections,
@@ -650,6 +709,7 @@ function ruleOut(
     ruled_out: true,
     scored_against_appetite_id: scored_against,
     matched_rules,
+    required_document_evidence: [],
     scoring_notes,
     missing_required_documents: [],
     unmatched_sections: [],

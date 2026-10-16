@@ -30,6 +30,12 @@ export interface ScoredInsurer {
   matched_rules: {
     appetite_id: string;
     matched_strings: string[];
+    score_contribution?: number | null;
+    matched_inputs?: {
+      value: string;
+      source_labels: string[];
+      ai_inferred_only: boolean;
+    }[];
     rule_product_line?: string;
     rule_risk_type?: string;
     source_quote?: string | null;
@@ -46,6 +52,12 @@ export interface ScoredInsurer {
       | "portfolio_declined"
       | "portfolio_referral";
   }[];
+  required_document_evidence?: {
+    appetite_id: string;
+    scope: "product" | "portfolio";
+    document_type: string;
+    present: boolean;
+  }[];
   scoring_notes: string[];
   missing_required_documents: string[];
   unmatched_sections: string[];
@@ -53,6 +65,112 @@ export interface ScoredInsurer {
   nearby_rule_matches: string[];
   /** Filled in server-side from the LLM reasoning pass (or fallback). */
   reasoning: string;
+}
+
+export interface RecommendationEvidence {
+  schema_version: "recommendation-evidence-v1";
+  provenance: {
+    recommendation_id: string;
+    submission_id: string;
+    extraction_id: string;
+    reviewed_at: string | null;
+    generated_at: string;
+    matcher_version: string;
+    taxonomy_version: string;
+    explanation_mode: string;
+    explanation_source: string;
+    recommendation_input_fingerprint: string;
+  };
+  matcher_input: {
+    product_candidates: string[];
+    section_candidates?: string[];
+    risk_candidates: string[];
+    features: ({ text: string; source: string; ai_inferred?: boolean } | string)[];
+    available_documents: string[];
+    overall_confidence: number;
+    overall_confidence_available?: boolean;
+  };
+  reviewed_risk_facts: {
+    field_path: string;
+    label: string;
+    display_value: string;
+    source_category: "reviewed_extraction" | "reviewed_ai_inference" | "extraction_metadata";
+    matcher_roles: ("product_candidate" | "risk_candidate" | "feature" | "confidence")[];
+    ai_inferred: boolean;
+    confidence: number | null;
+    confidence_available: boolean;
+  }[];
+  trusted_documents: {
+    document_type: string;
+    evidence_label: string;
+    availability: "available";
+    trust_basis: "active_exact_clean";
+  }[];
+  insurers: {
+    insurer_id: string;
+    insurer_name: string;
+    rank: number | null;
+    score: number | null;
+    band: ScoredInsurer["band"] | "no_appetite_data";
+    rule_status: ScoredInsurer["rule_status"] | "no_appetite_data";
+    confidence: number | null;
+    confidence_available: boolean;
+    referral_required: boolean;
+    manual_review_required: boolean;
+    senior_review_required: boolean;
+    ruled_out: boolean;
+    no_appetite_data: boolean;
+    scored_against_rule_id: string | null;
+    unresolved_rule_ids: string[];
+    rule_evidence: {
+      evidence_id: string;
+      rule_id: string;
+      insurer_id: string;
+      insurer_name: string;
+      product_line: string;
+      risk_type: string;
+      appetite_level: "preferred" | "standard" | "caution" | "declined";
+      effect: "preferred_match" | "standard_match" | "caution" | "decline" | "referral" | "required_document_present" | "required_document_missing" | "other";
+      matcher_component: string;
+      score_contribution: number | null;
+      matched_values: string[];
+      matched_input_sources: { value: string; source_labels: string[]; ai_inferred_only: boolean }[];
+      required_document: string | null;
+      source: "ai_extracted" | "manual";
+      source_document_id: string | null;
+      source_file_name: string | null;
+      source_page: number | null;
+      source_section: string | null;
+      source_quote: string | null;
+      rule_notes: string | null;
+    }[];
+    outcome_reasons: {
+      why_ranked: string[];
+      strengthened_by: string[];
+      weakened_by: string[];
+      cautions: string[];
+      referrals: string[];
+      declines: string[];
+      required_documents_present: string[];
+      required_documents_missing: string[];
+      evidence_gaps: string[];
+    };
+    unmatched_sections: string[];
+    unmatched_product_candidates: string[];
+    nearby_rule_matches: string[];
+    matcher_notes: string[];
+  }[];
+  quality: {
+    status: "complete" | "gaps_present";
+    gaps: {
+      code: string;
+      scope: "rule" | "reviewed_fact" | "insurer";
+      insurer_id: string | null;
+      rule_id: string | null;
+      field_path: string | null;
+      missing: string[];
+    }[];
+  };
 }
 
 export interface Recommendation {
@@ -80,6 +198,8 @@ export interface Recommendation {
   senior_review_required: boolean;
   extraction_id: string | null;
   created_at: string;
+  /** Null/absent on recommendations created before Phase 1A. */
+  evidence_json?: RecommendationEvidence | null;
 }
 
 export function runRecommendation(submissionId: string, input: { force?: boolean } = {}) {
