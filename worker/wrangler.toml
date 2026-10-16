@@ -89,7 +89,7 @@ head_sampling_rate = 1
 # each [env.X] section is self-contained and must redeclare every var it needs.
 # Deploy with `wrangler deploy --env production`.
 [env.production]
-name = "atlas-worker-production"
+name = "atlas"
 
 [env.production.triggers]
 crons = ["* * * * *"]
@@ -103,7 +103,12 @@ ATLAS_ENV = "production"
 ATLAS_DOC_RETENTION_DAYS = "7"
 # Production defaults keep the hybrid pipeline OFF; shadow sampling zero.
 ATLAS_DOCUMENT_PIPELINE_MODE = "legacy"
+ATLAS_DOCUMENT_PROVIDER = "azure"
+ATLAS_HYBRID_MAX_TEXT_FASTPATH_PAGES = "40"
+ATLAS_EXPLANATION_MODE = "deterministic"
+ATLAS_EMAIL_MODE = "template"
 ATLAS_SHADOW_SAMPLE_PERCENT = "0"
+ATLAS_LEGACY_FALLBACK_DISABLED = "false"
 # Malware scanning fails CLOSED in production. Both of the following MUST be
 # bound on the active production Worker version before deploy — never
 # committed to git:

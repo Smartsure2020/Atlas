@@ -19,7 +19,7 @@ verification and a rollback; do not advance without both.
    immediately before the window:
    - production: `algenlnxagpxzsgaworz`
    - staging:    `mnehddylkeelojsnkdtx`
-4. Nobody else is deploying `atlas-worker-production` during the window.
+4. Nobody else is deploying `atlas` during the window.
 5. On-call engineer standing by. `ATLAS_ALERT_WEBHOOK_URL` wired to the
    real paging destination (verify a manual test alert lands).
 
@@ -450,16 +450,16 @@ here.
 
 ### Read-only trigger inspection
 
-Confirm the Worker `atlas-worker-production` has exactly one trigger
+Confirm the Worker `atlas` has exactly one trigger
 and that its cron matches the canonical repo value:
 
-- Worker: `atlas-worker-production`
+- Worker: `atlas`
 - cron: `* * * * *`  (exactly this, no other entries)
 - no unexpected temporary or acceptance-only crons
 - do not alter queue consumers as part of this gate
 
 Inspect via the Cloudflare dashboard (Workers & Pages →
-`atlas-worker-production` → Triggers → Cron Triggers) and/or via the
+`atlas` → Triggers → Cron Triggers) and/or via the
 Wrangler trigger-inspection mechanism supported by your installed
 Wrangler version. If your Wrangler CLI does not expose a supported
 trigger-only read command, the dashboard read is authoritative.
