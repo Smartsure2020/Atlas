@@ -218,11 +218,25 @@ wrangler queues create atlas-shadow-pipeline-production
 wrangler queues create atlas-shadow-pipeline-production-dlq
 ```
 
-Then deploy the Worker (which now includes the `[[queues.producers]]` and `[[queues.consumers]]` bindings):
+Then deploy the development Worker (which now includes the
+`[[queues.producers]]` and `[[queues.consumers]]` bindings):
 
 ```bash
-wrangler deploy                    # development / top-level env
-wrangler deploy --env production   # production
+wrangler deploy                    # development / top-level env only
+```
+
+For production, use the controlled candidate flow in
+`docs/phase6-cutover-runbook.md`: upload without activating, inspect the full
+binding-name inventory, and then activate that exact candidate.
+
+```powershell
+npx wrangler versions upload `
+  --env production `
+  --keep-vars `
+  --strict `
+  --message "<message>"
+npx wrangler versions view <VERSION_ID> --env production --json
+npx wrangler versions deploy <VERSION_ID>@100% --env production -y
 ```
 
 Verify the binding is live:

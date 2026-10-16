@@ -19,7 +19,7 @@ verification and a rollback; do not advance without both.
    immediately before the window:
    - production: `algenlnxagpxzsgaworz`
    - staging:    `mnehddylkeelojsnkdtx`
-4. Nobody else is deploying `atlas-worker-production` during the window.
+4. Nobody else is deploying `atlas` during the window.
 5. On-call engineer standing by. `ATLAS_ALERT_WEBHOOK_URL` wired to the
    real paging destination (verify a manual test alert lands).
 
@@ -178,16 +178,22 @@ Only after BOTH pass do we authorise the production scanner secret.
 ## 3. Production Worker deploy — Graph OFF, single staged version
 
 Ordinary `wrangler secret put` creates a new Worker version AND deploys
-it immediately. Doing the malware secret writes before the intended
-Phase 6 deploy would create two interim production deployments (once
-per secret write) with mismatched code / config states. Stage
-everything on a single non-active candidate version and activate it in
-one deliberate step.
+it immediately. When scanner secrets are intentionally added or rotated,
+doing those writes before the intended Phase 6 deploy would create two interim
+production deployments (once per secret write) with mismatched code / config
+states. Stage the intentional change on a single non-active candidate version
+and activate it in one deliberate step.
 
-1. Off-git secrets file — plaintext file OUTSIDE the repo, matching
-   `.gitignore`. Never paste its contents into reports, terminals that
-   log to disk, or chat. Example location: `~/atlas/phase6-prod-scanner.secrets`.
-   File contents (dotenv shape — do NOT commit):
+1. For a standard code/config deployment, do not create a secrets file and do
+   not pass `--secrets-file`. Existing encrypted secrets are preserved across
+   normal uploads. `--keep-vars` in step 3 preserves remotely configured
+   plaintext bindings such as `AZURE_REDIRECT_URI` and `CORS_ORIGIN`.
+
+   Only when this operation intentionally adds or rotates scanner secrets,
+   prepare an off-git plaintext file OUTSIDE the repo, matching `.gitignore`.
+   Never paste its contents into reports, terminals that log to disk, or chat.
+   Example location: `~/atlas/phase6-prod-scanner.secrets`. File contents
+   (dotenv shape — do NOT commit):
 
    ```
    ATLAS_MALWARE_SCANNER_URL=<real production scanner URL>
@@ -209,19 +215,27 @@ one deliberate step.
    - `ATLAS_GRAPH_MAILBOX_CUTOVERS_JSON`
    - `ATLAS_GRAPH_JOB_PROCESSING_ENABLED`
 
-3. Upload the Phase 6 Worker code + scanner secrets onto ONE new
-   NON-ACTIVE candidate version:
+3. Upload the Worker code + config onto ONE new NON-ACTIVE candidate version:
 
+   ```powershell
+   npx wrangler versions upload `
+     --env production `
+     --keep-vars `
+     --strict `
+     --message "<message>"
    ```
-   wrangler versions upload --env production \
-     --secrets-file ~/atlas/phase6-prod-scanner.secrets
-   ```
 
-   `wrangler versions upload` does not redeploy the live version. It
-   returns a `VERSION_ID` — copy it; the next step inspects the exact
-   candidate by that id.
+   `npx wrangler versions upload` does not redeploy the live version. It
+   returns a `VERSION_ID` — copy it; the next step inspects the exact candidate
+   by that id. `--secrets-file` is deliberately absent from the standard
+   code/config path because existing secrets are preserved.
 
-4. Securely remove the temporary secrets file:
+   If and only if this deployment intentionally adds or rotates the scanner
+   secrets described in step 1, add
+   `--secrets-file ~/atlas/phase6-prod-scanner.secrets` to this candidate
+   upload (or use the documented `wrangler versions secret bulk` flow).
+
+4. If step 1 created a temporary secrets file, securely remove it:
 
    ```
    shred -u ~/atlas/phase6-prod-scanner.secrets    # Linux
@@ -231,19 +245,35 @@ one deliberate step.
    (On systems where `shred` is unavailable, use whatever secure-delete
    utility the team has approved. Do NOT rely on plain `rm`.)
 
-5. Inspect the exact candidate WITHOUT activating it, using its
-   `VERSION_ID` from the previous step:
+5. Inspect the current active production version and the exact candidate
+   WITHOUT activating the candidate. First identify the active version id,
+   then inspect both versions:
 
-   ```
-   wrangler versions view <VERSION_ID> --env production --json
+   ```powershell
+   npx wrangler deployments status --env production --json
+   npx wrangler versions view <ACTIVE_VERSION_ID> --env production --json
+   npx wrangler versions view <VERSION_ID> --env production --json
    ```
 
    (Or open the Cloudflare dashboard version-details view for that
-   `VERSION_ID`.) Check BINDING NAMES only — never print or record any
-   secret VALUE. For this Graph-OFF deploy the required check is:
-   - `ATLAS_MALWARE_SCANNER_URL` and `ATLAS_MALWARE_SCANNER_TOKEN`
-     bound on the candidate.
-   - None of the seven Graph names present on the candidate.
+   active version and candidate `VERSION_ID`.) Compare the COMPLETE sorted
+   binding-name inventories. Never print or record any secret VALUE. Stop
+   unless all of the following are true:
+   - `AZURE_REDIRECT_URI` is present on both versions.
+   - `CORS_ORIGIN` is present on both versions.
+   - The existing scanner secret binding names,
+     `ATLAS_MALWARE_SCANNER_URL` and `ATLAS_MALWARE_SCANNER_TOKEN`, are present
+     on both versions.
+   - Every other binding name on the active production version remains present
+     on the candidate.
+   - The only permitted candidate-only binding names are the five newly
+     explicit config vars: `ATLAS_DOCUMENT_PROVIDER`,
+     `ATLAS_HYBRID_MAX_TEXT_FASTPATH_PAGES`, `ATLAS_EXPLANATION_MODE`,
+     `ATLAS_EMAIL_MODE`, and `ATLAS_LEGACY_FALLBACK_DISABLED`.
+   - No `ATLAS_GRAPH_*` binding name appears on either version.
+   - `ATLAS_SHADOW_QUEUE` still targets
+     `atlas-shadow-pipeline-production` (and its DLQ remains
+     `atlas-shadow-pipeline-production-dlq`).
 
    `wrangler versions list` only identifies versions; it does NOT prove
    bindings — `wrangler versions view <VERSION_ID>` (or the dashboard
@@ -252,8 +282,8 @@ one deliberate step.
 6. Deploy the exact candidate at 100% only after the candidate-version
    verification above has passed:
 
-   ```
-   wrangler versions deploy <VERSION_ID>@100% --env production -y
+   ```powershell
+   npx wrangler versions deploy <VERSION_ID>@100% --env production -y
    ```
 
    Dashboard Save Version → Deploy Version of that same version id is
@@ -450,16 +480,16 @@ here.
 
 ### Read-only trigger inspection
 
-Confirm the Worker `atlas-worker-production` has exactly one trigger
+Confirm the Worker `atlas` has exactly one trigger
 and that its cron matches the canonical repo value:
 
-- Worker: `atlas-worker-production`
+- Worker: `atlas`
 - cron: `* * * * *`  (exactly this, no other entries)
 - no unexpected temporary or acceptance-only crons
 - do not alter queue consumers as part of this gate
 
 Inspect via the Cloudflare dashboard (Workers & Pages →
-`atlas-worker-production` → Triggers → Cron Triggers) and/or via the
+`atlas` → Triggers → Cron Triggers) and/or via the
 Wrangler trigger-inspection mechanism supported by your installed
 Wrangler version. If your Wrangler CLI does not expose a supported
 trigger-only read command, the dashboard read is authoritative.
