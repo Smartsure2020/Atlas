@@ -40,6 +40,7 @@ import {
   type ReasoningOutput,
 } from "./matcher-reasoning";
 import { composeExplanation, verifyPolish } from "./explanation-composer";
+import { buildRecommendationEvidence } from "./recommendation-evidence";
 import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
 import { logOperationError } from "./phase6-hardening";
@@ -56,6 +57,14 @@ import {
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
+
+interface RecommendationEndpointDependencies {
+  buildEvidence: typeof buildRecommendationEvidence;
+}
+
+const DEFAULT_RECOMMENDATION_DEPENDENCIES: RecommendationEndpointDependencies = {
+  buildEvidence: buildRecommendationEvidence,
+};
 
 // ----------------------------------------------------------------------------
 // Risk derivation: turn the reviewed extraction into the matcher's inputs.
@@ -276,7 +285,8 @@ export async function handleRunRecommendation(
   submissionId: string,
   request: Request,
   env: Env,
-  user: AtlasUser
+  user: AtlasUser,
+  dependencies: RecommendationEndpointDependencies = DEFAULT_RECOMMENDATION_DEPENDENCIES
 ): Promise<Response> {
   const body = (await request.json().catch(() => ({}))) as { force?: boolean; background_job_id?: string };
   const admin = adminClient(env);
@@ -513,7 +523,38 @@ export async function handleRunRecommendation(
     reasoning: reasoningById.get(s.insurer_id) ?? "",
   });
 
+  // Generate the durable identity before insert so the evidence packet can
+  // name the exact persisted recommendation without a second write.
+  const recommendationId = crypto.randomUUID();
+  const generatedAt = new Date().toISOString();
+  let evidence;
+  try {
+    evidence = dependencies.buildEvidence({
+      recommendationId,
+      submissionId,
+      extractionId: extraction.id,
+      reviewedAt: extraction.reviewed_at ?? null,
+      generatedAt,
+      matcherVersion: MATCHER_VERSION,
+      taxonomyVersion: TAXONOMY_VERSION,
+      explanationMode: mode,
+      explanationSource: reasoningSource,
+      recommendationInputFingerprint: inputFp,
+      reviewed: reviewedJson,
+      matcherInput: risk,
+      matcherResult: result,
+      activeAppetite: appetite,
+    });
+  } catch {
+    await failJob(admin, job.jobId, {
+      errorCode: "recommendation_evidence_failed",
+      errorMessage: "Could not build recommendation evidence.",
+    });
+    return json({ error: "recommendation_evidence_failed" }, 500);
+  }
+
   const recommendationRow = {
+    id: recommendationId,
     submission_id: submissionId,
     recommended_insurer: top?.insurer_name ?? null,
     secondary_options_json: secondaries.map(enriched),
@@ -546,6 +587,8 @@ export async function handleRunRecommendation(
     referral_required: top?.referral_required ?? false,
     senior_review_required: top?.senior_review_required || top?.manual_review_required || false,
     extraction_id: extraction.id,
+    created_at: generatedAt,
+    evidence_json: evidence,
     version_metadata: {
       model: REASONING_MODEL,
       prompt: "recommendation-reasoning-v1",
@@ -628,7 +671,7 @@ export async function handleGetRecommendation(
     .select(
       "id, recommended_insurer, secondary_options_json, not_recommended_json, " +
         "reasoning_json, confidence_score, referral_required, " +
-        "senior_review_required, extraction_id, created_at"
+        "senior_review_required, extraction_id, created_at, evidence_json"
     )
     .eq("submission_id", submissionId)
     .order("created_at", { ascending: false })
