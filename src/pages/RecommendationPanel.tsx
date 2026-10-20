@@ -50,6 +50,8 @@ import {
   ruleListMeta,
   summariseRecommendation,
 } from "../lib/decision-workbench";
+import { resolveEvidence } from "../lib/recommendation-evidence";
+import { EvidenceDrawer, IntelligenceQualityPanel } from "../components/EvidenceMode";
 
 export default function RecommendationPanel({
   submissionId,
@@ -60,6 +62,7 @@ export default function RecommendationPanel({
   openMissingInfo,
   onRefresh,
   onGoToTab,
+  canViewDiagnostics = false,
 }: {
   submissionId: string;
   recommendation: Recommendation | null;
@@ -69,12 +72,18 @@ export default function RecommendationPanel({
   openMissingInfo: MissingInfoItem[];
   onRefresh: () => Promise<void> | void;
   onGoToTab: (tab: SubmissionTab) => void;
+  /** Managers and administrators only: shows the technical-ID diagnostics area in Evidence Mode. */
+  canViewDiagnostics?: boolean;
 }) {
   const toast = useToast();
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [view, setView] = useState<"ranked" | "compare">("ranked");
+  const [evidenceFor, setEvidenceFor] = useState<string | null>(null);
+  // Evidence is read from the persisted packet only; a historical row simply has none.
+  const evidence = useMemo(() => resolveEvidence(recommendation?.evidence_json), [recommendation]);
+  const evidenceReady = evidence.kind === "ready";
 
   async function run(force = false) {
     setRunning(true);
@@ -227,6 +236,10 @@ export default function RecommendationPanel({
               openMissingInfoCount={openMissingInfo.length}
             />
 
+            <div style={{ marginTop: "var(--atlas-space-4)" }}>
+              <IntelligenceQualityPanel evidence={evidence} />
+            </div>
+
             {openMissingInfo.length > 0 && (
               <div style={{ marginTop: "var(--atlas-space-4)" }}>
                 <Notice tone="warning" title="Outstanding information may change this result">
@@ -247,7 +260,12 @@ export default function RecommendationPanel({
             ) : (
               <div style={{ marginTop: "var(--atlas-space-5)" }}>
                 {top ? (
-                  <InsurerBlock insurer={top} variant="top" rank={1} />
+                  <InsurerBlock
+                    insurer={top}
+                    variant="top"
+                    rank={1}
+                    onShowEvidence={evidenceReady ? () => setEvidenceFor(top.insurer_id) : undefined}
+                  />
                 ) : (
                   <Notice tone="danger" title="No insurer cleared appetite for this risk">
                     Every insurer with appetite rules on file was ruled out. Review the failures below —
@@ -264,6 +282,7 @@ export default function RecommendationPanel({
                         insurer={insurer}
                         variant="secondary"
                         rank={index + 2}
+                        onShowEvidence={evidenceReady ? () => setEvidenceFor(insurer.insurer_id) : undefined}
                       />
                     ))}
                   </>
@@ -273,7 +292,12 @@ export default function RecommendationPanel({
                   <>
                     <Divider label="Ruled out by appetite" />
                     {ruledOut.map((insurer) => (
-                      <InsurerBlock key={insurer.insurer_id} insurer={insurer} variant="ruled-out" />
+                      <InsurerBlock
+                        key={insurer.insurer_id}
+                        insurer={insurer}
+                        variant="ruled-out"
+                        onShowEvidence={evidenceReady ? () => setEvidenceFor(insurer.insurer_id) : undefined}
+                      />
                     ))}
                   </>
                 )}
@@ -292,6 +316,14 @@ export default function RecommendationPanel({
           </>
         )}
       </Card>
+
+      <EvidenceDrawer
+        open={evidenceFor !== null}
+        onClose={() => setEvidenceFor(null)}
+        evidence={evidence}
+        insurerId={evidenceFor}
+        canViewDiagnostics={canViewDiagnostics}
+      />
     </div>
   );
 }
@@ -452,10 +484,13 @@ function InsurerBlock({
   insurer,
   variant,
   rank,
+  onShowEvidence,
 }: {
   insurer: ScoredInsurer;
   variant: "top" | "secondary" | "ruled-out";
   rank?: number;
+  /** Present only when the recommendation carries readable evidence. */
+  onShowEvidence?: () => void;
 }) {
   const band = appetiteBand(insurer.band);
   const groups = groupFindings(insurer);
@@ -528,6 +563,15 @@ function InsurerBlock({
                 {group.body}
               </Reason>
             ))}
+          </div>
+        )}
+
+        {onShowEvidence && (
+          <div style={{ marginTop: "var(--atlas-space-3)" }}>
+            <Button size="sm" iconAfter="arrow-right" onClick={onShowEvidence}>
+              Why Atlas ranked this
+              <span className="atlas-sr-only"> — {insurer.insurer_name} evidence</span>
+            </Button>
           </div>
         )}
 

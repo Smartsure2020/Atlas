@@ -2071,3 +2071,190 @@
     position: relative;
   }
 }
+
+/* ---- Evidence Mode ------------------------------------------------------- */
+
+/* Recommendation-level reliance panel. Calm, same family as the summary card. */
+.atlas-ev__quality {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+  padding: var(--atlas-space-4) var(--atlas-space-5);
+  border: 1px solid var(--atlas-border);
+  border-left: 3px solid var(--atlas-border-stronger);
+  border-radius: var(--atlas-radius-card);
+  background: var(--atlas-surface);
+}
+
+.atlas-ev__quality-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--atlas-space-4);
+  flex-wrap: wrap;
+}
+
+.atlas-ev {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-6);
+  min-width: 0;
+}
+
+.atlas-ev__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--atlas-space-2);
+  margin: var(--atlas-space-2) 0;
+}
+
+.atlas-ev__cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--atlas-space-4);
+  margin: var(--atlas-space-3) 0;
+}
+
+.atlas-ev__rules,
+.atlas-ev__gaps,
+.atlas-ev__sections,
+.atlas-ev__conditions,
+.atlas-ev__terms,
+.atlas-ev__chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-3);
+}
+
+.atlas-ev__chips {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--atlas-space-2);
+}
+
+.atlas-ev__terms {
+  gap: 2px;
+  margin-top: var(--atlas-space-2);
+  font-size: var(--atlas-fs-dense);
+}
+
+.atlas-ev__rule,
+.atlas-ev__section {
+  padding: var(--atlas-space-3);
+  border: 1px solid var(--atlas-border);
+  border-radius: var(--atlas-radius-control);
+  background: var(--atlas-surface-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.atlas-ev__rule-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--atlas-space-2);
+  margin-bottom: var(--atlas-space-1);
+}
+
+.atlas-ev__rule-score {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--atlas-fw-semibold);
+  color: var(--atlas-ink-secondary);
+  font-size: var(--atlas-fs-dense);
+}
+
+/* Gap rows carry severity as text AND a left rule, never colour alone. */
+.atlas-ev__gap {
+  padding: var(--atlas-space-3);
+  border: 1px solid var(--atlas-border);
+  border-left-width: 3px;
+  border-radius: var(--atlas-radius-control);
+  background: var(--atlas-surface);
+}
+
+.atlas-ev__gap--blocker {
+  border-left-color: var(--atlas-danger);
+  background: var(--atlas-danger-surface);
+}
+
+.atlas-ev__gap--material {
+  border-left-color: var(--atlas-warning);
+  background: var(--atlas-warning-surface);
+}
+
+.atlas-ev__gap--advisory,
+.atlas-ev__gap--unclassified {
+  border-left-color: var(--atlas-border-stronger);
+}
+
+.atlas-ev__gap-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--atlas-space-2);
+  margin-bottom: var(--atlas-space-1);
+}
+
+/* Provenance. "Not recorded" is stated in words and with a dashed underline. */
+.atlas-prov {
+  display: flex;
+  flex-direction: column;
+  gap: var(--atlas-space-2);
+  font-size: var(--atlas-fs-dense);
+  color: var(--atlas-ink-secondary);
+}
+
+.atlas-prov p {
+  margin: 0;
+}
+
+.atlas-prov__label {
+  display: inline-block;
+  margin-right: var(--atlas-space-2);
+  font-size: var(--atlas-fs-label);
+  font-weight: var(--atlas-fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-prov__quote {
+  margin: 0;
+  padding-left: var(--atlas-space-3);
+  border-left: 2px solid var(--atlas-border-stronger);
+  color: var(--atlas-ink-secondary);
+}
+
+.atlas-prov__quote .atlas-prov__label {
+  display: block;
+}
+
+.atlas-prov__missing {
+  color: var(--atlas-warning-ink);
+  font-style: italic;
+  text-decoration: underline dashed;
+  text-underline-offset: 3px;
+}
+
+.atlas-prov__tag {
+  margin-left: var(--atlas-space-2);
+  font-size: var(--atlas-fs-label);
+  color: var(--atlas-ink-muted);
+}
+
+.atlas-prov__incomplete {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--atlas-space-2);
+}
+
+@media (max-width: 600px) {
+  .atlas-ev__quality {
+    padding: var(--atlas-space-4);
+  }
+}

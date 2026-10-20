@@ -96,7 +96,7 @@ export interface ConfidenceReconciliation {
   final_confidence: number | null;
 }
 
-interface EvidenceRule {
+export interface EvidenceRule {
   evidence_id: string;
   rule_id: string;
   insurer_id: string;
@@ -120,7 +120,7 @@ interface EvidenceRule {
   rule_notes: string | null;
 }
 
-interface RequiredDocumentOutcome {
+export interface RequiredDocumentOutcome {
   evidence_id: string;
   document_type: string;
   present: boolean;
@@ -128,7 +128,7 @@ interface RequiredDocumentOutcome {
   confidence_adjustment: number;
 }
 
-interface ScoredEvidenceOutcome {
+export interface ScoredEvidenceOutcome {
   insurer_id: string;
   insurer_name: string;
   status: "scored";
@@ -166,7 +166,7 @@ interface ScoredEvidenceOutcome {
   matcher_notes: string[];
 }
 
-interface NoDataEvidenceOutcome {
+export interface NoDataEvidenceOutcome {
   insurer_id: string;
   insurer_name: string;
   status: "no_appetite_data";
@@ -181,7 +181,7 @@ interface NoDataEvidenceOutcome {
   outcome_reasons: { evidence_gaps: string[] };
 }
 
-export interface RecommendationEvidence {
+export interface RecommendationEvidenceV1 {
   schema_version: "recommendation-evidence-v1";
   provenance: {
     recommendation_id: string;
@@ -234,6 +234,125 @@ export interface RecommendationEvidence {
     }[];
   };
 }
+
+/* ---------------------------------------------------------------------------
+   recommendation-evidence-v2 (Powerhouse). Strict superset of v1 for the fields
+   v1 already carried; adds requested sections, how the scoring rule was
+   selected, considered-but-unselected rules, and a severity-classified quality
+   gate. Read it through `resolveEvidence()` (lib/recommendation-evidence), never
+   by inspecting `schema_version` ad hoc.
+   ------------------------------------------------------------------------- */
+
+export type QualitySeverity = "blocker" | "material" | "advisory";
+export type IntelligenceState = "decision_ready" | "caution" | "incomplete";
+
+export interface QualityGapV2 {
+  gap_id: string;
+  code: string;
+  severity: QualitySeverity;
+  scope: "recommendation" | "insurer" | "section" | "rule" | "reviewed_fact";
+  insurer_id: string | null;
+  rule_id: string | null;
+  section_key: string | null;
+  field_path: string | null;
+  missing: string[];
+}
+
+export interface RuleConditionV2 {
+  kind: "hard_decline" | "soft_decline_referral" | "referral" | "caution" | "preferred";
+  origin: "appetite_level" | "declined_risks" | "referral_triggers" | "caution_risks" | "preferred_risks";
+  matched_rule_terms: { term: string; input_source: string | null }[];
+}
+
+export type SelectionBasisV2 = "only_candidate" | "highest_taxonomy_quality" | "tie_broken_by_canonical_order";
+export type SectionOutcomeV2 =
+  | "hard_decline"
+  | "soft_decline_referral"
+  | "referral"
+  | "caution"
+  | "preferred"
+  | "standard";
+
+export interface SectionEvaluationV2 {
+  section: string;
+  section_key: string;
+  status: "evaluated" | "no_applicable_rule";
+  applicable_rule_ids: string[];
+  selected_rule_id: string | null;
+  selection_basis: SelectionBasisV2 | null;
+  tied_rule_ids: string[];
+  tied_rules_disagree: boolean;
+  outcome: SectionOutcomeV2 | null;
+  reflected_in_insurer_outcome: boolean;
+}
+
+export interface ConsideredRuleV2 {
+  rule_id: string;
+  product_line: string;
+  risk_type: string;
+  appetite_level: "preferred" | "standard" | "caution" | "declined";
+  taxonomy_quality: 1 | 2 | 3;
+  section_keys: string[];
+  selected_for_section_keys: string[];
+  scored: boolean;
+  not_scored_reason: "lower_taxonomy_quality" | "lost_tie_canonical_order" | null;
+  conditions: RuleConditionV2[];
+  snapshot_resolved: boolean;
+  source: "ai_extracted" | "manual" | null;
+  source_document_id: string | null;
+  source_file_name: string | null;
+  source_page: number | null;
+  source_section: string | null;
+  source_quote: string | null;
+}
+
+export interface ScoredEvidenceOutcomeV2 extends ScoredEvidenceOutcome {
+  selection: {
+    product_rule_id: string | null;
+    taxonomy_quality: 1 | 2 | 3 | null;
+    basis: SelectionBasisV2 | null;
+    tied_rule_ids: string[];
+    tied_rules_disagree: boolean;
+    matching_rule_count: number;
+    omitted_risk_only_rule_count: number;
+  };
+  section_evaluations: SectionEvaluationV2[];
+  considered_rules: ConsideredRuleV2[];
+  quality: {
+    state: IntelligenceState;
+    blocker_count: number;
+    material_count: number;
+    advisory_count: number;
+    gap_ids: string[];
+  };
+}
+
+export interface RecommendationEvidenceV2 {
+  schema_version: "recommendation-evidence-v2";
+  provenance: RecommendationEvidenceV1["provenance"];
+  matcher_input: RecommendationEvidenceV1["matcher_input"];
+  requested_sections: { section: string; section_key: string }[];
+  scoring_scope: {
+    insurer_score_basis: "single_best_product_rule_plus_portfolio_rules";
+    section_outcomes: "evaluated_not_aggregated";
+    aggregation_rule: null;
+    business_decision_required: "multi_section_aggregation";
+  };
+  reviewed_risk_facts: RecommendationEvidenceV1["reviewed_risk_facts"];
+  trusted_documents: RecommendationEvidenceV1["trusted_documents"];
+  insurers: (ScoredEvidenceOutcomeV2 | NoDataEvidenceOutcome)[];
+  quality: {
+    model: string;
+    state: IntelligenceState;
+    blocker_count: number;
+    material_count: number;
+    advisory_count: number;
+    gaps: QualityGapV2[];
+  };
+}
+
+/** Discriminated on `schema_version`. Unknown future versions are handled by resolveEvidence(). */
+export type RecommendationEvidence = RecommendationEvidenceV1 | RecommendationEvidenceV2;
 
 export interface Recommendation {
   id: string;
