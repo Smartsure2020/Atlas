@@ -59,7 +59,7 @@ import {
 import { MATCHER_VERSION, matchInsurers } from "../worker/src/matcher.js";
 import type { AppetiteRow } from "../worker/src/matcher-types.js";
 import { buildQuoteReview } from "../worker/src/quote-review.js";
-import { RECOMMENDATION_EVIDENCE_SCHEMA_VERSION } from "../worker/src/recommendation-evidence.js";
+import { RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 } from "../worker/src/recommendation-evidence-v2.js";
 import { TAXONOMY_VERSION } from "../worker/src/taxonomy.js";
 
 // supabase-js builds a Realtime client eagerly inside createClient(), and on
@@ -1167,7 +1167,7 @@ const DOCS = ["Policy schedule", "Claims history"];
 const LIVE_BEHAVIOUR = {
   matcherVersion: MATCHER_VERSION,
   taxonomyVersion: TAXONOMY_VERSION,
-  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION,
+  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
 };
 
 const recFp = (over: Partial<Parameters<typeof buildRecommendationFingerprint>[0]> = {}) =>

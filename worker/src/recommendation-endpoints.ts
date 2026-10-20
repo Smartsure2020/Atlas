@@ -40,11 +40,11 @@ import {
   type ReasoningOutput,
 } from "./matcher-reasoning";
 import { composeExplanation, verifyPolish } from "./explanation-composer";
+import { minimisedMatcherInputSnapshot } from "./recommendation-evidence";
 import {
-  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION,
-  buildRecommendationEvidence,
-  minimisedMatcherInputSnapshot,
-} from "./recommendation-evidence";
+  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+  buildRecommendationEvidenceV2,
+} from "./recommendation-evidence-v2";
 import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
 import { logOperationError } from "./phase6-hardening";
@@ -63,11 +63,11 @@ const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 interface RecommendationEndpointDependencies {
-  buildEvidence: typeof buildRecommendationEvidence;
+  buildEvidence: typeof buildRecommendationEvidenceV2;
 }
 
 const DEFAULT_RECOMMENDATION_DEPENDENCIES: RecommendationEndpointDependencies = {
-  buildEvidence: buildRecommendationEvidence,
+  buildEvidence: buildRecommendationEvidenceV2,
 };
 
 // ----------------------------------------------------------------------------
@@ -386,7 +386,7 @@ export async function handleRunRecommendation(
     // persisted evidence contract must not be answered from a stale cache.
     matcherVersion: MATCHER_VERSION,
     taxonomyVersion: TAXONOMY_VERSION,
-    evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION,
+    evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
   });
   const job = await beginJob(
     admin,

@@ -9,10 +9,8 @@
 
 import { buildRecommendationFingerprint } from "../../worker/src/phase7-core.js";
 import { MATCHER_VERSION, MATCHER_VERSION_V1 } from "../../worker/src/matcher.js";
-import {
-  MATCHER_INPUT_SNAPSHOT_MINIMISED,
-  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION,
-} from "../../worker/src/recommendation-evidence.js";
+import { MATCHER_INPUT_SNAPSHOT_MINIMISED } from "../../worker/src/recommendation-evidence.js";
+import { RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 } from "../../worker/src/recommendation-evidence-v2.js";
 import { TAXONOMY_VERSION } from "../../worker/src/taxonomy.js";
 import {
   EXT,
@@ -122,11 +120,11 @@ function pathsContaining(value: unknown, needle: string, path = "$"): string[] {
   return [];
 }
 
-const fpBase = {
+const fpBase: Parameters<typeof buildRecommendationFingerprint>[0] = {
   submissionId: SUB, extractionId: EXT, reviewedAt: "2026-10-16T08:00:00.000Z",
   activeRuleIds: ["rule-a:1"], availableDocuments: ["Claims history"],
   matcherVersion: MATCHER_VERSION, taxonomyVersion: TAXONOMY_VERSION,
-  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION,
+  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
 };
 
 // ---------------------------------------------------------------------------
