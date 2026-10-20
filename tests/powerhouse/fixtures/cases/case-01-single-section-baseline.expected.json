@@ -1,0 +1,155 @@
+{
+  "expected_schema": "powerhouse-case-expected-v1",
+  "parity_vs_frozen_v1": {
+    "class": "identical",
+    "differing_insurers": []
+  },
+  "observation": {
+    "evidence_schema": "recommendation-evidence-v2",
+    "matcher_version": "2026-10-section-evaluation-v2",
+    "recommended": "Alpha Insurance",
+    "insurer_order": [
+      "insurer-alpha",
+      "insurer-beta",
+      "insurer-gamma",
+      "insurer-delta"
+    ],
+    "insurers": {
+      "insurer-alpha": {
+        "rank": 1,
+        "score": 100,
+        "band": "preferred",
+        "rule_status": "preferred",
+        "confidence": 0.9,
+        "ruled_out": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "scored_rule": "alpha-motor",
+        "selection_basis": "only_candidate",
+        "rule_effects": [
+          "base|preferred|alpha-motor|100",
+          "preferred|preferred|alpha-motor|5"
+        ],
+        "sections": [
+          {
+            "section": "commercial_motor",
+            "status": "evaluated",
+            "selected": "alpha-motor",
+            "outcome": "preferred",
+            "reflected": true
+          }
+        ],
+        "documents": [
+          {
+            "type": "Claims history",
+            "present": true,
+            "adjustment": 0
+          }
+        ],
+        "quality": "decision_ready",
+        "gaps": []
+      },
+      "insurer-beta": {
+        "rank": 2,
+        "score": 70,
+        "band": "standard",
+        "rule_status": "standard",
+        "confidence": 0.9,
+        "ruled_out": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "scored_rule": "beta-motor",
+        "selection_basis": "only_candidate",
+        "rule_effects": [
+          "base|standard|beta-motor|70"
+        ],
+        "sections": [
+          {
+            "section": "commercial_motor",
+            "status": "evaluated",
+            "selected": "beta-motor",
+            "outcome": "standard",
+            "reflected": true
+          }
+        ],
+        "documents": [],
+        "quality": "decision_ready",
+        "gaps": []
+      },
+      "insurer-gamma": {
+        "rank": 3,
+        "score": 30,
+        "band": "caution",
+        "rule_status": "caution",
+        "confidence": 0.9,
+        "ruled_out": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "scored_rule": "gamma-motor",
+        "selection_basis": "only_candidate",
+        "rule_effects": [
+          "base|caution|gamma-motor|40",
+          "caution|caution|gamma-motor|-10"
+        ],
+        "sections": [
+          {
+            "section": "commercial_motor",
+            "status": "evaluated",
+            "selected": "gamma-motor",
+            "outcome": "caution",
+            "reflected": true
+          }
+        ],
+        "documents": [],
+        "quality": "decision_ready",
+        "gaps": []
+      },
+      "insurer-delta": {
+        "rank": 4,
+        "score": 0,
+        "band": "ruled_out",
+        "rule_status": "ruled_out",
+        "confidence": null,
+        "ruled_out": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "scored_rule": "delta-motor",
+        "selection_basis": "only_candidate",
+        "rule_effects": [
+          "base|hard_decline|delta-motor|0"
+        ],
+        "sections": [
+          {
+            "section": "commercial_motor",
+            "status": "evaluated",
+            "selected": "delta-motor",
+            "outcome": "hard_decline",
+            "reflected": true
+          }
+        ],
+        "documents": [],
+        "quality": "decision_ready",
+        "gaps": []
+      }
+    },
+    "no_data": [],
+    "trusted_documents": [
+      "Claims history"
+    ],
+    "quality": {
+      "state": "decision_ready",
+      "blockers": 0,
+      "material": 0,
+      "advisory": 0,
+      "recommendation_gaps": []
+    },
+    "privacy": {
+      "sentinel_hits": [],
+      "features_redacted": true
+    }
+  }
+}

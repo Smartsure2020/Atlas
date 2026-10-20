@@ -114,6 +114,10 @@ export function buildTables(input: HarnessInput): Record<string, Row[]> {
       id: EXT, submission_id: SUB, extracted_json: {}, reviewed_json: input.reviewed,
       reviewed_at: input.reviewedAt ?? "2026-10-16T08:00:00.000Z",
       extraction_confidence: input.extractionConfidence === undefined ? 0.9 : input.extractionConfidence,
+      // The endpoint selects `overall_confidence:extraction_confidence`; PostgREST
+      // returns the alias, so the stub must too or the matcher silently falls back
+      // to the 0.7 legacy default.
+      overall_confidence: input.extractionConfidence === undefined ? 0.9 : input.extractionConfidence,
     }],
     atlas_documents: (input.documents ?? []).map((doc) => ({ submission_id: SUB, ...doc })),
     atlas_insurer_appetite: input.rules,

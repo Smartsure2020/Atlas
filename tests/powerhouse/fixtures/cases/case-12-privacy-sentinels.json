@@ -1,0 +1,46 @@
+{
+  "fixture_schema": "powerhouse-case-v1",
+  "id": "case-12-privacy-sentinels",
+  "title": "Privacy sentinel case",
+  "description": "Synthetic sensitive strings (name, ID, phone, bank detail, street address, policy number, arbitrary free text) are placed in every feature-only field the matcher reads. None may reach any persisted column.",
+  "intent": [
+    "all seven sentinels are absent from the whole persisted recommendation row",
+    "reasoning_json.matcher_input and evidence_json.matcher_input retain feature SOURCE labels only",
+    "the recommendation itself is unaffected by redaction (same scores as an unredacted run)"
+  ],
+  "sentinels": [
+    "NAME_SENTINEL_9QX", "ID_SENTINEL_8QX", "PHONE_SENTINEL_7QX", "BANK_SENTINEL_6QX",
+    "ADDRESS_SENTINEL_5QX", "POLICY_SENTINEL_4QX", "FREETEXT_SENTINEL_3QX"
+  ],
+  "rule_defaults": {
+    "notes": null, "rating_notes": null, "line_of_business": "commercial", "source": "manual",
+    "source_document_id": "doc-guide", "source_file_name": "guide.pdf", "source_page": 4,
+    "source_section": "Section 4", "source_quote": "Synthetic guideline excerpt.",
+    "ingestion_confidence": 0.95, "is_active": true, "updated_at": "2026-10-15T00:00:00.000Z",
+    "preferred_risks": [], "caution_risks": [], "declined_risks": [], "required_documents": [], "referral_triggers": []
+  },
+  "reviewed_compact": {
+    "schema_version": "case-v1",
+    "extracted_client": {
+      "name": "NAME_SENTINEL_9QX",
+      "occupation_or_business_description": "NAME_SENTINEL_9QX transport fleet ID_SENTINEL_8QX",
+      "risk_address": "ADDRESS_SENTINEL_5QX PHONE_SENTINEL_7QX",
+      "entity_type": "Company BANK_SENTINEL_6QX"
+    },
+    "current_cover": { "cover_sections": ["Commercial motor"], "endorsements": ["POLICY_SENTINEL_4QX"], "exclusions": ["FREETEXT_SENTINEL_3QX"] },
+    "risk_classification": {
+      "product_line": "commercial motor", "risk_type": "transport", "primary_risk_type": "transport fleet",
+      "secondary_risk_types": [], "business_sector": "transport", "complexity_level": "medium"
+    },
+    "red_flags": [{ "issue": "PHONE_SENTINEL_7QX BANK_SENTINEL_6QX" }]
+  },
+  "documents": [{ "document_type": "Claims history", "status": "active", "scan_status": "clean" }],
+  "insurers": [
+    { "id": "insurer-alpha", "name": "Alpha Insurance", "active": true },
+    { "id": "insurer-beta", "name": "Beta Insurance", "active": true }
+  ],
+  "rules": [
+    { "id": "alpha-motor", "insurer_id": "insurer-alpha", "insurer_name": "Alpha Insurance", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "preferred", "preferred_risks": ["transport fleet"] },
+    { "id": "beta-motor", "insurer_id": "insurer-beta", "insurer_name": "Beta Insurance", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "standard" }
+  ]
+}

@@ -1,0 +1,846 @@
+/**
+ * FROZEN REFERENCE — the Phase 1A production matcher, verbatim from
+ * `main` @ 34441a0 (`worker/src/matcher.ts`, MATCHER_VERSION
+ * `2026-07-token-matching-v1`). Only the two import paths were changed so it
+ * compiles inside tests/. DO NOT EDIT. It exists so the Powerhouse acceptance
+ * suite and differential can compare the live matcher against what production
+ * actually ran, instead of against a golden someone could regenerate.
+ */
+/**
+ * Atlas Blueprint — deterministic matcher (candidate-list matching)
+ * ----------------------------------------------------------------------------
+ * REPLACES the previous matcher.ts. Two material changes:
+ *
+ * (1) CANDIDATE LISTS for product/risk taxonomy.
+ *     The previous version took a single product_line and a single risk_type
+ *     from the submission. That worked when the extraction's risk_classification
+ *     directly described what cover the submission needs — but in real
+ *     commercial submissions, "what cover is needed" lives across multiple
+ *     fields: cover_sections, secondary_risk_types, and only sometimes the
+ *     primary_risk_type. So the matcher input is now `product_candidates` and
+ *     `risk_candidates` as arrays. taxonomyQuality is computed for every
+ *     (candidate × rule) pairing, and the best quality wins.
+ *
+ * (2) no_data_for IS NARROWER.
+ *     Before: an insurer with active rules but no taxonomy match was hidden in
+ *     no_data_for. Misleading — they clearly HAVE appetite, the matcher just
+ *     couldn't connect the submission's words to it.
+ *     Now: no_data_for is reserved for insurers with literally zero active
+ *     rules. Everyone else who can't find a product match falls through to
+ *     the "standard baseline" path (already in the code from the portfolio
+ *     overlay refinement) and is presented with a note explaining the lack
+ *     of a specific product match.
+ *
+ * The rubric is unchanged. The portfolio overlay is unchanged. Single best
+ * match preserves predictable scoring (no inflation from multi-cover bundles).
+ * The structural fix — per-cover-section scoring — is the better answer
+ * eventually but is deliberately deferred.
+ */
+
+import type { AppetiteRow, AppetiteLevel } from "../../../worker/src/matcher-types.js";
+import {
+  canonicalTaxonomyKey,
+  nearbyTaxonomyMatches,
+  normalizeLoose,
+  taxonomyKeysRelated,
+} from "../../../worker/src/taxonomy.js";
+
+/**
+ * Bumped whenever the scoring rubric or matching semantics change. Stored on
+ * every recommendation (with the matcher input) so an old recommendation can
+ * be reconstructed and defended without replaying current code against it.
+ */
+export const MATCHER_VERSION = "2026-07-token-matching-v1";
+
+const BASE_SCORE: Record<AppetiteLevel, number> = {
+  preferred: 100,
+  standard: 70,
+  caution: 40,
+  declined: 0,
+};
+
+const PREFERRED_PER_MATCH = 5;
+const PREFERRED_MATCH_CAP = 20;
+const CAUTION_PER_MATCH = 10;
+const REFERRAL_TRIGGER_PENALTY = 8;
+const DOC_GAP_CONFIDENCE_PENALTY = 0.1;
+const DOC_GAP_CONFIDENCE_CAP = 0.3;
+const CAUTION_BAND_MAX = 50;
+
+const PORTFOLIO = "*";
+
+/**
+ * A feature the matcher scans against a rule's preferred/caution/declined/
+ * referral term lists. `source` names where the text came from (so scoring
+ * notes can show provenance) and `ai_inferred` marks text the AI produced
+ * itself (red-flag issues) rather than read from a document. AI-inferred
+ * matches never hard-rule an insurer out on their own — they downgrade to
+ * a referral that needs human confirmation.
+ */
+export interface RiskFeature {
+  text: string;
+  source: string;
+  ai_inferred?: boolean;
+}
+
+/** Plain strings are accepted for backward compatibility and treated as
+ *  document-derived features with a generic source label. */
+export type FeatureInput = string | RiskFeature;
+
+export type MatcherRuleEffect =
+  | "preferred"
+  | "standard"
+  | "caution"
+  | "referral"
+  | "hard_decline"
+  | "soft_decline_referral";
+
+export interface MatchedRuleTerm {
+  /** Exact insurer-owned term from the appetite rule list. */
+  term: string;
+  /** Authoritative matcher feature-source label; null is never guessed. */
+  input_source: string | null;
+}
+
+export interface MatchInputRisk {
+  /** All taxonomy candidates that describe what COVER this submission needs.
+   *  Built in deriveRisk() from cover_sections, secondary_risk_types, and
+   *  primary_risk_type — whichever are present, all passed forward. */
+  product_candidates: string[];
+  section_candidates?: string[];
+  /** Same idea for risk type — business sector, secondary types, anything
+   *  the extraction surfaced that an appetite rule's risk_type might
+   *  token-match. */
+  risk_candidates: string[];
+  features: FeatureInput[];
+  available_documents: string[];
+  /**
+   * The provider-supplied overall confidence for the extraction this match is
+   * running against. The numeric value alone is NOT enough — a value of 0 can
+   * mean either "provider rated everything zero" (available) OR "no rating
+   * available, compatibility numeric" (unavailable). Consult the availability
+   * flag for that distinction.
+   */
+  overall_confidence: number;
+  /**
+   * Explicit availability of the overall confidence rating.
+   *   true       — a provider rating exists (numeric may be any value in [0,1])
+   *   false      — no rating available; the numeric is compatibility-only 0
+   *   undefined  — legacy-compatible: treated as available (historical rows
+   *                predate the flag). NEVER treat undefined as unavailable.
+   */
+  overall_confidence_available?: boolean;
+}
+
+export interface MatchedRuleRef {
+  appetite_id: string;
+  matched_strings: string[];
+  /** Authoritative semantic effect. Evidence consumers must copy this value;
+   * they must never reconstruct hard/soft decline meaning heuristically. */
+  effect?: MatcherRuleEffect;
+  /** Exact additive score delta emitted by the authoritative matcher. Null for
+   * hard outcomes (for example a decline that zeroes the score). */
+  score_contribution?: number | null;
+  /** Structured linkage back to the reviewed matcher features that hit. */
+  matched_inputs?: {
+    value: string;
+    source_labels: string[];
+    ai_inferred_only: boolean;
+  }[];
+  /** Additive evidence output pairing insurer-owned terms with hit sources. */
+  matched_rule_terms?: MatchedRuleTerm[];
+  rule_product_line?: string;
+  rule_risk_type?: string;
+  source_quote?: string | null;
+  source_page?: number | null;
+  source_section?: string | null;
+  source_file_name?: string | null;
+  list:
+    | "preferred"
+    | "caution"
+    | "declined"
+    | "referral"
+    | "base"
+    | "portfolio_caution"
+    | "portfolio_declined"
+    | "portfolio_referral";
+}
+
+export interface RequiredDocumentEvidence {
+  document_type: string;
+  present: boolean;
+  appetite_ids: string[];
+  scopes: ("product" | "portfolio")[];
+  /** Actual confidence delta applied once for this canonical document gap. */
+  confidence_adjustment: number;
+}
+
+export interface ScoreReconciliation {
+  component_subtotal: number;
+  hard_decline_adjustment: number;
+  clamp_adjustment: number;
+  final_score: number;
+}
+
+export interface ConfidenceReconciliation {
+  input_confidence: number | null;
+  input_confidence_available: boolean;
+  required_document_adjustment: number;
+  manual_review_cap_adjustment: number;
+  final_confidence: number | null;
+}
+
+export interface InsurerScore {
+  insurer_id: string;
+  insurer_name: string;
+  /** Authoritative one-based rank assigned after the matcher finishes sorting. */
+  rank?: number;
+  score: number;
+  band: AppetiteLevel | "ruled_out" | "insufficient_rule_match";
+  rule_status: AppetiteLevel | "referral" | "ruled_out" | "insufficient_rule_match";
+  /**
+   * Compatibility numeric — 0 when the underlying extraction confidence is
+   * unavailable. Consumers MUST NOT read this in isolation; use
+   * `confidence_available` to distinguish "provider rated 0" from "no rating".
+   */
+  confidence: number;
+  /** Explicit provenance flag for `confidence` (see MatchInputRisk). */
+  confidence_available: boolean;
+  referral_required: boolean;
+  manual_review_required: boolean;
+  senior_review_required: boolean;
+  ruled_out: boolean;
+  scored_against_appetite_id: string | null;
+  matched_rules: MatchedRuleRef[];
+  /** Present on new matcher outputs; optional keeps historical fixtures/payloads readable. */
+  required_document_evidence?: RequiredDocumentEvidence[];
+  score_reconciliation?: ScoreReconciliation;
+  confidence_reconciliation?: ConfidenceReconciliation;
+  scoring_notes: string[];
+  missing_required_documents: string[];
+  unmatched_sections: string[];
+  unmatched_product_candidates: string[];
+  nearby_rule_matches: string[];
+}
+
+export interface MatchResult {
+  insurers: InsurerScore[];
+  no_data_for: { insurer_id: string; insurer_name: string }[];
+}
+
+const lower = (s: string) => s.toLowerCase();
+
+/** Lowercase, separators → spaces, collapse whitespace, trim. */
+function normTaxonomy(s: string): string {
+  return canonicalTaxonomyKey(s);
+}
+
+/**
+ * Best taxonomy-quality across all (product_candidate × risk_candidate) pairs
+ * for this appetite rule. Returns the same 3/2/1/-1 scale as before:
+ *   3 = both product and risk match (related canonical keys)
+ *   2 = only product matches
+ *   1 = only risk matches
+ *  -1 = nothing matches any candidate
+ * Keys are compared with taxonomyKeysRelated() — equality or underscore-token
+ * containment — never raw substring containment, which produced silent false
+ * positives ("risk" matching "business_all_risks").
+ */
+function taxonomyQualityWithCandidates(
+  productCandidates: string[],
+  riskCandidates: string[],
+  rule: AppetiteRow
+): number {
+  const aPL = normTaxonomy(rule.product_line);
+  const aRT = normTaxonomy(rule.risk_type);
+
+  let bestPL = false;
+  for (const c of productCandidates) {
+    if (!c) continue;
+    const n = normTaxonomy(c);
+    if (n && aPL && taxonomyKeysRelated(aPL, n)) { bestPL = true; break; }
+  }
+
+  let bestRT = false;
+  for (const c of riskCandidates) {
+    if (!c) continue;
+    const n = normTaxonomy(c);
+    if (n && aRT && taxonomyKeysRelated(aRT, n)) { bestRT = true; break; }
+  }
+
+  if (bestPL && bestRT) return 3;
+  if (bestPL) return 2;
+  if (bestRT) return 1;
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Feature ↔ rule-term matching. Token-based with word boundaries: every token
+// of the rule term must appear as a whole token of a single feature ("war"
+// matches "war risk" but never "warranty"; "thatch roof" matches "thatch roof
+// lapa"). Light plural folding so "vehicles" matches "vehicle".
+// ---------------------------------------------------------------------------
+
+interface FeatureHit {
+  candidate: string;
+  /** Which feature fields matched, e.g. ["business sector", "red flag [AI]"]. */
+  sources: string[];
+  /** True when the term matched ONLY in AI-inferred features (red flags). */
+  ai_only: boolean;
+}
+
+function stemToken(t: string): string {
+  return t.length > 3 && t.endsWith("s") ? t.slice(0, -1) : t;
+}
+
+function tokenSet(text: string): Set<string> {
+  return new Set(normalizeLoose(text).split(" ").filter(Boolean).map(stemToken));
+}
+
+function termTokens(term: string): string[] {
+  return normalizeLoose(term).split(" ").filter(Boolean).map(stemToken);
+}
+
+function normalizeFeatures(features: FeatureInput[]): RiskFeature[] {
+  return features.map((f) =>
+    typeof f === "string" ? { text: f, source: "feature", ai_inferred: false } : f
+  );
+}
+
+function findMatches(features: RiskFeature[], candidates: string[]): FeatureHit[] {
+  if (!features.length || !candidates.length) return [];
+  const prepared = features
+    .map((f) => ({ f, tokens: tokenSet(f.text) }))
+    .filter((x) => x.tokens.size > 0);
+  const hits: FeatureHit[] = [];
+  for (const c of candidates) {
+    const ct = termTokens(c);
+    if (ct.length === 0) continue;
+    const matched = prepared.filter((p) => ct.every((t) => p.tokens.has(t)));
+    if (matched.length === 0) continue;
+    hits.push({
+      candidate: c,
+      sources: [...new Set(matched.map((m) => `${m.f.source}${m.f.ai_inferred ? " [AI]" : ""}`))],
+      ai_only: matched.every((m) => m.f.ai_inferred === true),
+    });
+  }
+  return hits;
+}
+
+/** "term (from: source, source)" for scoring notes. */
+function hitLabel(h: FeatureHit): string {
+  return `${h.candidate} (from: ${h.sources.join(", ")})`;
+}
+
+function hasRequiredDoc(available: string[], required: string): boolean {
+  const norm = (s: string) => lower(s).replace(/[_\-]+/g, " ");
+  const r = norm(required);
+  return available.some((a) => {
+    const x = norm(a);
+    return x.includes(r) || r.includes(x);
+  });
+}
+
+function isPortfolio(r: AppetiteRow): boolean {
+  return r.product_line.trim() === PORTFOLIO && r.risk_type.trim() === PORTFOLIO;
+}
+
+function ruleRef(
+  rule: AppetiteRow,
+  list: MatchedRuleRef["list"],
+  matched_strings: string[] = [],
+  options: {
+    effect: MatcherRuleEffect;
+    hits?: FeatureHit[];
+    scoreContribution?: number | null;
+  }
+): MatchedRuleRef {
+  return {
+    appetite_id: rule.id,
+    list,
+    matched_strings,
+    effect: options.effect,
+    score_contribution: options.scoreContribution ?? null,
+    matched_inputs: (options.hits ?? []).map((hit) => ({
+      value: hit.candidate,
+      source_labels: [...hit.sources],
+      ai_inferred_only: hit.ai_only,
+    })),
+    matched_rule_terms: (options.hits ?? []).flatMap<MatchedRuleTerm>((hit) =>
+      hit.sources.length > 0
+        ? hit.sources.map((source) => ({ term: hit.candidate, input_source: source }))
+        : [{ term: hit.candidate, input_source: null }]
+    ),
+    rule_product_line: rule.product_line,
+    rule_risk_type: rule.risk_type,
+    source_quote: rule.source_quote ?? null,
+    source_page: rule.source_page ?? null,
+    source_section: rule.source_section ?? null,
+    source_file_name: rule.source_file_name ?? null,
+  };
+}
+
+function unmatchedFromRisk(risk: MatchInputRisk, productRules: AppetiteRow[]): {
+  unmatchedSections: string[];
+  unmatchedProducts: string[];
+  nearby: string[];
+} {
+  const ruleProducts = productRules.map((r) => r.product_line);
+  const ruleRisks = productRules.map((r) => r.risk_type);
+  const unmatchedSections = (risk.section_candidates ?? risk.product_candidates)
+    .filter((s) => s && !ruleProducts.some((r) => canonicalTaxonomyKey(r) === canonicalTaxonomyKey(s)));
+  const unmatchedProducts = risk.product_candidates
+    .filter((s) => s && !ruleProducts.some((r) => canonicalTaxonomyKey(r) === canonicalTaxonomyKey(s)));
+  const nearby = [
+    ...risk.product_candidates.flatMap((p) => nearbyTaxonomyMatches(p, ruleProducts)),
+    ...risk.risk_candidates.flatMap((r) => nearbyTaxonomyMatches(r, ruleRisks)),
+  ];
+  return {
+    unmatchedSections: [...new Set(unmatchedSections)],
+    unmatchedProducts: [...new Set(unmatchedProducts)],
+    nearby: [...new Set(nearby)].slice(0, 6),
+  };
+}
+
+export function matchInsurers(
+  risk: MatchInputRisk,
+  allAppetite: AppetiteRow[]
+): MatchResult {
+  const features = normalizeFeatures(risk.features);
+  const productByInsurer = new Map<string, AppetiteRow[]>();
+  const portfolioByInsurer = new Map<string, AppetiteRow[]>();
+  for (const row of allAppetite) {
+    if (!row.is_active) continue;
+    if (isPortfolio(row)) {
+      const arr = portfolioByInsurer.get(row.insurer_id) ?? [];
+      arr.push(row);
+      portfolioByInsurer.set(row.insurer_id, arr);
+    } else {
+      const arr = productByInsurer.get(row.insurer_id) ?? [];
+      arr.push(row);
+      productByInsurer.set(row.insurer_id, arr);
+    }
+  }
+
+  const allInsurerIds = new Set<string>([
+    ...productByInsurer.keys(),
+    ...portfolioByInsurer.keys(),
+  ]);
+
+  const scored: InsurerScore[] = [];
+  const noData: MatchResult["no_data_for"] = [];
+
+  for (const insurerId of allInsurerIds) {
+    const productRules = productByInsurer.get(insurerId) ?? [];
+    const portfolioRules = portfolioByInsurer.get(insurerId) ?? [];
+
+    // Best-fit product rule using candidate-list substring taxonomy matching.
+    let bestRule: AppetiteRow | null = null;
+    let bestQuality = -1;
+    for (const r of productRules) {
+      const quality = taxonomyQualityWithCandidates(
+        risk.product_candidates,
+        risk.risk_candidates,
+        r
+      );
+      if (quality > bestQuality) {
+        bestQuality = quality;
+        bestRule = r;
+      }
+    }
+
+    // NOTE: insurers with literally zero active rules never appear in
+    // allAppetite at all, so they cannot be detected here. The CALLER is
+    // responsible for populating no_data_for via insurersWithoutActiveRules()
+    // against the full insurer list — otherwise those insurers silently
+    // vanish from the recommendation.
+
+    const usedRule = bestQuality >= 1 ? bestRule : null;
+    const insurerName =
+      usedRule?.insurer_name ??
+      productRules[0]?.insurer_name ??
+      portfolioRules[0].insurer_name;
+    const notes: string[] = [];
+    const matched: MatchedRuleRef[] = [];
+
+    let score: number;
+    let band: AppetiteLevel | "ruled_out" | "insufficient_rule_match";
+    let referralRequired = false;
+
+    if (usedRule) {
+      score = BASE_SCORE[usedRule.appetite_level];
+      band = usedRule.appetite_level;
+      notes.push(
+        `Base ${usedRule.appetite_level} (${usedRule.product_line} × ${usedRule.risk_type}) → ${score}`
+      );
+      matched.push(ruleRef(usedRule, "base", [], {
+        effect:
+          usedRule.appetite_level === "declined"
+            ? "hard_decline"
+            : usedRule.appetite_level,
+        scoreContribution: score,
+      }));
+
+      const declinedHits = findMatches(features, usedRule.declined_risks);
+      const declinedDocumentHits = declinedHits.filter((h) => !h.ai_only);
+      const declinedAiOnlyHits = declinedHits.filter((h) => h.ai_only);
+      if (declinedDocumentHits.length > 0) {
+        notes.push(
+          `Declined-risk match (product) → ruled out: ${declinedDocumentHits.map(hitLabel).join("; ")}`
+        );
+        matched.push(ruleRef(usedRule, "declined", declinedDocumentHits.map((h) => h.candidate), {
+          effect: "hard_decline",
+          hits: declinedDocumentHits,
+          scoreContribution: null,
+        }));
+        scored.push(ruleOut(insurerId, insurerName, usedRule.id, matched, notes, score));
+        continue;
+      }
+      if (declinedAiOnlyHits.length > 0) {
+        // The term matched ONLY in AI-inferred red-flag text, not in anything
+        // read from a document. An AI inference must not hard-rule an insurer
+        // out by itself — downgrade to a referral that a human confirms.
+        const drop = declinedAiOnlyHits.length * CAUTION_PER_MATCH;
+        score -= drop;
+        referralRequired = true;
+        notes.push(
+          `Declined-risk terms matched only in AI-inferred red flags -${drop} → referral, ` +
+            `needs human confirmation before ruling out: ${declinedAiOnlyHits.map(hitLabel).join("; ")}`
+        );
+        matched.push(ruleRef(usedRule, "declined", declinedAiOnlyHits.map((h) => h.candidate), {
+          effect: "soft_decline_referral",
+          hits: declinedAiOnlyHits,
+          scoreContribution: -drop,
+        }));
+      }
+
+      if (usedRule.appetite_level === "declined") {
+        notes.push("Insurer's appetite for this line/type is declined.");
+        scored.push(ruleOut(insurerId, insurerName, usedRule.id, matched, notes, score));
+        continue;
+      }
+
+      const preferredHits = findMatches(features, usedRule.preferred_risks);
+      if (preferredHits.length > 0) {
+        const lift = Math.min(preferredHits.length * PREFERRED_PER_MATCH, PREFERRED_MATCH_CAP);
+        score += lift;
+        notes.push(`Preferred-risk matches +${lift}: ${preferredHits.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(usedRule, "preferred", preferredHits.map((h) => h.candidate), {
+          effect: "preferred",
+          hits: preferredHits,
+          scoreContribution: lift,
+        }));
+      }
+
+      const cautionHits = findMatches(features, usedRule.caution_risks);
+      if (cautionHits.length > 0) {
+        const drop = cautionHits.length * CAUTION_PER_MATCH;
+        score -= drop;
+        notes.push(`Caution-risk matches -${drop}: ${cautionHits.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(usedRule, "caution", cautionHits.map((h) => h.candidate), {
+          effect: "caution",
+          hits: cautionHits,
+          scoreContribution: -drop,
+        }));
+      }
+    } else {
+      // No product-specific rule could be matched to any candidate. Don't
+      // disappear the insurer — proceed at standard baseline so the
+      // portfolio overlay and the underwriter's eye can still apply.
+      score = 0;
+      band = "insufficient_rule_match";
+      notes.push(
+        productRules.length > 0
+          ? `No specific product rule matched (insurer has ${productRules.length} active product rules, but none aligned with this submission's cover description). Manual review required.`
+          : "No product rules on file for this insurer; portfolio/global rules only. Manual review required."
+      );
+    }
+
+    if (usedRule) {
+      const referralHits = findMatches(features, usedRule.referral_triggers);
+      if (referralHits.length > 0) {
+        const drop = referralHits.length * REFERRAL_TRIGGER_PENALTY;
+        score -= drop;
+        referralRequired = true;
+        notes.push(`Referral triggers (product) -${drop}: ${referralHits.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(usedRule, "referral", referralHits.map((h) => h.candidate), {
+          effect: "referral",
+          hits: referralHits,
+          scoreContribution: -drop,
+        }));
+      }
+    }
+
+    let portfolioRuledOut = false;
+    let portfolioRuledOutRule: string | null = null;
+    for (const pf of portfolioRules) {
+      const pDeclined = findMatches(features, pf.declined_risks);
+      const pDeclinedDocument = pDeclined.filter((h) => !h.ai_only);
+      const pDeclinedAiOnly = pDeclined.filter((h) => h.ai_only);
+      if (pDeclinedDocument.length > 0) {
+        notes.push(
+          `Portfolio declined-risk match → ruled out: ${pDeclinedDocument.map(hitLabel).join("; ")}`
+        );
+        matched.push(ruleRef(pf, "portfolio_declined", pDeclinedDocument.map((h) => h.candidate), {
+          effect: "hard_decline",
+          hits: pDeclinedDocument,
+          scoreContribution: null,
+        }));
+        portfolioRuledOut = true;
+        portfolioRuledOutRule = pf.id;
+        break;
+      }
+      if (pDeclinedAiOnly.length > 0) {
+        // Same rule as the product path: AI-inferred text alone must not
+        // hard-rule an insurer out — downgrade to a human-confirmed referral.
+        const drop = pDeclinedAiOnly.length * CAUTION_PER_MATCH;
+        score -= drop;
+        referralRequired = true;
+        notes.push(
+          `Portfolio declined-risk terms matched only in AI-inferred red flags -${drop} → referral, ` +
+            `needs human confirmation before ruling out: ${pDeclinedAiOnly.map(hitLabel).join("; ")}`
+        );
+        matched.push(ruleRef(pf, "portfolio_declined", pDeclinedAiOnly.map((h) => h.candidate), {
+          effect: "soft_decline_referral",
+          hits: pDeclinedAiOnly,
+          scoreContribution: -drop,
+        }));
+      }
+      const pCaution = findMatches(features, pf.caution_risks);
+      if (pCaution.length > 0) {
+        const drop = pCaution.length * CAUTION_PER_MATCH;
+        score -= drop;
+        notes.push(`Portfolio caution-risk matches -${drop}: ${pCaution.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(pf, "portfolio_caution", pCaution.map((h) => h.candidate), {
+          effect: "caution",
+          hits: pCaution,
+          scoreContribution: -drop,
+        }));
+      }
+      const pReferral = findMatches(features, pf.referral_triggers);
+      if (pReferral.length > 0) {
+        const drop = pReferral.length * REFERRAL_TRIGGER_PENALTY;
+        score -= drop;
+        referralRequired = true;
+        notes.push(`Portfolio referral triggers -${drop}: ${pReferral.map(hitLabel).join("; ")}`);
+        matched.push(ruleRef(pf, "portfolio_referral", pReferral.map((h) => h.candidate), {
+          effect: "referral",
+          hits: pReferral,
+          scoreContribution: -drop,
+        }));
+      }
+    }
+
+    if (portfolioRuledOut) {
+      scored.push(ruleOut(insurerId, insurerName, portfolioRuledOutRule, matched, notes, score));
+      continue;
+    }
+
+    const missingDocs: string[] = [];
+    const required: { source: "product" | "portfolio"; appetiteId: string; doc: string }[] = [];
+    if (usedRule) for (const d of usedRule.required_documents) required.push({ source: "product", appetiteId: usedRule.id, doc: d });
+    for (const pf of portfolioRules) for (const d of pf.required_documents) required.push({ source: "portfolio", appetiteId: pf.id, doc: d });
+    const seen = new Set<string>();
+    for (const r of required) {
+      if (seen.has(r.doc.toLowerCase())) continue;
+      seen.add(r.doc.toLowerCase());
+      if (!hasRequiredDoc(risk.available_documents, r.doc)) missingDocs.push(r.doc);
+    }
+    // Confidence provenance is preserved end-to-end (see MatchInputRisk).
+    //   - explicitly unavailable  → compatibility 0, confidence_available=false
+    //   - provider rating in [0,1] → that number, confidence_available=true
+    //   - absent flag AND no valid number → 0.7 legacy default, available=true
+    // The old `risk.overall_confidence || 0.7` collapsed a provider-rated 0
+    // into 0.7 (a fabricated value) and silently hid unavailability. Truthiness
+    // fallback is forbidden here — use explicit availability + finite-number
+    // checks.
+    const explicitlyUnavailable = risk.overall_confidence_available === false;
+    const raw = risk.overall_confidence;
+    const hasValidNumber =
+      typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1;
+    let confidence: number;
+    let confidenceAvailable: boolean;
+    if (explicitlyUnavailable) {
+      confidence = 0;
+      confidenceAvailable = false;
+      notes.push(
+        "Extraction confidence unavailable — score reflects appetite match only; do not read the numeric 0 as a provider rating."
+      );
+    } else if (hasValidNumber) {
+      confidence = raw;
+      confidenceAvailable = true;
+    } else {
+      // Legacy-compatibility default. Preserves historical behaviour for rows
+      // that never carried a confidence at all (predates the extraction contract).
+      confidence = 0.7;
+      confidenceAvailable = true;
+    }
+    const confidenceBeforeDocuments = confidence;
+    if (missingDocs.length > 0) {
+      const drop = Math.min(missingDocs.length * DOC_GAP_CONFIDENCE_PENALTY, DOC_GAP_CONFIDENCE_CAP);
+      confidence = Math.max(0, confidence - drop);
+      notes.push(`Required documents not evidenced: ${missingDocs.join("; ")} (confidence -${drop.toFixed(2)})`);
+    }
+
+    const requiredByDocument = new Map<string, RequiredDocumentEvidence>();
+    for (const item of required) {
+      const key = item.doc.toLowerCase();
+      const current = requiredByDocument.get(key) ?? {
+        document_type: item.doc,
+        present: hasRequiredDoc(risk.available_documents, item.doc),
+        appetite_ids: [],
+        scopes: [],
+        confidence_adjustment: 0,
+      };
+      if (!current.appetite_ids.includes(item.appetiteId)) current.appetite_ids.push(item.appetiteId);
+      if (!current.scopes.includes(item.source)) current.scopes.push(item.source);
+      requiredByDocument.set(key, current);
+    }
+    let remainingDocumentAdjustment = confidence - confidenceBeforeDocuments;
+    for (const item of requiredByDocument.values()) {
+      if (!item.present && remainingDocumentAdjustment < 0) {
+        const applied = Math.max(remainingDocumentAdjustment, -DOC_GAP_CONFIDENCE_PENALTY);
+        item.confidence_adjustment = applied;
+        remainingDocumentAdjustment -= applied;
+      }
+      item.appetite_ids.sort();
+      item.scopes.sort();
+    }
+    const requiredDocumentEvidence = [...requiredByDocument.values()];
+
+    const componentSubtotal = score;
+    score = Math.max(0, Math.min(100, componentSubtotal));
+    const clampAdjustment = score - componentSubtotal;
+
+    const manualReviewRequired = !usedRule;
+    const unmatched = manualReviewRequired
+      ? unmatchedFromRisk(risk, productRules)
+      : { unmatchedSections: [], unmatchedProducts: [], nearby: [] };
+    if (manualReviewRequired && unmatched.unmatchedSections.length > 0) {
+      notes.push(`Unmatched cover sections: ${unmatched.unmatchedSections.join("; ")}`);
+    }
+    if (manualReviewRequired && unmatched.nearby.length > 0) {
+      notes.push(`Nearby matrix terms to review: ${unmatched.nearby.join("; ")}`);
+    }
+
+    const seniorReview = !manualReviewRequired && score <= CAUTION_BAND_MAX && referralRequired;
+    if (seniorReview) notes.push("Caution-band score with referral flag → senior review required.");
+
+    const confidenceBeforeManualReviewCap = confidence;
+    if (manualReviewRequired) confidence = Math.min(confidence, 0.35);
+    const manualReviewCapAdjustment = confidence - confidenceBeforeManualReviewCap;
+
+    const ruleStatus: InsurerScore["rule_status"] =
+      band === "insufficient_rule_match"
+        ? "insufficient_rule_match"
+        : referralRequired
+        ? "referral"
+        : band;
+
+    scored.push({
+      insurer_id: insurerId,
+      insurer_name: insurerName,
+      score,
+      band,
+      rule_status: ruleStatus,
+      confidence,
+      confidence_available: confidenceAvailable,
+      referral_required: referralRequired,
+      manual_review_required: manualReviewRequired,
+      senior_review_required: seniorReview,
+      ruled_out: false,
+      scored_against_appetite_id: usedRule?.id ?? null,
+      matched_rules: matched,
+      required_document_evidence: requiredDocumentEvidence,
+      score_reconciliation: {
+        component_subtotal: componentSubtotal,
+        hard_decline_adjustment: 0,
+        clamp_adjustment: clampAdjustment,
+        final_score: score,
+      },
+      confidence_reconciliation: {
+        input_confidence: confidenceAvailable ? confidenceBeforeDocuments : null,
+        input_confidence_available: confidenceAvailable,
+        required_document_adjustment: confidenceBeforeManualReviewCap - confidenceBeforeDocuments,
+        manual_review_cap_adjustment: manualReviewCapAdjustment,
+        final_confidence: confidenceAvailable ? confidence : null,
+      },
+      scoring_notes: notes,
+      missing_required_documents: missingDocs,
+      unmatched_sections: unmatched.unmatchedSections,
+      unmatched_product_candidates: unmatched.unmatchedProducts,
+      nearby_rule_matches: unmatched.nearby,
+    });
+  }
+
+  scored.sort((a, b) => {
+    if (a.ruled_out !== b.ruled_out) return a.ruled_out ? 1 : -1;
+    return b.score - a.score;
+  });
+  scored.forEach((insurer, index) => { insurer.rank = index + 1; });
+
+  return { insurers: scored, no_data_for: noData };
+}
+
+/**
+ * Insurers with ZERO active appetite rules — they never reach matchInsurers
+ * (its input is appetite rows), so the caller must surface them explicitly in
+ * no_data_for. Otherwise "Atlas has no data for insurer X" silently reads as
+ * "insurer X doesn't exist", overstating the recommendation's completeness.
+ */
+export function insurersWithoutActiveRules(
+  insurers: { id: string; name: string }[],
+  activeAppetite: { insurer_id: string }[]
+): { insurer_id: string; insurer_name: string }[] {
+  const withRules = new Set(activeAppetite.map((a) => a.insurer_id));
+  return insurers
+    .filter((i) => !withRules.has(i.id))
+    .map((i) => ({ insurer_id: i.id, insurer_name: i.name }));
+}
+
+function ruleOut(
+  insurer_id: string,
+  insurer_name: string,
+  scored_against: string | null,
+  matched_rules: MatchedRuleRef[],
+  scoring_notes: string[],
+  component_subtotal: number
+): InsurerScore {
+  return {
+    insurer_id,
+    insurer_name,
+    score: 0,
+    band: "ruled_out",
+    rule_status: "ruled_out",
+    // Ruled-out insurers do not participate in confidence semantics — their
+    // score is 0 by rule, not by extraction quality. Mark unavailable so no
+    // downstream consumer misreads the 0 as a provider rating.
+    confidence: 0,
+    confidence_available: false,
+    referral_required: false,
+    manual_review_required: false,
+    senior_review_required: false,
+    ruled_out: true,
+    scored_against_appetite_id: scored_against,
+    matched_rules,
+    required_document_evidence: [],
+    score_reconciliation: {
+      component_subtotal,
+      hard_decline_adjustment: -component_subtotal,
+      clamp_adjustment: 0,
+      final_score: 0,
+    },
+    confidence_reconciliation: {
+      input_confidence: null,
+      input_confidence_available: false,
+      required_document_adjustment: 0,
+      manual_review_cap_adjustment: 0,
+      final_confidence: null,
+    },
+    scoring_notes,
+    missing_required_documents: [],
+    unmatched_sections: [],
+    unmatched_product_candidates: [],
+    nearby_rule_matches: [],
+  };
+}

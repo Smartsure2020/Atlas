@@ -1,0 +1,1047 @@
+{
+  "id": "historical-case-01",
+  "submission_id": "11111111-1111-1111-1111-111111111111",
+  "recommended_insurer": "Alpha Insurance",
+  "secondary_options_json": [
+    {
+      "insurer_id": "insurer-beta",
+      "insurer_name": "Beta Insurance",
+      "score": 70,
+      "band": "standard",
+      "rule_status": "standard",
+      "confidence": 0.9,
+      "confidence_available": true,
+      "referral_required": false,
+      "manual_review_required": false,
+      "senior_review_required": false,
+      "ruled_out": false,
+      "scored_against_appetite_id": "beta-motor",
+      "matched_rules": [
+        {
+          "appetite_id": "beta-motor",
+          "list": "base",
+          "matched_strings": [],
+          "effect": "standard",
+          "score_contribution": 70,
+          "matched_inputs": [],
+          "matched_rule_terms": [],
+          "rule_product_line": "commercial_motor",
+          "rule_risk_type": "transport",
+          "source_quote": "Synthetic guideline excerpt.",
+          "source_page": 4,
+          "source_section": "Section 4",
+          "source_file_name": "guide.pdf"
+        }
+      ],
+      "required_document_evidence": [],
+      "score_reconciliation": {
+        "component_subtotal": 70,
+        "hard_decline_adjustment": 0,
+        "clamp_adjustment": 0,
+        "final_score": 70
+      },
+      "confidence_reconciliation": {
+        "input_confidence": 0.9,
+        "input_confidence_available": true,
+        "required_document_adjustment": 0,
+        "manual_review_cap_adjustment": 0,
+        "final_confidence": 0.9
+      },
+      "scoring_notes": [
+        "Base standard (commercial_motor × transport) → 70"
+      ],
+      "missing_required_documents": [],
+      "unmatched_sections": [],
+      "unmatched_product_candidates": [],
+      "nearby_rule_matches": [],
+      "rank": 2,
+      "reasoning": "Ranked #2: Beta Insurance scored 70 (standard). Positive: base appetite match."
+    },
+    {
+      "insurer_id": "insurer-gamma",
+      "insurer_name": "Gamma Insurance",
+      "score": 30,
+      "band": "caution",
+      "rule_status": "caution",
+      "confidence": 0.9,
+      "confidence_available": true,
+      "referral_required": false,
+      "manual_review_required": false,
+      "senior_review_required": false,
+      "ruled_out": false,
+      "scored_against_appetite_id": "gamma-motor",
+      "matched_rules": [
+        {
+          "appetite_id": "gamma-motor",
+          "list": "base",
+          "matched_strings": [],
+          "effect": "caution",
+          "score_contribution": 40,
+          "matched_inputs": [],
+          "matched_rule_terms": [],
+          "rule_product_line": "commercial_motor",
+          "rule_risk_type": "transport",
+          "source_quote": "Synthetic guideline excerpt.",
+          "source_page": 4,
+          "source_section": "Section 4",
+          "source_file_name": "guide.pdf"
+        },
+        {
+          "appetite_id": "gamma-motor",
+          "list": "caution",
+          "matched_strings": [
+            "medium"
+          ],
+          "effect": "caution",
+          "score_contribution": -10,
+          "matched_inputs": [
+            {
+              "value": "medium",
+              "source_labels": [
+                "complexity level"
+              ],
+              "ai_inferred_only": false
+            }
+          ],
+          "matched_rule_terms": [
+            {
+              "term": "medium",
+              "input_source": "complexity level"
+            }
+          ],
+          "rule_product_line": "commercial_motor",
+          "rule_risk_type": "transport",
+          "source_quote": "Synthetic guideline excerpt.",
+          "source_page": 4,
+          "source_section": "Section 4",
+          "source_file_name": "guide.pdf"
+        }
+      ],
+      "required_document_evidence": [],
+      "score_reconciliation": {
+        "component_subtotal": 30,
+        "hard_decline_adjustment": 0,
+        "clamp_adjustment": 0,
+        "final_score": 30
+      },
+      "confidence_reconciliation": {
+        "input_confidence": 0.9,
+        "input_confidence_available": true,
+        "required_document_adjustment": 0,
+        "manual_review_cap_adjustment": 0,
+        "final_confidence": 0.9
+      },
+      "scoring_notes": [
+        "Base caution (commercial_motor × transport) → 40",
+        "Caution-risk matches -10: medium (from: complexity level)"
+      ],
+      "missing_required_documents": [],
+      "unmatched_sections": [],
+      "unmatched_product_candidates": [],
+      "nearby_rule_matches": [],
+      "rank": 3,
+      "reasoning": "Ranked #3: Gamma Insurance scored 30 (caution). Positive: base appetite match. Concerns: caution: medium."
+    }
+  ],
+  "not_recommended_json": [
+    {
+      "insurer_id": "insurer-delta",
+      "insurer_name": "Delta Insurance",
+      "score": 0,
+      "band": "ruled_out",
+      "rule_status": "ruled_out",
+      "confidence": 0,
+      "confidence_available": false,
+      "referral_required": false,
+      "manual_review_required": false,
+      "senior_review_required": false,
+      "ruled_out": true,
+      "scored_against_appetite_id": "delta-motor",
+      "matched_rules": [
+        {
+          "appetite_id": "delta-motor",
+          "list": "base",
+          "matched_strings": [],
+          "effect": "hard_decline",
+          "score_contribution": 0,
+          "matched_inputs": [],
+          "matched_rule_terms": [],
+          "rule_product_line": "commercial_motor",
+          "rule_risk_type": "transport",
+          "source_quote": "Synthetic guideline excerpt.",
+          "source_page": 4,
+          "source_section": "Section 4",
+          "source_file_name": "guide.pdf"
+        }
+      ],
+      "required_document_evidence": [],
+      "score_reconciliation": {
+        "component_subtotal": 0,
+        "hard_decline_adjustment": 0,
+        "clamp_adjustment": 0,
+        "final_score": 0
+      },
+      "confidence_reconciliation": {
+        "input_confidence": null,
+        "input_confidence_available": false,
+        "required_document_adjustment": 0,
+        "manual_review_cap_adjustment": 0,
+        "final_confidence": null
+      },
+      "scoring_notes": [
+        "Base declined (commercial_motor × transport) → 0",
+        "Insurer's appetite for this line/type is declined."
+      ],
+      "missing_required_documents": [],
+      "unmatched_sections": [],
+      "unmatched_product_candidates": [],
+      "nearby_rule_matches": [],
+      "rank": 4,
+      "reasoning": "Ranked #4: Delta Insurance was ruled out (ruled out). Positive: base appetite match."
+    }
+  ],
+  "reasoning_json": {
+    "headline": "Alpha Insurance ranks first with score 100 (preferred).",
+    "top": {
+      "insurer_id": "insurer-alpha",
+      "insurer_name": "Alpha Insurance",
+      "score": 100,
+      "band": "preferred",
+      "rule_status": "preferred",
+      "confidence": 0.9,
+      "confidence_available": true,
+      "referral_required": false,
+      "manual_review_required": false,
+      "senior_review_required": false,
+      "ruled_out": false,
+      "scored_against_appetite_id": "alpha-motor",
+      "matched_rules": [
+        {
+          "appetite_id": "alpha-motor",
+          "list": "base",
+          "matched_strings": [],
+          "effect": "preferred",
+          "score_contribution": 100,
+          "matched_inputs": [],
+          "matched_rule_terms": [],
+          "rule_product_line": "commercial_motor",
+          "rule_risk_type": "transport",
+          "source_quote": "Synthetic guideline excerpt.",
+          "source_page": 4,
+          "source_section": "Section 4",
+          "source_file_name": "guide.pdf"
+        },
+        {
+          "appetite_id": "alpha-motor",
+          "list": "preferred",
+          "matched_strings": [
+            "transport fleet"
+          ],
+          "effect": "preferred",
+          "score_contribution": 5,
+          "matched_inputs": [
+            {
+              "value": "transport fleet",
+              "source_labels": [
+                "primary risk type",
+                "occupation/business description"
+              ],
+              "ai_inferred_only": false
+            }
+          ],
+          "matched_rule_terms": [
+            {
+              "term": "transport fleet",
+              "input_source": "primary risk type"
+            },
+            {
+              "term": "transport fleet",
+              "input_source": "occupation/business description"
+            }
+          ],
+          "rule_product_line": "commercial_motor",
+          "rule_risk_type": "transport",
+          "source_quote": "Synthetic guideline excerpt.",
+          "source_page": 4,
+          "source_section": "Section 4",
+          "source_file_name": "guide.pdf"
+        }
+      ],
+      "required_document_evidence": [
+        {
+          "document_type": "Claims history",
+          "present": true,
+          "appetite_ids": [
+            "alpha-motor"
+          ],
+          "scopes": [
+            "product"
+          ],
+          "confidence_adjustment": 0
+        }
+      ],
+      "score_reconciliation": {
+        "component_subtotal": 105,
+        "hard_decline_adjustment": 0,
+        "clamp_adjustment": -5,
+        "final_score": 100
+      },
+      "confidence_reconciliation": {
+        "input_confidence": 0.9,
+        "input_confidence_available": true,
+        "required_document_adjustment": 0,
+        "manual_review_cap_adjustment": 0,
+        "final_confidence": 0.9
+      },
+      "scoring_notes": [
+        "Base preferred (commercial_motor × transport) → 100",
+        "Preferred-risk matches +5: transport fleet (from: primary risk type, occupation/business description)"
+      ],
+      "missing_required_documents": [],
+      "unmatched_sections": [],
+      "unmatched_product_candidates": [],
+      "nearby_rule_matches": [],
+      "rank": 1,
+      "reasoning": "Ranked #1: Alpha Insurance scored 100 (preferred). Positive: base appetite match; preferred: transport fleet."
+    },
+    "no_data_for": [],
+    "manual_review_required": false,
+    "unmatched_sections": [],
+    "unmatched_product_candidates": [],
+    "matcher_input": {
+      "snapshot_version": "matcher-input-minimised-v1",
+      "product_candidates": [
+        "commercial motor",
+        "transport",
+        "Commercial motor",
+        "transport fleet"
+      ],
+      "section_candidates": [
+        "Commercial motor"
+      ],
+      "risk_candidates": [
+        "transport",
+        "transport",
+        "transport fleet",
+        "medium"
+      ],
+      "features": [
+        {
+          "source": "primary risk type",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "business sector",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "complexity level",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "occupation/business description",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "risk address",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "entity type",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "cover sections",
+          "ai_inferred": false,
+          "value_retained": false
+        }
+      ],
+      "available_documents": [
+        "Claims history"
+      ],
+      "overall_confidence": 0.9,
+      "overall_confidence_available": true
+    },
+    "matcher_version": "2026-10-section-evaluation-v2",
+    "taxonomy_version": "2026-07-token-aliases-v1",
+    "reasoning_source": "deterministic",
+    "explanation_mode": "deterministic",
+    "overall_confidence": 0.9,
+    "overall_confidence_available": true
+  },
+  "confidence_score": 0.9,
+  "referral_required": false,
+  "senior_review_required": false,
+  "extraction_id": "22222222-2222-2222-2222-222222222222",
+  "created_at": "2026-10-16T10:00:00.000Z",
+  "version_metadata": {
+    "model": "claude-sonnet-4-6",
+    "prompt": "recommendation-reasoning-v1",
+    "taxonomy": "2026-07-token-aliases-v1",
+    "appetite": "fp_a66381d0",
+    "extraction": "case-v1"
+  },
+  "evidence_json": {
+    "schema_version": "recommendation-evidence-v1",
+    "provenance": {
+      "recommendation_id": "historical-case-01",
+      "submission_id": "11111111-1111-1111-1111-111111111111",
+      "extraction_id": "22222222-2222-2222-2222-222222222222",
+      "reviewed_at": "2026-10-16T08:00:00.000Z",
+      "generated_at": "2026-10-16T10:00:00.000Z",
+      "matcher_version": "2026-07-token-matching-v1",
+      "taxonomy_version": "2026-07-token-aliases-v1",
+      "explanation_mode": "deterministic",
+      "explanation_source": "deterministic",
+      "recommendation_input_fingerprint": "fp_historical"
+    },
+    "matcher_input": {
+      "product_candidates": [
+        "commercial motor",
+        "transport",
+        "Commercial motor",
+        "transport fleet"
+      ],
+      "section_candidates": [
+        "Commercial motor"
+      ],
+      "risk_candidates": [
+        "transport",
+        "transport",
+        "transport fleet",
+        "medium"
+      ],
+      "features": [
+        {
+          "source": "primary risk type",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "business sector",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "complexity level",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "occupation/business description",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "risk address",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "entity type",
+          "ai_inferred": false,
+          "value_retained": false
+        },
+        {
+          "source": "cover sections",
+          "ai_inferred": false,
+          "value_retained": false
+        }
+      ],
+      "available_documents": [
+        "Claims history"
+      ],
+      "overall_confidence": 0.7,
+      "overall_confidence_available": true
+    },
+    "reviewed_risk_facts": [
+      {
+        "field_path": "risk_classification.product_line",
+        "label": "Product line",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "product_candidate"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "risk_classification.risk_type",
+        "label": "Risk type",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "product_candidate",
+          "risk_candidate"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "risk_classification.primary_risk_type",
+        "label": "Primary risk type",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "product_candidate",
+          "risk_candidate",
+          "feature"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "risk_classification.business_sector",
+        "label": "Business sector",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "risk_candidate",
+          "feature"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "risk_classification.complexity_level",
+        "label": "Complexity level",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "risk_candidate",
+          "feature"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "extracted_client.occupation_or_business_description",
+        "label": "Occupation or business description",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "feature"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "extracted_client.risk_address",
+        "label": "Risk address",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "feature"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "extracted_client.entity_type",
+        "label": "Entity type",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "feature"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "current_cover.cover_sections",
+        "label": "Cover sections",
+        "present": true,
+        "value_retained": false,
+        "source_category": "reviewed_extraction",
+        "matcher_roles": [
+          "product_candidate",
+          "feature"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.9,
+        "confidence_available": true
+      },
+      {
+        "field_path": "overall_confidence",
+        "label": "Overall extraction confidence",
+        "present": true,
+        "value_retained": false,
+        "source_category": "extraction_metadata",
+        "matcher_roles": [
+          "confidence"
+        ],
+        "ai_inferred": false,
+        "confidence": 0.7,
+        "confidence_available": true
+      }
+    ],
+    "trusted_documents": [
+      {
+        "document_type": "Claims history",
+        "evidence_label": "Claims history",
+        "availability": "available",
+        "trust_basis": "active_exact_clean"
+      }
+    ],
+    "insurers": [
+      {
+        "insurer_id": "insurer-alpha",
+        "insurer_name": "Alpha Insurance",
+        "status": "scored",
+        "rank": 1,
+        "score": 100,
+        "band": "preferred",
+        "rule_status": "preferred",
+        "confidence": 0.7,
+        "confidence_available": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": false,
+        "no_appetite_data": false,
+        "scored_against_rule_id": "alpha-motor",
+        "unresolved_rule_ids": [],
+        "rule_evidence": [
+          {
+            "evidence_id": "rule:alpha-motor:base",
+            "rule_id": "alpha-motor",
+            "insurer_id": "insurer-alpha",
+            "insurer_name": "Alpha Insurance",
+            "product_line": "commercial_motor",
+            "risk_type": "transport",
+            "appetite_level": "preferred",
+            "effect": "preferred",
+            "matcher_component": "base",
+            "score_contribution": 100,
+            "matched_value_count": 0,
+            "matched_rule_terms": [],
+            "matched_input_sources": [],
+            "required_document": null,
+            "source": "manual",
+            "source_document_id": "doc-guide",
+            "source_file_name": "guide.pdf",
+            "source_page": 4,
+            "source_section": "Section 4",
+            "source_quote": "Synthetic guideline excerpt.",
+            "rule_notes": null
+          },
+          {
+            "evidence_id": "rule:alpha-motor:preferred",
+            "rule_id": "alpha-motor",
+            "insurer_id": "insurer-alpha",
+            "insurer_name": "Alpha Insurance",
+            "product_line": "commercial_motor",
+            "risk_type": "transport",
+            "appetite_level": "preferred",
+            "effect": "preferred",
+            "matcher_component": "preferred",
+            "score_contribution": 5,
+            "matched_value_count": 1,
+            "matched_rule_terms": [
+              {
+                "term": "transport fleet",
+                "input_source": "occupation/business description"
+              },
+              {
+                "term": "transport fleet",
+                "input_source": "primary risk type"
+              }
+            ],
+            "matched_input_sources": [
+              {
+                "source_labels": [
+                  "occupation/business description",
+                  "primary risk type"
+                ],
+                "ai_inferred_only": false
+              }
+            ],
+            "required_document": null,
+            "source": "manual",
+            "source_document_id": "doc-guide",
+            "source_file_name": "guide.pdf",
+            "source_page": 4,
+            "source_section": "Section 4",
+            "source_quote": "Synthetic guideline excerpt.",
+            "rule_notes": null
+          },
+          {
+            "evidence_id": "rule:alpha-motor:required_document:claims history",
+            "rule_id": "alpha-motor",
+            "insurer_id": "insurer-alpha",
+            "insurer_name": "Alpha Insurance",
+            "product_line": "commercial_motor",
+            "risk_type": "transport",
+            "appetite_level": "preferred",
+            "effect": "required_document_present",
+            "matcher_component": "required_document",
+            "score_contribution": null,
+            "matched_value_count": 0,
+            "matched_rule_terms": [],
+            "matched_input_sources": [],
+            "required_document": "Claims history",
+            "source": "manual",
+            "source_document_id": "doc-guide",
+            "source_file_name": "guide.pdf",
+            "source_page": 4,
+            "source_section": "Section 4",
+            "source_quote": "Synthetic guideline excerpt.",
+            "rule_notes": null
+          }
+        ],
+        "required_documents": [
+          {
+            "evidence_id": "required-document:claims history",
+            "document_type": "Claims history",
+            "present": true,
+            "rule_evidence_ids": [
+              "rule:alpha-motor:required_document:claims history"
+            ],
+            "confidence_adjustment": 0
+          }
+        ],
+        "score_reconciliation": {
+          "component_subtotal": 105,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": -5,
+          "final_score": 100
+        },
+        "confidence_reconciliation": {
+          "input_confidence": 0.7,
+          "input_confidence_available": true,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": 0.7
+        },
+        "outcome_reasons": {
+          "why_ranked": [
+            "rule:alpha-motor:base",
+            "rule:alpha-motor:preferred"
+          ],
+          "strengthened_by": [
+            "rule:alpha-motor:base",
+            "rule:alpha-motor:preferred"
+          ],
+          "weakened_by": [],
+          "cautions": [],
+          "referrals": [],
+          "declines": [],
+          "required_documents_present": [
+            "required-document:claims history"
+          ],
+          "required_documents_missing": [],
+          "evidence_gaps": []
+        },
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "matcher_notes": [
+          "Base preferred (commercial_motor × transport) → 100",
+          "Preferred-risk matches +5: transport fleet (from: primary risk type, occupation/business description)"
+        ]
+      },
+      {
+        "insurer_id": "insurer-beta",
+        "insurer_name": "Beta Insurance",
+        "status": "scored",
+        "rank": 2,
+        "score": 70,
+        "band": "standard",
+        "rule_status": "standard",
+        "confidence": 0.7,
+        "confidence_available": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": false,
+        "no_appetite_data": false,
+        "scored_against_rule_id": "beta-motor",
+        "unresolved_rule_ids": [],
+        "rule_evidence": [
+          {
+            "evidence_id": "rule:beta-motor:base",
+            "rule_id": "beta-motor",
+            "insurer_id": "insurer-beta",
+            "insurer_name": "Beta Insurance",
+            "product_line": "commercial_motor",
+            "risk_type": "transport",
+            "appetite_level": "standard",
+            "effect": "standard",
+            "matcher_component": "base",
+            "score_contribution": 70,
+            "matched_value_count": 0,
+            "matched_rule_terms": [],
+            "matched_input_sources": [],
+            "required_document": null,
+            "source": "manual",
+            "source_document_id": "doc-guide",
+            "source_file_name": "guide.pdf",
+            "source_page": 4,
+            "source_section": "Section 4",
+            "source_quote": "Synthetic guideline excerpt.",
+            "rule_notes": null
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 70,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": 0,
+          "final_score": 70
+        },
+        "confidence_reconciliation": {
+          "input_confidence": 0.7,
+          "input_confidence_available": true,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": 0.7
+        },
+        "outcome_reasons": {
+          "why_ranked": [
+            "rule:beta-motor:base"
+          ],
+          "strengthened_by": [
+            "rule:beta-motor:base"
+          ],
+          "weakened_by": [],
+          "cautions": [],
+          "referrals": [],
+          "declines": [],
+          "required_documents_present": [],
+          "required_documents_missing": [],
+          "evidence_gaps": []
+        },
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "matcher_notes": [
+          "Base standard (commercial_motor × transport) → 70"
+        ]
+      },
+      {
+        "insurer_id": "insurer-gamma",
+        "insurer_name": "Gamma Insurance",
+        "status": "scored",
+        "rank": 3,
+        "score": 30,
+        "band": "caution",
+        "rule_status": "caution",
+        "confidence": 0.7,
+        "confidence_available": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": false,
+        "no_appetite_data": false,
+        "scored_against_rule_id": "gamma-motor",
+        "unresolved_rule_ids": [],
+        "rule_evidence": [
+          {
+            "evidence_id": "rule:gamma-motor:base",
+            "rule_id": "gamma-motor",
+            "insurer_id": "insurer-gamma",
+            "insurer_name": "Gamma Insurance",
+            "product_line": "commercial_motor",
+            "risk_type": "transport",
+            "appetite_level": "caution",
+            "effect": "caution",
+            "matcher_component": "base",
+            "score_contribution": 40,
+            "matched_value_count": 0,
+            "matched_rule_terms": [],
+            "matched_input_sources": [],
+            "required_document": null,
+            "source": "manual",
+            "source_document_id": "doc-guide",
+            "source_file_name": "guide.pdf",
+            "source_page": 4,
+            "source_section": "Section 4",
+            "source_quote": "Synthetic guideline excerpt.",
+            "rule_notes": null
+          },
+          {
+            "evidence_id": "rule:gamma-motor:caution",
+            "rule_id": "gamma-motor",
+            "insurer_id": "insurer-gamma",
+            "insurer_name": "Gamma Insurance",
+            "product_line": "commercial_motor",
+            "risk_type": "transport",
+            "appetite_level": "caution",
+            "effect": "caution",
+            "matcher_component": "caution",
+            "score_contribution": -10,
+            "matched_value_count": 1,
+            "matched_rule_terms": [
+              {
+                "term": "medium",
+                "input_source": "complexity level"
+              }
+            ],
+            "matched_input_sources": [
+              {
+                "source_labels": [
+                  "complexity level"
+                ],
+                "ai_inferred_only": false
+              }
+            ],
+            "required_document": null,
+            "source": "manual",
+            "source_document_id": "doc-guide",
+            "source_file_name": "guide.pdf",
+            "source_page": 4,
+            "source_section": "Section 4",
+            "source_quote": "Synthetic guideline excerpt.",
+            "rule_notes": null
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 30,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": 0,
+          "final_score": 30
+        },
+        "confidence_reconciliation": {
+          "input_confidence": 0.7,
+          "input_confidence_available": true,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": 0.7
+        },
+        "outcome_reasons": {
+          "why_ranked": [
+            "rule:gamma-motor:base",
+            "rule:gamma-motor:caution"
+          ],
+          "strengthened_by": [
+            "rule:gamma-motor:base"
+          ],
+          "weakened_by": [
+            "rule:gamma-motor:caution"
+          ],
+          "cautions": [
+            "rule:gamma-motor:base",
+            "rule:gamma-motor:caution"
+          ],
+          "referrals": [],
+          "declines": [],
+          "required_documents_present": [],
+          "required_documents_missing": [],
+          "evidence_gaps": []
+        },
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "matcher_notes": [
+          "Base caution (commercial_motor × transport) → 40",
+          "Caution-risk matches -10: medium (from: complexity level)"
+        ]
+      },
+      {
+        "insurer_id": "insurer-delta",
+        "insurer_name": "Delta Insurance",
+        "status": "scored",
+        "rank": 4,
+        "score": 0,
+        "band": "ruled_out",
+        "rule_status": "ruled_out",
+        "confidence": null,
+        "confidence_available": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": true,
+        "no_appetite_data": false,
+        "scored_against_rule_id": "delta-motor",
+        "unresolved_rule_ids": [],
+        "rule_evidence": [
+          {
+            "evidence_id": "rule:delta-motor:base",
+            "rule_id": "delta-motor",
+            "insurer_id": "insurer-delta",
+            "insurer_name": "Delta Insurance",
+            "product_line": "commercial_motor",
+            "risk_type": "transport",
+            "appetite_level": "declined",
+            "effect": "hard_decline",
+            "matcher_component": "base",
+            "score_contribution": 0,
+            "matched_value_count": 0,
+            "matched_rule_terms": [],
+            "matched_input_sources": [],
+            "required_document": null,
+            "source": "manual",
+            "source_document_id": "doc-guide",
+            "source_file_name": "guide.pdf",
+            "source_page": 4,
+            "source_section": "Section 4",
+            "source_quote": "Synthetic guideline excerpt.",
+            "rule_notes": null
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 0,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": 0,
+          "final_score": 0
+        },
+        "confidence_reconciliation": {
+          "input_confidence": null,
+          "input_confidence_available": false,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": null
+        },
+        "outcome_reasons": {
+          "why_ranked": [],
+          "strengthened_by": [],
+          "weakened_by": [],
+          "cautions": [],
+          "referrals": [],
+          "declines": [
+            "rule:delta-motor:base"
+          ],
+          "required_documents_present": [],
+          "required_documents_missing": [],
+          "evidence_gaps": []
+        },
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "matcher_notes": [
+          "Base declined (commercial_motor × transport) → 0",
+          "Insurer's appetite for this line/type is declined."
+        ]
+      }
+    ],
+    "quality": {
+      "status": "complete",
+      "gaps": []
+    }
+  }
+}

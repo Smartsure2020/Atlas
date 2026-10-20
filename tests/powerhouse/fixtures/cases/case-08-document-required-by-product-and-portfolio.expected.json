@@ -1,0 +1,68 @@
+{
+  "expected_schema": "powerhouse-case-expected-v1",
+  "parity_vs_frozen_v1": {
+    "class": "identical",
+    "differing_insurers": []
+  },
+  "observation": {
+    "evidence_schema": "recommendation-evidence-v2",
+    "matcher_version": "2026-10-section-evaluation-v2",
+    "recommended": "Alpha Insurance",
+    "insurer_order": [
+      "insurer-alpha"
+    ],
+    "insurers": {
+      "insurer-alpha": {
+        "rank": 1,
+        "score": 70,
+        "band": "standard",
+        "rule_status": "standard",
+        "confidence": 0.8,
+        "ruled_out": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "scored_rule": "alpha-motor",
+        "selection_basis": "only_candidate",
+        "rule_effects": [
+          "base|standard|alpha-motor|70"
+        ],
+        "sections": [
+          {
+            "section": "commercial_motor",
+            "status": "evaluated",
+            "selected": "alpha-motor",
+            "outcome": "standard",
+            "reflected": true
+          }
+        ],
+        "documents": [
+          {
+            "type": "Claims history",
+            "present": false,
+            "adjustment": -0.1
+          }
+        ],
+        "quality": "decision_ready",
+        "gaps": [
+          "required_document_missing:advisory|missing=Claims history"
+        ]
+      }
+    },
+    "no_data": [],
+    "trusted_documents": [
+      "Policy schedule"
+    ],
+    "quality": {
+      "state": "decision_ready",
+      "blockers": 0,
+      "material": 0,
+      "advisory": 1,
+      "recommendation_gaps": []
+    },
+    "privacy": {
+      "sentinel_hits": [],
+      "features_redacted": true
+    }
+  }
+}

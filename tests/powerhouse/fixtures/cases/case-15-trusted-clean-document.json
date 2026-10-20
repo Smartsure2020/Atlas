@@ -1,0 +1,42 @@
+{
+  "fixture_schema": "powerhouse-case-v1",
+  "id": "case-15-trusted-clean-document",
+  "title": "Trusted exact-clean document present",
+  "description": "One active, exactly-clean Claims history is trusted and satisfies Alpha's requirement. An expired-clean Risk survey and a pending Policy schedule sit beside it and must not count.",
+  "intent": [
+    "trusted_documents is exactly ['Claims history']",
+    "Claims history is present; no confidence penalty",
+    "only active + scan_status = clean documents count (document-trust boundary unchanged)",
+    "decision_ready"
+  ],
+  "rule_defaults": {
+    "notes": null, "rating_notes": null, "line_of_business": "commercial", "source": "manual",
+    "source_document_id": "doc-guide", "source_file_name": "guide.pdf", "source_page": 4,
+    "source_section": "Section 4", "source_quote": "Synthetic guideline excerpt.",
+    "ingestion_confidence": 0.95, "is_active": true, "updated_at": "2026-10-15T00:00:00.000Z",
+    "preferred_risks": [], "caution_risks": [], "declined_risks": [], "required_documents": [], "referral_triggers": []
+  },
+  "reviewed_compact": {
+    "schema_version": "case-v1",
+    "extracted_client": { "occupation_or_business_description": "transport fleet", "risk_address": "1 Synthetic Road", "entity_type": "Company" },
+    "current_cover": { "cover_sections": ["Commercial motor"], "endorsements": [], "exclusions": [] },
+    "risk_classification": {
+      "product_line": "commercial motor", "risk_type": "transport", "primary_risk_type": "transport fleet",
+      "secondary_risk_types": [], "business_sector": "transport", "complexity_level": "medium"
+    },
+    "red_flags": []
+  },
+  "documents": [
+    { "document_type": "Claims history", "status": "active", "scan_status": "clean" },
+    { "document_type": "Risk survey", "status": "expired", "scan_status": "clean" },
+    { "document_type": "Policy schedule", "status": "active", "scan_status": "pending" }
+  ],
+  "insurers": [
+    { "id": "insurer-alpha", "name": "Alpha Insurance", "active": true },
+    { "id": "insurer-beta", "name": "Beta Insurance", "active": true }
+  ],
+  "rules": [
+    { "id": "alpha-motor", "insurer_id": "insurer-alpha", "insurer_name": "Alpha Insurance", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "preferred", "preferred_risks": ["transport fleet"], "required_documents": ["Claims history"] },
+    { "id": "beta-motor", "insurer_id": "insurer-beta", "insurer_name": "Beta Insurance", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "standard" }
+  ]
+}

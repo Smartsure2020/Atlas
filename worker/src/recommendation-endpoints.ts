@@ -122,7 +122,7 @@ function valueStrings(value: unknown): string[] {
  * behaviour (available:true) so the alerting/matching contracts do not
  * silently change under legacy data.
  */
-function resolveConfidenceProvenance(
+export function resolveConfidenceProvenance(
   reviewed: Record<string, unknown>,
   extracted: Record<string, unknown>,
   columnConfidence: unknown
@@ -159,7 +159,7 @@ function resolveConfidenceProvenance(
   return { overall_confidence: 0.7, overall_confidence_available: true };
 }
 
-function deriveRisk(
+export function deriveRisk(
   reviewed: Record<string, unknown>,
   availableDocs: string[],
   overallConfidence: number,
