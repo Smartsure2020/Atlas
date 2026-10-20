@@ -18,7 +18,8 @@ for evidence, quality or provenance, and nothing here changes a score.
 | Evidence schema | `recommendation-evidence-v1` → `recommendation-evidence-v2` (§4). v1 rows stay readable. |
 | Recommendation fingerprint | Now includes matcher, taxonomy and evidence-schema versions (§6). |
 | `reasoning_json.matcher_input` | New rows no longer store client free text (§8). Historical rows untouched. |
-| UI | Evidence Mode on the recommendation panel (§9). |
+| UI | Evidence Mode on the recommendation panel (§10). |
+| Acceptance | One-command deterministic benchmark, `npm run test:powerhouse-acceptance` (§11). |
 | Access | Unchanged. `GET /recommendation` still requires `roleCanViewUnderwritingIntelligence`; brokers remain denied. |
 | Migrations | None. `evidence_json` is untyped jsonb. |
 
@@ -39,6 +40,16 @@ for evidence, quality or provenance, and nothing here changes a score.
   and the quality gate raises it (`scored_rule_selection_tie`).
 * Proven by a 200-shuffle property test, a handler-level byte-identical test, and
   tie fixtures.
+* **Every possible difference from v1 is one of exactly two intentional classes**
+  (anything else fails the differential): `order_only` — equal-score insurers
+  appear in the defined name/id order instead of arrival order (v1 listed
+  portfolio-only insurers after product-rule insurers; the ranking shape,
+  `(ruled_out, score)` down the list, is proven identical); and `tie_rule` — when
+  several rules tie on taxonomy quality, the canonical-first rule is scored
+  instead of "whichever row the database returned first". For a given database
+  state v1's choice was arbitrary, so a re-run can differ from an old result
+  **only** where such a tie exists; when the tied rules disagree the quality gate
+  now says so.
 
 ### 2.2 Section intelligence (2.1, 2.4)
 
@@ -269,16 +280,107 @@ page/quote provenance for *reviewed extraction facts* (the extraction contract d
 not carry it), so `source_quote` is never presented as proof of a specific term —
 the UI labels it "Source excerpt for this rule".
 
-## 10. Business decisions required (not code decisions)
+## 10. Evidence Mode UI (P1B)
 
-1. **Multi-section aggregation** (§3, five questions).
-2. **Rule-tie policy:** keep policy-neutral identity ordering, or define a
-   business tie-break (e.g. prefer the more restrictive rule).
+Source of truth: `evidence_json` only. View model: `src/lib/recommendation-evidence.ts`
+(separate from the API client). Components: `src/components/EvidenceMode.tsx`.
+Integration: `RecommendationPanel` (one `IntelligenceQualityPanel` under the
+summary, one "Why Atlas ranked this" button per insurer, one drawer).
+
+**Recommendation level** — "Intelligence quality": reliance state, blocker /
+material / advisory counts, the limitations that affect reliance (each names its
+insurer and section), a plain statement that sections are evaluated separately
+and not combined into the score, and an "Insurers without appetite data" list
+("No active appetite data available" — never a score, decline or poor fit).
+
+**Per insurer** (drawer, in this order): Ranking explanation (rank, internal score,
+what strengthened / weakened it with exact points, score and confidence
+reconciliation) · Rules applied (insurer-owned matched term + the authoritative
+input-source label + exact contribution) · Requested sections and rules considered
+(v2) · Referral and decline triggers (hard decline, possible decline needing human
+confirmation, referral, caution — kept distinct) · Required documents · Trusted
+evidence · Evidence gaps — what Atlas does not know · Source guideline provenance ·
+Intelligence quality.
+
+Rules the UI keeps (each has a test): display, never recompute; missing provenance
+is stated ("Not recorded", dashed underline, "Provenance incomplete" badge — never
+colour alone); the excerpt is labelled "Source excerpt for this rule" and not
+offered as proof of a matched term; "Incomplete" is worded as a reliance signal
+("Nothing is blocked or declined by this"); ordinary users see no raw JSON and no
+technical IDs; managers and administrators (existing `canManage` convention) get a
+collapsed "Diagnostics (internal staff)" area of labelled values; no raw document
+bodies, storage paths or signed URLs exist anywhere in the data it receives.
+
+| State | Behaviour |
+| --- | --- |
+| v2 | Full quality panel + drawer |
+| v1 complete / gaps_present | Coarse status as recorded; "Recorded before the intelligence quality gate"; sections / considered rules / severities shown as not captured; gaps listed as "Not classified (evidence v1)" |
+| `evidence_json` null / absent | "Detailed evidence was not captured for this historical recommendation."; no evidence button |
+| unknown or malformed | "Evidence format not supported"; recommendation still renders |
+| no-data insurer | "No active appetite data available" |
+| no trusted documents | "No trusted documents were available" |
+
+Tests: `src/test/recommendation-evidence.test.ts` (22) and
+`src/test/evidence-mode.test.tsx` (31), rendered against the **real** rows the
+backend produces (`tests/powerhouse/fixtures/snapshots`, drift-checked by the
+Worker suite) — including axe, Escape / focus return, privacy sentinels, and the
+historical cases.
+
+## 11. Deterministic acceptance benchmark (P1D)
+
+`npm run test:powerhouse-acceptance` (also in `npm test`), no network. It runs, in
+order: the 15 cases; the frontend snapshot drift check; the v1 baseline golden;
+matcher v2; quality gate; evidence v2; persistence contract; a randomised
+old-vs-new differential; and the Phase 1A 500-fixture differential.
+
+| # | Case | What it pins |
+| --- | --- | --- |
+| 1 | Single-section baseline | v1 parity; ranking preferred > standard > caution > ruled out; decision_ready |
+| 2 | Multi-section, compatible | both sections evaluated; only the aggregation advisory |
+| 3 | Multi-section, preferred + caution | caution visible, material, score unchanged |
+| 4 | Multi-section, referral | unreflected referral visible and does not set the v1 flag; reflected referral costs 8 |
+| 5 | Multi-section, hard decline | hidden declines are blockers; ruled-out insurer's is advisory; ranking unchanged |
+| 6 | AI-inferred decline | stays `soft_decline_referral`, never hard |
+| 7 | Required document missing | confidence −0.10 only, advisory |
+| 8 | Document required by product + portfolio | one canonical outcome, one penalty |
+| 9 | No-appetite-data insurers | explicit, null rank/score, no state |
+| 10 | Incomplete provenance | missing stays missing; advisory vs material by materiality |
+| 11 | Ties | name-then-id insurer order; canonical rule tie flagged as a blocker |
+| 12 | Privacy sentinels | seven sentinel classes absent from every persisted column |
+| 13 | Historical evidence v1 / null | read back verbatim, vocabulary not rewritten |
+| 14 | No trusted documents | empty trusted set; `no_trusted_documents` material; caution |
+| 15 | Trusted exact-clean document | only active + clean counts; decision_ready |
+
+Per case (committed `*.expected.json` **plus** hand-written intent assertions that
+do not come from the golden): insurer order, score, rank, rule effects,
+referral/decline state, section outcomes, document outcomes, quality state,
+evidence schema, privacy result. Every case is re-run with reversed and shuffled
+appetite rows and must persist an identical row, and is compared with a **frozen
+copy of the production v1 matcher** (`tests/powerhouse/reference`, verbatim from
+`34441a0`) and classified `identical | order_only | tie_rule` — anything else
+fails.
+
+Differential (3000 randomised fixtures per corpus, single- and multi-section):
+corpus A (canonical rows) — every insurer's answer equals v1; corpus B (rows
+shuffled, names unrelated to ids, i.e. production's unspecified DB order) — every
+difference is a named, intentional class. Counts are printed by the run.
+
+## 12. Business decisions required (not code decisions)
+
+1. **Multi-section aggregation** (§3, five questions). Until answered, Atlas
+   shows section outcomes and flags unreflected declines/referrals/cautions but
+   does not combine them.
+2. **Rule-tie policy:** keep the policy-neutral identity ordering (and the
+   blocker when tied rules disagree on a decline), or define a business tie-break
+   (e.g. prefer the more restrictive rule).
 3. **Whether an `incomplete` recommendation should ever require sign-off** (today
-   it only informs).
+   it only informs and never blocks).
 4. **Raw-text reconstruction vs privacy** (§8) — confirm the trade.
+5. **Who may see rule source excerpts and the diagnostics area** — currently the
+   existing underwriting-intelligence roles (excerpts) and `canManage` roles
+   (diagnostics).
 
-## 11. Known remaining limitations
+## 13. Known remaining limitations
 
 * The recommendation fingerprint is a 32-bit hash and does not include the active
   insurer list (so adding an insurer with no rules does not invalidate a cached
@@ -288,3 +390,35 @@ the UI labels it "Source excerpt for this rule".
 * `outcome_reasons.evidence_gaps` (v1-style strings) is retained for continuity;
   `quality.gaps` is the authoritative list in v2.
 * Reviewed-fact page/quote provenance is unavailable upstream.
+
+## 14. Verification record
+
+Run on the final branch head (nothing pushed, migrated or deployed).
+
+| Check | Result |
+| --- | --- |
+| Backend, every script in `npm test` (45; compiled once, same node commands) | all exit 0, ~1025 tests, 0 failures |
+| Matcher / recommendation / Phase 1A evidence + handler / Phase 24 document trust | pass |
+| `npm run test:powerhouse-acceptance` | 108 tests, 0 failures; differential: zero unexpected differences |
+| Phase 1A 500-fixture differential | unchanged pinned hash `b14d9927…a36` |
+| Frontend vitest | 724 tests in 40 files (baseline 671 in 38; +53 new); see note |
+| Frontend `tsc -b` + production build | pass |
+| Worker `tsc --noEmit` | pass |
+| `wrangler deploy --dry-run --env production` (local bundle; nothing uploaded) | pass, bindings unchanged, pipeline `legacy`, no Graph vars |
+| `git diff --check` | clean |
+
+Note on the frontend suite: under full-suite parallel load a few **unrelated**
+tests are timing-flaky on this machine (`WorkQueue` first test, `pipeline-dashboard`
+"manager defaults to All", `insurer-intelligence-workbench` "preserves the user's
+tab choice"). The untouched baseline `34441a0` fails `WorkQueue` the same way under
+the same load (670/671), and every one of these files passes when run on its own
+on this branch (the insurer-intelligence file 6/6, WorkQueue + pipeline-dashboard
+48/48). The 53 new tests passed in every run.
+
+Old-vs-new matcher differential (3000 randomised fixtures per corpus, frozen v1
+reference): scoring identical for every insurer in every fixture with canonical
+rows (single-section 1501 identical + 11 order_only; multi-section 1479 identical
++ 9 order_only; 0 tie_rule); with production-like unspecified row order every
+difference is `order_only` or `tie_rule` (single-section 733 / 344 / 435;
+multi-section 639 / 268 / 581 — identical / order_only / tie_rule); unexpected
+differences 0; live-matcher order-invariance failures 0.

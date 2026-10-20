@@ -154,3 +154,14 @@ performed during the remediation.
   expanded beyond its current one-best-product-rule-per-insurer behavior.
 - Introduce a deliberate quality-gap severity model and broader quality-gap
   redesign rather than treating every gap as equivalent.
+
+## Status after Powerhouse Batch 2
+
+The Phase 2 backlog above was addressed on `powerhouse/p1b-p2-intelligence-quality`
+(see `powerhouse-p1b-p2-intelligence-quality.md`): fingerprint versioning,
+deterministic appetite and tie ordering, privacy-minimised
+`reasoning_json.matcher_input` for new rows, considered-rule preservation,
+severity-classified quality, and the `recommendation-evidence-v2` schema.
+Per-cover-section **scoring** is intentionally NOT done: it needs a business
+decision (documented there). This Phase 1A document describes the v1 contract
+and is left as the historical record of what v1 stored.

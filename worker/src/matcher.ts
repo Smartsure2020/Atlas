@@ -556,8 +556,10 @@ export function canonicalAppetiteOrder(rows: readonly AppetiteRow[]): AppetiteRo
   return rows
     .map((row) => ({
       row,
-      productKey: normTaxonomy(row.product_line),
-      riskKey: normTaxonomy(row.risk_type),
+      // Null-safe: ordering must never be less tolerant of a malformed row than
+      // the v1 matcher was (v1 never inspected inactive rows at all).
+      productKey: normTaxonomy(row.product_line ?? ""),
+      riskKey: normTaxonomy(row.risk_type ?? ""),
     }))
     .sort(
       (a, b) =>
@@ -813,7 +815,8 @@ export function matchInsurers(
   const productByInsurer = new Map<string, AppetiteRow[]>();
   const portfolioByInsurer = new Map<string, AppetiteRow[]>();
   // Canonical order: nothing below may depend on the order rows arrived in.
-  for (const row of canonicalAppetiteOrder(allAppetite)) {
+  // Inactive rows are dropped first, exactly as v1 ignored them.
+  for (const row of canonicalAppetiteOrder(allAppetite.filter((candidate) => candidate.is_active))) {
     if (!row.is_active) continue;
     if (isPortfolio(row)) {
       const arr = portfolioByInsurer.get(row.insurer_id) ?? [];

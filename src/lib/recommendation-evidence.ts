@@ -772,7 +772,9 @@ export function recommendationQuality(view: EvidenceView): RecommendationQuality
         insurerName: gap.insurer_id ? names.get(gap.insurer_id) ?? null : null,
       })),
       scoringStatement:
-        "Each insurer's score comes from its single best-matching product rule plus any portfolio rules. Requested cover sections are evaluated separately and are not combined into the score.",
+        evidence.scoring_scope.section_outcomes === "evaluated_not_aggregated"
+          ? "Each insurer's score comes from its single best-matching product rule plus any portfolio rules. Requested cover sections are evaluated separately and are not combined into the score."
+          : null,
       requestedSections: evidence.requested_sections.map((item) => item.section),
       matcherVersion: evidence.provenance.matcher_version,
     };

@@ -289,6 +289,14 @@ test("15. requestedSectionsOf de-duplicates by canonical key and ignores blanks"
   deepEq(requestedSectionsOf(baseRisk({ section_candidates: undefined })), [], "legacy input without sections");
 });
 
+test("15b. an INACTIVE malformed row cannot break ordering (v1 never inspected inactive rows)", () => {
+  const malformed = { ...baseRule({ id: "ghost", is_active: false }), product_line: undefined, risk_type: undefined } as unknown as AppetiteRow;
+  const result = matchInsurers(baseRisk(), [malformed, baseRule({ id: "live" })]);
+  eq(result.insurers.length, 1, "the inactive row is ignored");
+  eq(result.insurers[0].scored_against_appetite_id, "live", "scored against the active rule");
+  deepEq(canonicalAppetiteOrder([malformed, baseRule({ id: "live" })]).map((row) => row.id).sort(), ["ghost", "live"], "ordering itself is null-safe");
+});
+
 test("16. v1 projection of a single-section submission is unchanged by section intelligence", () => {
   const result = matchInsurers(baseRisk(), [baseRule({ id: "x", appetite_level: "preferred", preferred_risks: ["transport fleet"] })]);
   const projected = projectV1(result);
