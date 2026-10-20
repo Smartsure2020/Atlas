@@ -10,7 +10,7 @@
 import { buildRecommendationFingerprint } from "../../worker/src/phase7-core.js";
 import { MATCHER_VERSION, MATCHER_VERSION_V1 } from "../../worker/src/matcher.js";
 import { MATCHER_INPUT_SNAPSHOT_MINIMISED } from "../../worker/src/recommendation-evidence.js";
-import { RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 } from "../../worker/src/recommendation-evidence-v2.js";
+import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 } from "../../worker/src/recommendation-evidence-v2.js";
 import { TAXONOMY_VERSION } from "../../worker/src/taxonomy.js";
 import {
   EXT,
@@ -125,6 +125,8 @@ const fpBase: Parameters<typeof buildRecommendationFingerprint>[0] = {
   activeRuleIds: ["rule-a:1"], availableDocuments: ["Claims history"],
   matcherVersion: MATCHER_VERSION, taxonomyVersion: TAXONOMY_VERSION,
   evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+  qualityModelVersion: QUALITY_MODEL_VERSION,
+  activeInsurers: [{ id: "insurer-a", name: "A Insurance" }],
 };
 
 // ---------------------------------------------------------------------------
@@ -159,11 +161,46 @@ test("5. every version component is required by the type system (compile-time gu
   void (() => buildRecommendationFingerprint({ ...fpBase, taxonomyVersion: undefined }));
   // @ts-expect-error evidenceSchemaVersion is required
   void (() => buildRecommendationFingerprint({ ...fpBase, evidenceSchemaVersion: undefined }));
+  // @ts-expect-error qualityModelVersion is required
+  void (() => buildRecommendationFingerprint({ ...fpBase, qualityModelVersion: undefined }));
+  // @ts-expect-error the active insurer inventory is required
+  void (() => buildRecommendationFingerprint({ ...fpBase, activeInsurers: undefined }));
 });
 
-async function unforcedRunWithCompletedJob(fingerprint: string): Promise<Row> {
+test("5b. fingerprint changes when the quality model version changes", () => {
+  assert(buildRecommendationFingerprint(fpBase) !== buildRecommendationFingerprint({ ...fpBase, qualityModelVersion: "recommendation-quality-v0" }), "quality model version is part of the key");
+});
+
+test("5c. the recorded quality model version is the one the fingerprint uses", async () => {
+  const run = await runThroughHandler(input());
+  assert(run.row, "row persisted");
+  eq(((run.row.evidence_json as Row).quality as Row).model, QUALITY_MODEL_VERSION, "evidence records the quality model");
+  const live: string = QUALITY_MODEL_VERSION;
+  assert(/^recommendation-quality-v(\d+)$/.test(live) && live !== "recommendation-quality-v1", "quality model bumped past v1 (R2/R4/R9 changed classification)");
+});
+
+test("5d. active insurer inventory: any add / remove / rename changes the fingerprint; order and duplicates do not", () => {
+  const a = { id: "insurer-a", name: "A Insurance" };
+  const b = { id: "insurer-b", name: "B Insurance" };
+  const base = buildRecommendationFingerprint({ ...fpBase, activeInsurers: [a, b] });
+  assert(base !== buildRecommendationFingerprint({ ...fpBase, activeInsurers: [a] }), "removal");
+  assert(base !== buildRecommendationFingerprint({ ...fpBase, activeInsurers: [a, b, { id: "insurer-c", name: "C" }] }), "addition");
+  assert(base !== buildRecommendationFingerprint({ ...fpBase, activeInsurers: [a, { ...b, name: "B Renamed" }] }), "rename");
+  eq(base, buildRecommendationFingerprint({ ...fpBase, activeInsurers: [b, a] }), "array order is irrelevant");
+  eq(base, buildRecommendationFingerprint({ ...fpBase, activeInsurers: [b, a, a] }), "duplicates are irrelevant");
+  assert(buildRecommendationFingerprint({ ...fpBase, activeInsurers: [] }) !== buildRecommendationFingerprint({ ...fpBase, activeInsurers: [a] }), "empty vs one");
+});
+
+const ALL_INSURERS = [
+  { id: "insurer-a", name: "A Insurance", active: true },
+  { id: "insurer-b", name: "B Insurance", active: true },
+  { id: "insurer-c", name: "C No Data", active: true },
+];
+
+async function unforcedRunWithCompletedJob(fingerprint: string, overrides: Partial<HarnessInput> = {}): Promise<Row> {
   // A previously completed recommendation job keyed by `fingerprint`.
   const stub = installRestStub(buildTables(input({
+    ...overrides,
     extraTables: {
       atlas_jobs: [{
         id: "job-previous", status: "completed", job_type: "recommendation", submission_id: SUB,
@@ -180,10 +217,15 @@ async function unforcedRunWithCompletedJob(fingerprint: string): Promise<Row> {
   }
 }
 
-function liveFingerprint(overrides: Partial<typeof fpBase> = {}): string {
+/** The fingerprint the endpoint computes for the default input (active insurers are the `active: true` rows). */
+function liveFingerprint(
+  overrides: Partial<typeof fpBase> = {},
+  insurers: { id: string; name: string; active: boolean }[] = ALL_INSURERS
+): string {
   const tables = buildTables(input());
   const activeRuleIds = tables.atlas_insurer_appetite.map((r) => `${r.id}:${r.updated_at ?? ""}`);
-  return buildRecommendationFingerprint({ ...fpBase, activeRuleIds, ...overrides });
+  const activeInsurers = insurers.filter((i) => i.active).map((i) => ({ id: i.id, name: i.name }));
+  return buildRecommendationFingerprint({ ...fpBase, activeRuleIds, activeInsurers, ...overrides });
 }
 
 test("6. a job completed under the SAME versions is answered from cache (unchanged_input)", async () => {
@@ -205,6 +247,82 @@ test("8. a job completed under a different taxonomy version is NOT served from c
 test("9. a job completed under a different evidence schema is NOT served from cache", async () => {
   const body = await unforcedRunWithCompletedJob(liveFingerprint({ evidenceSchemaVersion: "recommendation-evidence-v1-old" }));
   assert(body.skipped !== true, "stale evidence-schema result must be recomputed");
+});
+
+test("9b. a job completed under a different quality model version is NOT served from cache", async () => {
+  const body = await unforcedRunWithCompletedJob(liveFingerprint({ qualityModelVersion: "recommendation-quality-v1" }));
+  assert(body.skipped !== true, "stale quality-model result must be recomputed");
+});
+
+// ---------------------------------------------------------------------------
+// R1 — the active insurer inventory participates in the cache decision.
+// `no_data_for` (and therefore evidence and quality) depends on it.
+// ---------------------------------------------------------------------------
+
+test("R1-A. ACTIVATING a zero-rule insurer invalidates the cache (recompute)", async () => {
+  const before = ALL_INSURERS.map((i) => (i.id === "insurer-c" ? { ...i, active: false } : i));
+  const cached = liveFingerprint({}, before);
+  const body = await unforcedRunWithCompletedJob(cached, { insurers: ALL_INSURERS });
+  assert(body.skipped !== true, "insurer-c was inactive when cached and is active now: must recompute");
+});
+
+test("R1-B. DEACTIVATING a zero-rule insurer invalidates the cache (recompute)", async () => {
+  const cached = liveFingerprint({}, ALL_INSURERS);
+  const now = ALL_INSURERS.map((i) => (i.id === "insurer-c" ? { ...i, active: false } : i));
+  const body = await unforcedRunWithCompletedJob(cached, { insurers: now });
+  assert(body.skipped !== true, "insurer-c was active when cached and is inactive now: must recompute");
+});
+
+test("R1-C. RENAMING an active zero-rule insurer invalidates the cache (recompute)", async () => {
+  const cached = liveFingerprint({}, ALL_INSURERS);
+  const now = ALL_INSURERS.map((i) => (i.id === "insurer-c" ? { ...i, name: "C Renamed Mutual" } : i));
+  const body = await unforcedRunWithCompletedJob(cached, { insurers: now });
+  assert(body.skipped !== true, "the no-data insurer's persisted name would change: must recompute");
+});
+
+test("R1-D. an IDENTICAL active inventory is still answered from the cache", async () => {
+  const body = await unforcedRunWithCompletedJob(liveFingerprint({}, ALL_INSURERS), { insurers: ALL_INSURERS });
+  eq(body.skipped, true, "unchanged inventory -> cache hit");
+  eq(body.reason, "unchanged_input", "reason");
+});
+
+test("R1-E. database row order of the insurer inventory does not change the fingerprint", async () => {
+  const cached = liveFingerprint({}, ALL_INSURERS);
+  const reversed = [...ALL_INSURERS].reverse();
+  const body = await unforcedRunWithCompletedJob(cached, { insurers: reversed });
+  eq(body.skipped, true, "same inventory in a different order -> cache hit");
+});
+
+test("R1-F. an inactive insurer that was never active changes nothing (cache hit)", async () => {
+  const withDormant = [...ALL_INSURERS, { id: "insurer-z", name: "Dormant", active: false }];
+  const body = await unforcedRunWithCompletedJob(liveFingerprint({}, ALL_INSURERS), { insurers: withDormant });
+  eq(body.skipped, true, "inactive insurers are not part of the inventory");
+});
+
+test("R1-G. the persisted fingerprint equals the one computed from the inventory the result was built from", async () => {
+  const run = await runThroughHandler(input({ insurers: ALL_INSURERS }));
+  assert(run.row, "row persisted");
+  const evidence = run.row.evidence_json as Row;
+  eq((evidence.provenance as Row).recommendation_input_fingerprint, liveFingerprint({}, ALL_INSURERS), "evidence fingerprint = live fingerprint");
+  const noData = (evidence.insurers as Row[]).filter((item) => item.status === "no_appetite_data").map((item) => item.insurer_id);
+  deepEq(noData, ["insurer-c"], "the no-data insurer is the one the fingerprint covered");
+});
+
+test("R1-H. the inventory is read ONCE (reused for no_data_for) and a failed read fails closed with no job", async () => {
+  const ok = await runThroughHandler(input({ insurers: ALL_INSURERS }));
+  eq(ok.requests.filter((item) => item.table === "atlas_insurers" && item.method === "GET").length, 1, "one inventory query");
+
+  const stub = installRestStub(buildTables(input()), { failTables: ["atlas_insurers"] });
+  try {
+    const res = await handleRunRecommendation(SUB, forcedRequest(), env(), MANAGER);
+    const body = (await res.json()) as Row;
+    eq(res.status, 503, "fail closed");
+    eq(body.error, "insurer_inventory_unavailable", "stable code");
+    eq(stub.writes("atlas_recommendations").length, 0, "no recommendation");
+    eq(stub.writes("atlas_jobs").length, 0, "no job state change for an unknown inventory");
+  } finally {
+    stub.restore();
+  }
 });
 
 // ---------------------------------------------------------------------------

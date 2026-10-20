@@ -80,6 +80,14 @@ export function buildRecommendationFingerprint(input: {
   matcherVersion: string;
   taxonomyVersion: string;
   evidenceSchemaVersion: string;
+  /** Version of the quality classification table that shapes the persisted quality block. */
+  qualityModelVersion: string;
+  /**
+   * The ACTIVE insurer inventory (id + name). It determines `no_data_for` — the
+   * insurers with zero active rules — so activating, deactivating or renaming an
+   * insurer changes the persisted recommendation even when no appetite rule did.
+   */
+  activeInsurers: { id: string; name: string }[];
 }) {
   return inputFingerprint({
     type: "recommendation",
@@ -91,7 +99,20 @@ export function buildRecommendationFingerprint(input: {
     matcher_version: input.matcherVersion,
     taxonomy_version: input.taxonomyVersion,
     evidence_schema_version: input.evidenceSchemaVersion,
+    quality_model_version: input.qualityModelVersion,
+    active_insurers: canonicalInsurerInventory(input.activeInsurers),
   });
+}
+
+/**
+ * Canonical, order-independent form of the active insurer inventory: unique
+ * `[id, name]` pairs sorted by UTF-16 code units (never locale-dependent), so the
+ * database's row order can never change a fingerprint.
+ */
+export function canonicalInsurerInventory(insurers: readonly { id: string; name: string }[]): [string, string][] {
+  const pairs = new Map<string, [string, string]>();
+  for (const insurer of insurers) pairs.set(`${insurer.id}\u0000${insurer.name}`, [String(insurer.id), String(insurer.name)]);
+  return [...pairs.values()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
 }
 
 export function buildQuoteReviewFingerprint(input: {

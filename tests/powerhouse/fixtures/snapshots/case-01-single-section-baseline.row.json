@@ -391,7 +391,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_a66381d0"
+      "recommendation_input_fingerprint": "fp_a8f8fdae"
     },
     "matcher_input": {
       "product_candidates": [
@@ -772,6 +772,7 @@
           "basis": "only_candidate",
           "tied_rule_ids": [],
           "tied_rules_disagree": false,
+          "tie_differences": [],
           "matching_rule_count": 1,
           "omitted_risk_only_rule_count": 0
         },
@@ -787,10 +788,12 @@
             "selection_basis": "only_candidate",
             "tied_rule_ids": [],
             "tied_rules_disagree": false,
+            "tie_differences": [],
             "outcome": "preferred",
             "reflected_in_insurer_outcome": true
           }
         ],
+        "implied_product_evaluations": [],
         "considered_rules": [
           {
             "rule_id": "alpha-motor",
@@ -806,6 +809,7 @@
             ],
             "scored": true,
             "not_scored_reason": null,
+            "listed_because": "scored_rule",
             "conditions": [
               {
                 "kind": "preferred",
@@ -823,6 +827,9 @@
               }
             ],
             "snapshot_resolved": true,
+            "required_documents": [
+              "Claims history"
+            ],
             "source": "manual",
             "source_document_id": "doc-guide",
             "source_file_name": "guide.pdf",
@@ -922,6 +929,7 @@
           "basis": "only_candidate",
           "tied_rule_ids": [],
           "tied_rules_disagree": false,
+          "tie_differences": [],
           "matching_rule_count": 1,
           "omitted_risk_only_rule_count": 0
         },
@@ -937,10 +945,12 @@
             "selection_basis": "only_candidate",
             "tied_rule_ids": [],
             "tied_rules_disagree": false,
+            "tie_differences": [],
             "outcome": "standard",
             "reflected_in_insurer_outcome": true
           }
         ],
+        "implied_product_evaluations": [],
         "considered_rules": [
           {
             "rule_id": "beta-motor",
@@ -956,8 +966,10 @@
             ],
             "scored": true,
             "not_scored_reason": null,
+            "listed_because": "scored_rule",
             "conditions": [],
             "snapshot_resolved": true,
+            "required_documents": [],
             "source": "manual",
             "source_document_id": "doc-guide",
             "source_file_name": "guide.pdf",
@@ -1099,6 +1111,7 @@
           "basis": "only_candidate",
           "tied_rule_ids": [],
           "tied_rules_disagree": false,
+          "tie_differences": [],
           "matching_rule_count": 1,
           "omitted_risk_only_rule_count": 0
         },
@@ -1114,10 +1127,12 @@
             "selection_basis": "only_candidate",
             "tied_rule_ids": [],
             "tied_rules_disagree": false,
+            "tie_differences": [],
             "outcome": "caution",
             "reflected_in_insurer_outcome": true
           }
         ],
+        "implied_product_evaluations": [],
         "considered_rules": [
           {
             "rule_id": "gamma-motor",
@@ -1133,6 +1148,7 @@
             ],
             "scored": true,
             "not_scored_reason": null,
+            "listed_because": "scored_rule",
             "conditions": [
               {
                 "kind": "caution",
@@ -1146,6 +1162,7 @@
               }
             ],
             "snapshot_resolved": true,
+            "required_documents": [],
             "source": "manual",
             "source_document_id": "doc-guide",
             "source_file_name": "guide.pdf",
@@ -1244,6 +1261,7 @@
           "basis": "only_candidate",
           "tied_rule_ids": [],
           "tied_rules_disagree": false,
+          "tie_differences": [],
           "matching_rule_count": 1,
           "omitted_risk_only_rule_count": 0
         },
@@ -1259,10 +1277,12 @@
             "selection_basis": "only_candidate",
             "tied_rule_ids": [],
             "tied_rules_disagree": false,
+            "tie_differences": [],
             "outcome": "hard_decline",
             "reflected_in_insurer_outcome": true
           }
         ],
+        "implied_product_evaluations": [],
         "considered_rules": [
           {
             "rule_id": "delta-motor",
@@ -1278,6 +1298,7 @@
             ],
             "scored": true,
             "not_scored_reason": null,
+            "listed_because": "scored_rule",
             "conditions": [
               {
                 "kind": "hard_decline",
@@ -1286,6 +1307,7 @@
               }
             ],
             "snapshot_resolved": true,
+            "required_documents": [],
             "source": "manual",
             "source_document_id": "doc-guide",
             "source_file_name": "guide.pdf",
@@ -1304,7 +1326,7 @@
       }
     ],
     "quality": {
-      "model": "recommendation-quality-v1",
+      "model": "recommendation-quality-v2",
       "state": "decision_ready",
       "blocker_count": 0,
       "material_count": 0,

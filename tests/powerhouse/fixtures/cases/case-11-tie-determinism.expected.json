@@ -48,6 +48,17 @@
             "reflected": false
           }
         ],
+        "implied_products": [],
+        "tie_differences": [
+          "appetite_level",
+          "hard_decline",
+          "preferred_terms"
+        ],
+        "considered": [
+          "r-gamma-motor|scored_rule|scored|docs=",
+          "r-gamma-git|section_applicable|-|docs="
+        ],
+        "omitted_risk_only": 0,
         "documents": [],
         "quality": "incomplete",
         "gaps": [
@@ -86,6 +97,12 @@
             "reflected": false
           }
         ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "r-alpha|scored_rule|scored|docs="
+        ],
+        "omitted_risk_only": 0,
         "documents": [],
         "quality": "caution",
         "gaps": [
@@ -123,6 +140,12 @@
             "reflected": false
           }
         ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "r-beta|scored_rule|scored|docs="
+        ],
+        "omitted_risk_only": 0,
         "documents": [],
         "quality": "caution",
         "gaps": [

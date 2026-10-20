@@ -11,6 +11,7 @@ import {
 } from "../../worker/src/matcher.js";
 import type { AppetiteRow } from "../../worker/src/matcher-types.js";
 import {
+  QUALITY_MODEL_VERSION,
   buildRecommendationEvidenceV2,
   type QualityGapCodeV2,
   type QualityGapV2,
@@ -119,7 +120,7 @@ test("1. clean single-section recommendation with full provenance is decision_re
   eq(ev.quality.state, "decision_ready", "state");
   deepEq(ev.quality.gaps, [], "no gaps at all");
   eq(scoredOf(ev, "insurer-1").quality.state, "decision_ready", "insurer state");
-  eq(ev.quality.model, "recommendation-quality-v1", "model version recorded");
+  eq(ev.quality.model, QUALITY_MODEL_VERSION, "model version recorded");
 });
 
 test("2. roll-up: any blocker => incomplete; else any material => caution; else decision_ready", () => {

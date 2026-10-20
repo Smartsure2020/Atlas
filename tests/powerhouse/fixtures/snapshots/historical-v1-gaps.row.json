@@ -231,7 +231,7 @@
     "model": "claude-sonnet-4-6",
     "prompt": "recommendation-reasoning-v1",
     "taxonomy": "2026-07-token-aliases-v1",
-    "appetite": "fp_09100963",
+    "appetite": "fp_fc49a2bd",
     "extraction": "case-v1"
   },
   "evidence_json": {

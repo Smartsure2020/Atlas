@@ -36,6 +36,12 @@
             "reflected": true
           }
         ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "alpha-motor|scored_rule|scored|docs=Claims history"
+        ],
+        "omitted_risk_only": 0,
         "documents": [
           {
             "type": "Claims history",
@@ -43,8 +49,9 @@
             "adjustment": -0.1
           }
         ],
-        "quality": "decision_ready",
+        "quality": "caution",
         "gaps": [
+          "required_documents_unevidenced:material|missing=trusted_required_document",
           "required_document_missing:advisory|missing=Claims history"
         ]
       }
@@ -54,9 +61,9 @@
       "Policy schedule"
     ],
     "quality": {
-      "state": "decision_ready",
+      "state": "caution",
       "blockers": 0,
-      "material": 0,
+      "material": 1,
       "advisory": 1,
       "recommendation_gaps": []
     },

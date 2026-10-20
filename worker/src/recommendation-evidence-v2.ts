@@ -26,7 +26,7 @@ import type {
   ConsideredRule,
   InsurerScore,
 } from "./matcher.js";
-import { requestedSectionsOf } from "./matcher.js";
+import { documentKey, requestedSectionsOf } from "./matcher.js";
 import type { AppetiteRow } from "./matcher-types.js";
 import {
   buildReviewedRiskEvidence,
@@ -73,7 +73,14 @@ export type QualityGapCodeV2 =
   | "required_document_missing"
   | "recommended_insurer_unscored"
   | "requested_sections_not_declared"
-  | "no_trusted_documents";
+  | "no_trusted_documents"
+  | "required_documents_unevidenced"
+  | "multiple_products_without_declared_sections"
+  | "implied_product_hard_decline_not_reflected"
+  | "implied_product_soft_decline_not_reflected"
+  | "implied_product_referral_not_reflected"
+  | "implied_product_caution_not_reflected"
+  | "implied_product_rule_conflict";
 
 export interface QualityGapV2 {
   /** Deterministic identity; stable across runs for the same finding. */
@@ -113,6 +120,12 @@ export interface RecommendationQualityV2 {
 export interface ConsideredRuleEvidence extends ConsideredRule {
   /** False when the rule is not in the active rule set handed to the builder. */
   snapshot_resolved: boolean;
+  /**
+   * The rule's OWN required-document set, copied point-in-time from the active
+   * rule (de-duplicated by canonical key, sorted). `null` when the rule snapshot
+   * could not be resolved — never inferred from another rule.
+   */
+  required_documents: string[] | null;
   source: "ai_extracted" | "manual" | null;
   source_document_id: string | null;
   source_file_name: string | null;
@@ -125,6 +138,12 @@ export interface ScoredInsurerOutcomeEvidenceV2 extends ScoredInsurerOutcomeEvid
   selection: InsurerSelection;
   /** One entry per requested section. NOT combined into `score`. */
   section_evaluations: SectionEvaluation[];
+  /**
+   * Product lines implied by the product candidates when NO cover section was
+   * declared and this insurer has rules for two or more of them. Empty otherwise.
+   * These are not requested sections and are not aggregated into `score`.
+   */
+  implied_product_evaluations: SectionEvaluation[];
   /** Relevant rules the selector saw, scored rule first. Bounded by relevance. */
   considered_rules: ConsideredRuleEvidence[];
   quality: InsurerQualityV2;
@@ -188,6 +207,23 @@ export interface BuildEvidenceV2Input {
   activeAppetite: AppetiteRow[];
 }
 
+/**
+ * De-duplicate by canonical document key (case, separators and spacing ignored)
+ * and sort by that key; the label kept is the code-unit-smallest spelling seen,
+ * so the result does not depend on the rule's array order.
+ */
+export function canonicalDocumentLabels(labels: readonly string[] | null | undefined): string[] {
+  const byKey = new Map<string, string>();
+  for (const label of labels ?? []) {
+    if (typeof label !== "string") continue;
+    const key = documentKey(label);
+    if (!key) continue;
+    const current = byKey.get(key);
+    if (current === undefined || compareCodeUnits(label, current) < 0) byKey.set(key, label);
+  }
+  return [...byKey.entries()].sort(([a], [b]) => compareCodeUnits(a, b)).map(([, label]) => label);
+}
+
 function consideredEvidence(
   rule: ConsideredRule,
   appetiteById: Map<string, AppetiteRow>
@@ -202,12 +238,22 @@ function consideredEvidence(
       matched_rule_terms: condition.matched_rule_terms.map((pair) => ({ ...pair })),
     })),
     snapshot_resolved: !!row,
+    required_documents: row ? canonicalDocumentLabels(row.required_documents) : null,
     source: row?.source ?? null,
     source_document_id: row?.source_document_id ?? null,
     source_file_name: row?.source_file_name ?? null,
     source_page: row?.source_page ?? null,
     source_section: row?.source_section ?? null,
     source_quote: row?.source_quote ?? null,
+  };
+}
+
+function copyEvaluation(section: SectionEvaluation): SectionEvaluation {
+  return {
+    ...section,
+    applicable_rule_ids: [...section.applicable_rule_ids],
+    tied_rule_ids: [...section.tied_rule_ids],
+    tie_differences: [...section.tie_differences],
   };
 }
 
@@ -229,12 +275,13 @@ export function buildRecommendationEvidenceV2(input: BuildEvidenceV2Input): Reco
     return {
       ...base,
       unresolved_rule_ids: [...unresolved].sort(compareCodeUnits),
-      selection: { ...insurer.selection, tied_rule_ids: [...insurer.selection.tied_rule_ids] },
-      section_evaluations: insurer.section_evaluations.map((section) => ({
-        ...section,
-        applicable_rule_ids: [...section.applicable_rule_ids],
-        tied_rule_ids: [...section.tied_rule_ids],
-      })),
+      selection: {
+        ...insurer.selection,
+        tied_rule_ids: [...insurer.selection.tied_rule_ids],
+        tie_differences: [...insurer.selection.tie_differences],
+      },
+      section_evaluations: insurer.section_evaluations.map(copyEvaluation),
+      implied_product_evaluations: (insurer.implied_product_evaluations ?? []).map(copyEvaluation),
       considered_rules: considered,
     };
   });

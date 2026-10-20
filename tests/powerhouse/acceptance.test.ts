@@ -65,6 +65,13 @@ export interface InsurerObservation {
   /** matcher_component|effect|rule|score_contribution for every non-document rule evidence */
   rule_effects: string[];
   sections: { section: string; status: string; selected: string | null; outcome: string | null; reflected: boolean }[];
+  /** Product lines implied when no cover section was declared (not requested sections). */
+  implied_products: string[];
+  /** Aspects in which the insurer-level tied rules differ (empty when equivalent or no tie). */
+  tie_differences: string[];
+  /** rule_id|listed_because|scored?|documents for every considered rule */
+  considered: string[];
+  omitted_risk_only: number;
   documents: { type: string; present: boolean; adjustment: number }[];
   quality: string;
   gaps: string[];
@@ -134,6 +141,17 @@ export function observe(row: Row, sentinels: string[] = []): Observation {
         outcome: section.outcome,
         reflected: section.reflected_in_insurer_outcome,
       })),
+      implied_products: outcome.implied_product_evaluations.map(
+        (product) => `${product.section_key}=${product.outcome}${product.reflected_in_insurer_outcome ? "*" : ""}`
+      ),
+      tie_differences: [...outcome.selection.tie_differences],
+      considered: outcome.considered_rules.map(
+        (rule) =>
+          `${rule.rule_id}|${rule.listed_because}|${rule.scored ? "scored" : "-"}|docs=${
+            rule.required_documents === null ? "null" : rule.required_documents.join("+")
+          }`
+      ),
+      omitted_risk_only: outcome.selection.omitted_risk_only_rule_count,
       documents: outcome.required_documents.map((doc) => ({
         type: doc.document_type,
         present: doc.present,
@@ -185,7 +203,13 @@ function parityFor(caseInput: ReturnType<typeof loadCase>): { class: ParityClass
   const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
   const v1 = matchInsurersV1(clone(risk), clone(active)) as unknown as MatchResult;
   const v2 = matchInsurers(clone(risk), clone(active));
-  return classifyParity(v1, v2);
+  const portfolioRuleCounts = new Map<string, number>();
+  for (const rule of active as unknown as { insurer_id: string; product_line: string; risk_type: string }[]) {
+    if (rule.product_line.trim() === "*" && rule.risk_type.trim() === "*") {
+      portfolioRuleCounts.set(rule.insurer_id, (portfolioRuleCounts.get(rule.insurer_id) ?? 0) + 1);
+    }
+  }
+  return classifyParity(v1, v2, { portfolioRuleCounts });
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +330,9 @@ const INTENTS: Record<string, Intent> = {
     assert(outcome.status === "scored", "scored");
     eq(outcome.required_documents[0].rule_evidence_ids.length, 2, "linked to BOTH the product and portfolio rule");
     eq(alpha.score, 70, "score unaffected");
+    // Remediation R9: Policy schedule is trusted but is not what Alpha requires.
+    assert(alpha.gaps.some((g) => g.startsWith("required_documents_unevidenced:material")), "nothing Alpha requires is evidenced");
+    eq(o.quality.state, "caution", "an unrelated clean document does not make this reliance-ready");
   },
   "case-09-no-appetite-data-insurer": (o, run) => {
     deepEq(o.no_data, ["insurer-epsilon", "insurer-foxtrot"], "explicit no-data outcomes, sorted by name");
@@ -356,6 +383,78 @@ const INTENTS: Record<string, Intent> = {
     deepEq(o.insurers["insurer-alpha"].documents.map((d) => [d.type, d.present]), [["Claims history", true]], "satisfied");
     eq(o.insurers["insurer-alpha"].confidence, 0.9, "no penalty");
     eq(o.quality.state, "decision_ready", "decision_ready");
+  },
+
+  // ---- Remediation cases ---------------------------------------------------
+  "case-16-tie-score-contribution": (o) => {
+    const alpha = o.insurers["insurer-alpha"];
+    eq(alpha.score, 75, "legacy score is the canonical-first rule's");
+    eq(alpha.scored_rule, "alpha-motor-a", "technical tie-break");
+    deepEq(alpha.tie_differences, ["preferred_terms"], "the choice changes the score through preferred terms");
+    assert(alpha.gaps.some((g) => g.startsWith("scored_rule_selection_tie:material")), "material, not hidden");
+    assert(alpha.gaps.some((g) => g.startsWith("section_rule_conflict:material")), "section-level too");
+    eq(alpha.quality, "caution", "no longer decision_ready");
+    eq(o.insurers["insurer-beta"].quality, "decision_ready", "no tie, no gap");
+    deepEq(o.insurer_order, ["insurer-alpha", "insurer-beta"], "ranking unchanged by the gate");
+    eq(o.quality.state, "caution", "caution");
+  },
+  "case-17-tie-required-documents": (o) => {
+    const alpha = o.insurers["insurer-alpha"];
+    deepEq(alpha.tie_differences, ["required_documents"], "only the documents differ");
+    assert(alpha.gaps.some((g) => g.startsWith("scored_rule_selection_tie:material")), "material");
+    deepEq(alpha.considered, ["alpha-motor-a|scored_rule|scored|docs=Claims history", "alpha-motor-b|section_applicable|-|docs=Risk survey"], "each rule keeps its OWN documents");
+    eq(alpha.confidence, 0.9, "the scored rule's document is present: no penalty");
+    eq(alpha.score, 100, "score unchanged by the disclosure (100 base + 5, clamped)");
+    eq(o.quality.state, "caution", "caution");
+  },
+  "case-18-multi-product-no-declared-sections": (o, run) => {
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV2;
+    deepEq(evidence.requested_sections, [], "NO requested section is invented");
+    const alpha = o.insurers["insurer-alpha"];
+    deepEq(alpha.sections, [], "no section evaluations");
+    deepEq(alpha.implied_products, ["commercial_motor=preferred*", "goods_in_transit=hard_decline"], "implied products evaluated, not scored together");
+    eq(alpha.score, 100, "legacy score unchanged");
+    eq(alpha.ruled_out, false, "NOT declined merely because sections were not declared");
+    assert(alpha.gaps.some((g) => g.startsWith("implied_product_hard_decline_not_reflected:blocker")), "hidden hard decline is a blocker");
+    assert(alpha.gaps.some((g) => g.startsWith("multiple_products_without_declared_sections:material")), "and the incompleteness is stated");
+    eq(alpha.quality, "incomplete", "incomplete");
+    const beta = o.insurers["insurer-beta"];
+    assert(beta.gaps.some((g) => g.startsWith("multiple_products_without_declared_sections:material")), "beta: cannot claim a complete evaluation");
+    eq(beta.quality, "caution", "caution, never decision_ready");
+    assert(!o.insurers["insurer-gamma"].gaps.some((g) => g.startsWith("multiple_products")), "a single implied product raises nothing");
+    eq(o.insurers["insurer-gamma"].quality, "decision_ready", "gamma decision_ready");
+    assert(o.quality.recommendation_gaps.some((g) => g.startsWith("requested_sections_not_declared:advisory")), "scope note kept");
+    eq(o.quality.state, "incomplete", "incomplete");
+  },
+  "case-19-material-risk-only-rule": (o) => {
+    const alpha = o.insurers["insurer-alpha"];
+    assert(alpha.considered.includes("alpha-cyber-transport|material_risk_only|-|docs="), "the material risk-only rule is surfaced");
+    assert(!alpha.considered.some((c) => c.startsWith("alpha-marine-transport")), "the ordinary non-material loser is not listed");
+    assert(!alpha.considered.some((c) => c.startsWith("alpha-cyber-technology")), "the rule matching neither product nor risk is not listed");
+    eq(alpha.omitted_risk_only, 1, "exactly the plain marine loser is count-only");
+    eq(alpha.score, 100, "legacy answer unchanged");
+    eq(alpha.scored_rule, "alpha-motor", "same scored rule");
+  },
+  "case-20-section-preferred-portfolio-hard-decline": (o, run) => {
+    const alpha = o.insurers["insurer-alpha"];
+    eq(alpha.ruled_out, true, "overall: ruled out");
+    deepEq(alpha.sections.map((s) => [s.outcome, s.reflected]), [["preferred", true]], "the section's own rule is preferred and reflected in section scoring");
+    assert(alpha.rule_effects.some((e) => e.startsWith("portfolio_declined|hard_decline|alpha-portfolio")), "the decline is the PORTFOLIO rule's");
+    eq(o.insurers["insurer-beta"].ruled_out, false, "beta unaffected");
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV2;
+    const outcome = evidence.insurers.find((i) => i.insurer_id === "insurer-alpha")!;
+    assert(outcome.status === "scored" && outcome.scored_against_rule_id === "alpha-portfolio", "ruled out against the portfolio rule");
+  },
+  "case-21-unrelated-clean-document": (o) => {
+    deepEq(o.trusted_documents, ["Policy schedule"], "document trust unchanged");
+    const alpha = o.insurers["insurer-alpha"];
+    eq(alpha.confidence, 0.8, "confidence penalty unchanged");
+    eq(alpha.score, 100, "score unchanged");
+    assert(!o.quality.recommendation_gaps.some((g) => g.startsWith("no_trusted_documents")), "trusted evidence is not wholly absent");
+    assert(alpha.gaps.some((g) => g.startsWith("required_documents_unevidenced:material")), "but nothing Alpha requires is evidenced");
+    eq(alpha.quality, "caution", "caution");
+    eq(o.insurers["insurer-beta"].quality, "decision_ready", "beta requires nothing");
+    eq(o.quality.state, "caution", "NOT decision_ready");
   },
 };
 
@@ -439,7 +538,7 @@ test("case-13-historical-evidence-v1 (stored v1 rows read back unchanged; v1 voc
 
 test("every case file has an expected file and an intent registered (no silent gaps in the benchmark)", () => {
   const ids = caseIds();
-  eq(ids.length, 14, "14 handler cases + case 13 (historical) = the 15 required cases");
+  eq(ids.length, 20, "14 original handler cases + 6 remediation cases (+ case 13, historical, which has no handler run)");
   for (const id of ids) {
     assert(existsSync(fixturePath(`cases/${id}.expected.json`)), `${id}: expected file`);
     assert(INTENTS[id], `${id}: intent`);

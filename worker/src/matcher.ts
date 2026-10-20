@@ -271,6 +271,20 @@ export interface RequestedSection {
   section_key: string;
 }
 
+/**
+ * The aspects in which equally good (tied) rules can differ in a way that could
+ * change the underwriting outcome or the evidence an underwriter relies on.
+ * Metadata that cannot (notes, sources, ids) is deliberately NOT compared.
+ */
+export type TieDifference =
+  | "appetite_level"
+  | "hard_decline"
+  | "soft_decline"
+  | "preferred_terms"
+  | "caution_terms"
+  | "referral_terms"
+  | "required_documents";
+
 export interface SectionEvaluation extends RequestedSection {
   status: "evaluated" | "no_applicable_rule";
   /** Product rules whose product line relates to this section, best first. */
@@ -279,12 +293,22 @@ export interface SectionEvaluation extends RequestedSection {
   selection_basis: SelectionBasis | null;
   /** Equally good rules (including the selected one) when more than one tied. */
   tied_rule_ids: string[];
-  /** True when tied rules differ in appetite level or in any condition kind. */
+  /** True when `tie_differences` is non-empty. */
   tied_rules_disagree: boolean;
+  /** Which outcome-relevant aspects differ between the tied rules (empty when equivalent). */
+  tie_differences: TieDifference[];
   outcome: SectionOutcome | null;
   /** True only when the selected rule is the one that set the insurer's score. */
   reflected_in_insurer_outcome: boolean;
 }
+
+/** Why a rule appears in `considered_rules` (highest-precedence reason). */
+export type ConsideredListReason =
+  | "scored_rule"
+  | "section_applicable"
+  | "product_relevant"
+  | "tied_for_best"
+  | "material_risk_only";
 
 export interface ConsideredRule {
   rule_id: string;
@@ -300,6 +324,7 @@ export interface ConsideredRule {
   /** True when this rule set the insurer's base outcome and score. */
   scored: boolean;
   not_scored_reason: "lower_taxonomy_quality" | "lost_tie_canonical_order" | null;
+  listed_because: ConsideredListReason;
   conditions: RuleCondition[];
 }
 
@@ -309,11 +334,14 @@ export interface InsurerSelection {
   taxonomy_quality: 1 | 2 | 3 | null;
   basis: SelectionBasis | null;
   tied_rule_ids: string[];
+  /** True when `tie_differences` is non-empty. */
   tied_rules_disagree: boolean;
+  tie_differences: TieDifference[];
   /** Product rules with quality >= 1 (the selector's candidate pool). */
   matching_rule_count: number;
   /** Matching rules NOT listed in `considered_rules`: risk-type-only matches
-   *  that neither tied for best nor relate to a requested product/section. */
+   *  that neither tied for best, nor relate to a requested product/section, nor
+   *  carry a material condition or document difference. */
   omitted_risk_only_rule_count: number;
 }
 
@@ -352,6 +380,14 @@ export interface InsurerScore {
   selection?: InsurerSelection;
   /** One entry per requested cover section. Read-only; never aggregated into `score`. */
   section_evaluations?: SectionEvaluation[];
+  /**
+   * Present ONLY when the submission declared no cover sections AND this insurer
+   * has product rules for two or more distinct product lines implied by the
+   * product candidates. These are NOT requested sections (none is invented and
+   * nothing is aggregated); they let the quality gate see a decline/referral in
+   * a product the legacy single-rule score does not reflect.
+   */
+  implied_product_evaluations?: SectionEvaluation[];
   /** Relevant rules the selector saw, bounded to the submitted product/section/risk. */
   considered_rules?: ConsideredRule[];
 }
@@ -638,9 +674,62 @@ function sectionOutcomeOf(rule: AppetiteRow, conditions: RuleCondition[]): Secti
   return rule.appetite_level === "preferred" ? "preferred" : "standard";
 }
 
-/** Two rules "agree" when their level and set of condition kinds are identical. */
-function ruleProfile(rule: AppetiteRow, conditions: RuleCondition[]): string {
-  return `${rule.appetite_level}|${[...new Set(conditions.map((condition) => condition.kind))].sort().join(",")}`;
+// --------------------------------------------------------------------------
+// Tie profile. Two equally good rules DISAGREE when choosing one over the other
+// could change the underwriting outcome or the evidence an underwriter relies on:
+// appetite level, hard/soft decline, the exact preferred / caution / referral
+// terms that hit (which fixes the score effect), and the required-document set.
+// Nothing else is compared: notes, sources, ids, product-line spelling and
+// document ORDER/CASE are irrelevant and must never manufacture a disagreement.
+// --------------------------------------------------------------------------
+
+/** Canonical key for a required-document label: same normalisation `hasRequiredDoc` uses. */
+export function documentKey(label: string): string {
+  return lower(label).replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Deterministic, de-duplicated (by canonical key), sorted document keys. */
+function canonicalDocumentKeys(labels: readonly string[] | null | undefined): string[] {
+  return [...new Set((labels ?? []).map(documentKey).filter(Boolean))].sort(compareCodeUnits);
+}
+
+function termSet(conditions: RuleCondition[], kind: RuleConditionKind): string {
+  const terms = new Set<string>();
+  for (const condition of conditions) {
+    if (condition.kind !== kind) continue;
+    if (condition.origin === "appetite_level") terms.add("@appetite_level");
+    for (const pair of condition.matched_rule_terms) terms.add(`${condition.origin}:${lower(pair.term).trim()}`);
+  }
+  return [...terms].sort(compareCodeUnits).join("\u0000");
+}
+
+function ruleProfile(rule: AppetiteRow, conditions: RuleCondition[]): Record<TieDifference, string> {
+  return {
+    appetite_level: rule.appetite_level,
+    hard_decline: termSet(conditions, "hard_decline"),
+    soft_decline: termSet(conditions, "soft_decline_referral"),
+    preferred_terms: termSet(conditions, "preferred"),
+    caution_terms: termSet(conditions, "caution"),
+    referral_terms: termSet(conditions, "referral"),
+    required_documents: canonicalDocumentKeys(rule.required_documents).join("\u0000"),
+  };
+}
+
+const TIE_ASPECTS: TieDifference[] = [
+  "appetite_level",
+  "hard_decline",
+  "soft_decline",
+  "preferred_terms",
+  "caution_terms",
+  "referral_terms",
+  "required_documents",
+];
+
+/** The aspects in which any two of the tied rules differ (empty = outcome-equivalent). */
+function tieDifferences(rules: AppetiteRow[], conditionsOf: (rule: AppetiteRow) => RuleCondition[]): TieDifference[] {
+  if (rules.length < 2) return [];
+  const profiles = rules.map((rule) => ruleProfile(rule, conditionsOf(rule)));
+  return TIE_ASPECTS.filter((aspect) => new Set(profiles.map((profile) => profile[aspect])).size > 1);
 }
 
 function qualityLevel(value: number): 1 | 2 | 3 {
@@ -657,6 +746,14 @@ function riskCandidatesRelate(riskCandidates: string[], rule: AppetiteRow): bool
   });
 }
 
+/** A condition an underwriter must be told about even on a rule that lost selection. */
+const MATERIAL_KINDS: ReadonlySet<RuleConditionKind> = new Set([
+  "hard_decline",
+  "soft_decline_referral",
+  "referral",
+  "caution",
+]);
+
 function buildInsurerIntel(input: {
   productRules: AppetiteRow[];
   qualities: number[];
@@ -665,7 +762,7 @@ function buildInsurerIntel(input: {
   sections: RequestedSection[];
   risk: MatchInputRisk;
   features: RiskFeature[];
-}): Pick<InsurerScore, "selection" | "section_evaluations" | "considered_rules"> {
+}): Pick<InsurerScore, "selection" | "section_evaluations" | "considered_rules" | "implied_product_evaluations"> {
   const { productRules, qualities, bestQuality, usedRule, sections, risk, features } = input;
 
   // ---- per-rule facts, in canonical rule order ------------------------------
@@ -678,10 +775,47 @@ function buildInsurerIntel(input: {
     return computed;
   };
 
-  // ---- sections -------------------------------------------------------------
-  const sectionApplicable = new Map<string, { rule: AppetiteRow; quality: number }[]>();
+  type Applicable = { rule: AppetiteRow; quality: number };
+
+  /** Evaluate one group of applicable rules (a requested section, or an implied product line). */
+  const evaluateGroup = (label: RequestedSection, applicable: Applicable[]): SectionEvaluation => {
+    if (applicable.length === 0) {
+      return {
+        ...label,
+        status: "no_applicable_rule",
+        applicable_rule_ids: [],
+        selected_rule_id: null,
+        selection_basis: null,
+        tied_rule_ids: [],
+        tied_rules_disagree: false,
+        tie_differences: [],
+        outcome: null,
+        reflected_in_insurer_outcome: false,
+      };
+    }
+    const top = applicable[0].quality;
+    const tied = applicable.filter((entry) => entry.quality === top);
+    const selected = tied[0].rule;
+    const differences = tieDifferences(tied.map((entry) => entry.rule), conditionsOf);
+    return {
+      ...label,
+      status: "evaluated",
+      applicable_rule_ids: applicable.map((entry) => entry.rule.id),
+      selected_rule_id: selected.id,
+      selection_basis:
+        applicable.length === 1 ? "only_candidate" : tied.length > 1 ? "tie_broken_by_canonical_order" : "highest_taxonomy_quality",
+      tied_rule_ids: tied.length > 1 ? tied.map((entry) => entry.rule.id) : [],
+      tied_rules_disagree: differences.length > 0,
+      tie_differences: differences,
+      outcome: sectionOutcomeOf(selected, conditionsOf(selected)),
+      reflected_in_insurer_outcome: usedRule?.id === selected.id,
+    };
+  };
+
+  // ---- requested sections ----------------------------------------------------
+  const sectionApplicable = new Map<string, Applicable[]>();
   for (const section of sections) {
-    const applicable: { rule: AppetiteRow; quality: number }[] = [];
+    const applicable: Applicable[] = [];
     for (const rule of productRules) {
       const productKey = normTaxonomy(rule.product_line);
       if (!productKey || !taxonomyKeysRelated(productKey, section.section_key)) continue;
@@ -700,9 +834,7 @@ function buildInsurerIntel(input: {
     ? matchingIndexes.filter((index) => qualities[index] === bestQuality)
     : [];
   const tiedRules = tiedAtBest.map((index) => productRules[index]);
-  const tiedDisagree =
-    tiedRules.length > 1 &&
-    new Set(tiedRules.map((rule) => ruleProfile(rule, conditionsOf(rule)))).size > 1;
+  const selectionDifferences = tieDifferences(tiedRules, conditionsOf);
 
   const selection: InsurerSelection = {
     product_rule_id: usedRule?.id ?? null,
@@ -715,68 +847,82 @@ function buildInsurerIntel(input: {
       ? "tie_broken_by_canonical_order"
       : "highest_taxonomy_quality",
     tied_rule_ids: tiedRules.length > 1 ? tiedRules.map((rule) => rule.id) : [],
-    tied_rules_disagree: tiedDisagree,
+    tied_rules_disagree: selectionDifferences.length > 0,
+    tie_differences: selectionDifferences,
     matching_rule_count: matchingIndexes.length,
     omitted_risk_only_rule_count: 0,
   };
+
+  const selectedForSections = new Map<string, string[]>();
+  const sectionEvaluations: SectionEvaluation[] = sections.map((section) => {
+    const evaluation = evaluateGroup(section, sectionApplicable.get(section.section_key) ?? []);
+    if (evaluation.selected_rule_id) {
+      const list = selectedForSections.get(evaluation.selected_rule_id) ?? [];
+      list.push(section.section_key);
+      selectedForSections.set(evaluation.selected_rule_id, list);
+    }
+    return evaluation;
+  });
+
+  // ---- implied products (ONLY when no cover section was declared) -------------
+  // Not requested sections and never aggregated: each distinct product line this
+  // insurer has a rule for, among the product candidates, is evaluated so a
+  // decline/referral in a product the single-rule score does not reflect is seen.
+  let impliedProducts: SectionEvaluation[] | undefined;
+  if (sections.length === 0) {
+    const groups = new Map<string, Applicable[]>();
+    const display = new Map<string, string>();
+    productRules.forEach((rule, index) => {
+      if (qualities[index] < 2) return; // not related to any product candidate
+      const key = normTaxonomy(rule.product_line);
+      if (!key) return;
+      const list = groups.get(key) ?? [];
+      list.push({ rule, quality: riskCandidatesRelate(risk.risk_candidates, rule) ? 3 : 2 });
+      groups.set(key, list);
+      if (!display.has(key)) display.set(key, rule.product_line);
+    });
+    if (groups.size >= 2) {
+      impliedProducts = [...groups.keys()].sort(compareCodeUnits).map((key) => {
+        const applicable = groups.get(key)!;
+        applicable.sort((a, b) => b.quality - a.quality);
+        return evaluateGroup({ section: display.get(key)!, section_key: key }, applicable);
+      });
+    }
+  }
 
   // ---- considered rules: bounded to what is relevant ------------------------
   const applicableRuleIds = new Set<string>();
   for (const list of sectionApplicable.values()) for (const entry of list) applicableRuleIds.add(entry.rule.id);
 
+  // Documents the scored rule asks for; a loser that asks for a DIFFERENT set is
+  // material (the underwriter would chase different paperwork).
+  const scoredDocs = canonicalDocumentKeys(usedRule?.required_documents).join("\u0000");
+
   const considered: ConsideredRule[] = [];
   let omitted = 0;
-  const selectedForSections = new Map<string, string[]>();
-  const sectionEvaluations: SectionEvaluation[] = sections.map((section) => {
-    const applicable = sectionApplicable.get(section.section_key) ?? [];
-    if (applicable.length === 0) {
-      return {
-        ...section,
-        status: "no_applicable_rule" as const,
-        applicable_rule_ids: [],
-        selected_rule_id: null,
-        selection_basis: null,
-        tied_rule_ids: [],
-        tied_rules_disagree: false,
-        outcome: null,
-        reflected_in_insurer_outcome: false,
-      };
-    }
-    const top = applicable[0].quality;
-    const tied = applicable.filter((entry) => entry.quality === top);
-    const selected = tied[0].rule;
-    const list = selectedForSections.get(selected.id) ?? [];
-    list.push(section.section_key);
-    selectedForSections.set(selected.id, list);
-    return {
-      ...section,
-      status: "evaluated" as const,
-      applicable_rule_ids: applicable.map((entry) => entry.rule.id),
-      selected_rule_id: selected.id,
-      selection_basis:
-        applicable.length === 1
-          ? ("only_candidate" as const)
-          : tied.length > 1
-          ? ("tie_broken_by_canonical_order" as const)
-          : ("highest_taxonomy_quality" as const),
-      tied_rule_ids: tied.length > 1 ? tied.map((entry) => entry.rule.id) : [],
-      tied_rules_disagree:
-        tied.length > 1 &&
-        new Set(tied.map((entry) => ruleProfile(entry.rule, conditionsOf(entry.rule)))).size > 1,
-      outcome: sectionOutcomeOf(selected, conditionsOf(selected)),
-      reflected_in_insurer_outcome: usedRule?.id === selected.id,
-    };
-  });
-
   productRules.forEach((rule, index) => {
     const quality = qualities[index];
     if (quality < 1) return;
-    const relevant = quality >= 2 || quality === bestQuality || applicableRuleIds.has(rule.id);
-    if (!relevant) {
+    const isScored = usedRule?.id === rule.id;
+    const conditions = conditionsOf(rule);
+    let reason: ConsideredListReason | null = null;
+    if (isScored) reason = "scored_rule";
+    else if (applicableRuleIds.has(rule.id)) reason = "section_applicable";
+    else if (quality >= 2) reason = "product_relevant";
+    else if (quality === bestQuality) reason = "tied_for_best";
+    else {
+      // A risk-type-only loser: counted, not dumped — unless it carries something
+      // the underwriter must know (any caution / referral / soft or hard decline
+      // that fired, or a materially different required-document set).
+      const documents = canonicalDocumentKeys(rule.required_documents).join("\u0000");
+      const materialCondition = conditions.some((condition) => MATERIAL_KINDS.has(condition.kind));
+      const materialDocuments = documents !== "" && documents !== scoredDocs;
+      if (materialCondition || materialDocuments) reason = "material_risk_only";
+    }
+    if (!reason) {
       omitted++;
       return;
     }
-    const isScored = usedRule?.id === rule.id;
     considered.push({
       rule_id: rule.id,
       product_line: rule.product_line,
@@ -793,7 +939,8 @@ function buildInsurerIntel(input: {
         : quality < bestQuality
         ? "lower_taxonomy_quality"
         : "lost_tie_canonical_order",
-      conditions: conditionsOf(rule),
+      listed_because: reason,
+      conditions,
     });
   });
   // Scored rule first, then better quality, then canonical order (already the input order).
@@ -802,7 +949,12 @@ function buildInsurerIntel(input: {
   );
   selection.omitted_risk_only_rule_count = omitted;
 
-  return { selection, section_evaluations: sectionEvaluations, considered_rules: considered };
+  return {
+    selection,
+    section_evaluations: sectionEvaluations,
+    considered_rules: considered,
+    ...(impliedProducts ? { implied_product_evaluations: impliedProducts } : {}),
+  };
 }
 
 export function matchInsurers(

@@ -40,6 +40,12 @@
             "reflected": true
           }
         ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "alpha-motor|scored_rule|scored|docs=Claims history"
+        ],
+        "omitted_risk_only": 0,
         "documents": [
           {
             "type": "Claims history",
@@ -74,6 +80,12 @@
             "reflected": true
           }
         ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "beta-motor|scored_rule|scored|docs="
+        ],
+        "omitted_risk_only": 0,
         "documents": [],
         "quality": "decision_ready",
         "gaps": []
@@ -103,6 +115,12 @@
             "reflected": true
           }
         ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "gamma-motor|scored_rule|scored|docs="
+        ],
+        "omitted_risk_only": 0,
         "documents": [],
         "quality": "decision_ready",
         "gaps": []
@@ -131,6 +149,12 @@
             "reflected": true
           }
         ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "delta-motor|scored_rule|scored|docs="
+        ],
+        "omitted_risk_only": 0,
         "documents": [],
         "quality": "decision_ready",
         "gaps": []

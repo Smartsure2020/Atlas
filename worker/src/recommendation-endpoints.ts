@@ -42,6 +42,7 @@ import {
 import { composeExplanation, verifyPolish } from "./explanation-composer";
 import { minimisedMatcherInputSnapshot } from "./recommendation-evidence";
 import {
+  QUALITY_MODEL_VERSION,
   RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
   buildRecommendationEvidenceV2,
 } from "./recommendation-evidence-v2";
@@ -374,6 +375,31 @@ export async function handleRunRecommendation(
     );
   }
 
+  // ---- Load the active insurer inventory (BEFORE the cache decision) ----
+  // Insurers with ZERO active rules never enter the matcher (its input is
+  // appetite rows) yet they are part of the persisted result (`no_data_for`).
+  // So the inventory is a fingerprint input: activating, deactivating or
+  // renaming an insurer must not be answered "unchanged" from a stale job.
+  // A failed read is NOT an empty inventory — fail closed, like document trust.
+  const { data: insurerRows, error: insurerError } = await admin
+    .from("atlas_insurers")
+    .select("id, name")
+    .eq("active", true);
+  if (insurerError) {
+    logOperationError({
+      endpoint: "recommend",
+      operation: "load_active_insurers",
+      code: "insurer_inventory_unavailable",
+      submissionId,
+      status: 503,
+    });
+    return json({ error: "insurer_inventory_unavailable", detail: "retry_later" }, 503);
+  }
+  const activeInsurers = ((insurerRows ?? []) as { id: string; name: string }[]).map((row) => ({
+    id: row.id,
+    name: row.name,
+  }));
+
   const inputFp = buildRecommendationFingerprint({
     submissionId,
     extractionId: extraction.id,
@@ -382,11 +408,14 @@ export async function handleRunRecommendation(
       (a) => `${a.id}:${a.updated_at ?? ""}`
     ),
     availableDocuments: availableDocs,
-    // Behaviour versions: a deploy that changes matching, taxonomy or the
-    // persisted evidence contract must not be answered from a stale cache.
+    // Behaviour versions: a deploy that changes matching, taxonomy, the
+    // persisted evidence contract or the quality classification must not be
+    // answered from a stale cache.
     matcherVersion: MATCHER_VERSION,
     taxonomyVersion: TAXONOMY_VERSION,
     evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+    qualityModelVersion: QUALITY_MODEL_VERSION,
+    activeInsurers,
   });
   const job = await beginJob(
     admin,
@@ -429,16 +458,10 @@ export async function handleRunRecommendation(
   // Insurers with ZERO active rules never enter the matcher (its input is
   // appetite rows), so surface them explicitly: the underwriter must see
   // "Atlas has no appetite data for X" rather than X silently vanishing.
-  const { data: insurerRows } = await admin
-    .from("atlas_insurers")
-    .select("id, name")
-    .eq("active", true);
+  // Uses the inventory already loaded (and fingerprinted) above — no second read.
   result.no_data_for = [
     ...result.no_data_for,
-    ...insurersWithoutActiveRules(
-      (insurerRows ?? []) as { id: string; name: string }[],
-      appetite
-    ),
+    ...insurersWithoutActiveRules(activeInsurers, appetite),
   ];
 
   // ---- Build reasoning context map (id -> source_quote/notes) ----
@@ -536,7 +559,13 @@ export async function handleRunRecommendation(
   // not_recommended_json) keep their historical shape. Section intelligence
   // lives only in evidence_json, so it is not duplicated three times.
   const enriched = (s: InsurerScore) => {
-    const { selection: _selection, section_evaluations: _sections, considered_rules: _considered, ...legacy } = s;
+    const {
+      selection: _selection,
+      section_evaluations: _sections,
+      implied_product_evaluations: _implied,
+      considered_rules: _considered,
+      ...legacy
+    } = s;
     return { ...legacy, reasoning: reasoningById.get(s.insurer_id) ?? "" };
   };
 

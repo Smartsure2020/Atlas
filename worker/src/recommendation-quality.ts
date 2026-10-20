@@ -38,7 +38,7 @@ import type { ReviewedRiskEvidence } from "./recommendation-evidence.js";
 import type { RequestedSection } from "./matcher.js";
 
 /** Version of the classification table below; stored on every assessment. */
-export const QUALITY_MODEL_VERSION = "recommendation-quality-v1" as const;
+export const QUALITY_MODEL_VERSION = "recommendation-quality-v2" as const;
 
 export interface QualityAssessmentInput {
   facts: ReviewedRiskEvidence[];
@@ -259,6 +259,48 @@ function insurerGaps(insurer: ScoredInsurerCore): QualityGapV2[] {
     }
   }
 
+  // ---- Implied products (no cover section declared) -------------------------
+  // Not requested sections and never aggregated. When the submission declared
+  // no sections but this insurer has rules for two or more product lines the
+  // product candidates imply, Atlas cannot claim a complete section evaluation —
+  // and a decline/referral/caution in a product the single-rule score does not
+  // reflect is classified exactly like a hidden requested-section conflict.
+  if (insurer.implied_product_evaluations.length >= 2) {
+    out.push(gap({
+      code: "multiple_products_without_declared_sections",
+      severity: ruledOut ? "advisory" : "material",
+      scope: "insurer", insurer_id: id, missing: ["requested_cover_sections"],
+    }));
+    const adverse = (severity: QualitySeverity): QualitySeverity => (ruledOut ? "advisory" : severity);
+    for (const product of insurer.implied_product_evaluations) {
+      const base = { insurer_id: id, section_key: product.section_key, scope: "section" as const, rule_id: product.selected_rule_id };
+      if (product.tied_rules_disagree) {
+        out.push(gap({
+          ...base, code: "implied_product_rule_conflict",
+          severity: hardDeclineDiffers(insurer, product.tied_rule_ids) ? "blocker" : "material",
+          missing: ["unambiguous_rule_selection"],
+        }));
+      }
+      if (product.reflected_in_insurer_outcome) continue;
+      switch (product.outcome) {
+        case "hard_decline":
+          out.push(gap({ ...base, code: "implied_product_hard_decline_not_reflected", severity: adverse("blocker"), missing: ["section_outcome_in_score"] }));
+          break;
+        case "soft_decline_referral":
+          out.push(gap({ ...base, code: "implied_product_soft_decline_not_reflected", severity: adverse("material"), missing: ["section_outcome_in_score"] }));
+          break;
+        case "referral":
+          out.push(gap({ ...base, code: "implied_product_referral_not_reflected", severity: adverse("material"), missing: ["section_outcome_in_score"] }));
+          break;
+        case "caution":
+          out.push(gap({ ...base, code: "implied_product_caution_not_reflected", severity: adverse("material"), missing: ["section_outcome_in_score"] }));
+          break;
+        default:
+          break; // preferred/standard: nothing adverse beyond the multi-product limitation above
+      }
+    }
+  }
+
   // ---- Documents -----------------------------------------------------------
   if (!ruledOut) {
     for (const doc of insurer.required_documents) {
@@ -266,6 +308,15 @@ function insurerGaps(insurer: ScoredInsurerCore): QualityGapV2[] {
       out.push(gap({
         code: "required_document_missing", severity: "advisory", scope: "insurer",
         insurer_id: id, missing: [doc.document_type],
+      }));
+    }
+    // RELEVANT trusted evidence: an unrelated clean document must not make a
+    // recommendation more reliance-ready. If this insurer requires documents and
+    // NONE of them is in the trusted set, say so — whatever else is trusted.
+    if (insurer.required_documents.length > 0 && insurer.required_documents.every((doc) => !doc.present)) {
+      out.push(gap({
+        code: "required_documents_unevidenced", severity: "material", scope: "insurer",
+        insurer_id: id, missing: ["trusted_required_document"],
       }));
     }
   }

@@ -1,0 +1,79 @@
+{
+  "expected_schema": "powerhouse-case-expected-v1",
+  "parity_vs_frozen_v1": {
+    "class": "identical",
+    "differing_insurers": []
+  },
+  "observation": {
+    "evidence_schema": "recommendation-evidence-v2",
+    "matcher_version": "2026-10-section-evaluation-v2",
+    "recommended": "Alpha Insurance",
+    "insurer_order": [
+      "insurer-alpha"
+    ],
+    "insurers": {
+      "insurer-alpha": {
+        "rank": 1,
+        "score": 100,
+        "band": "preferred",
+        "rule_status": "preferred",
+        "confidence": 0.9,
+        "ruled_out": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "scored_rule": "alpha-motor-a",
+        "selection_basis": "tie_broken_by_canonical_order",
+        "rule_effects": [
+          "base|preferred|alpha-motor-a|100",
+          "preferred|preferred|alpha-motor-a|5"
+        ],
+        "sections": [
+          {
+            "section": "commercial_motor",
+            "status": "evaluated",
+            "selected": "alpha-motor-a",
+            "outcome": "preferred",
+            "reflected": true
+          }
+        ],
+        "implied_products": [],
+        "tie_differences": [
+          "required_documents"
+        ],
+        "considered": [
+          "alpha-motor-a|scored_rule|scored|docs=Claims history",
+          "alpha-motor-b|section_applicable|-|docs=Risk survey"
+        ],
+        "omitted_risk_only": 0,
+        "documents": [
+          {
+            "type": "Claims history",
+            "present": true,
+            "adjustment": 0
+          }
+        ],
+        "quality": "caution",
+        "gaps": [
+          "scored_rule_selection_tie:material|rule=alpha-motor-a|missing=unambiguous_rule_selection",
+          "section_rule_conflict:material|section=commercial_motor|rule=alpha-motor-a|missing=unambiguous_rule_selection"
+        ]
+      }
+    },
+    "no_data": [],
+    "trusted_documents": [
+      "Claims history"
+    ],
+    "quality": {
+      "state": "caution",
+      "blockers": 0,
+      "material": 2,
+      "advisory": 0,
+      "recommendation_gaps": []
+    },
+    "privacy": {
+      "sentinel_hits": [],
+      "features_redacted": true
+    }
+  }
+}

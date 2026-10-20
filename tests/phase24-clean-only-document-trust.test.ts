@@ -59,7 +59,7 @@ import {
 import { MATCHER_VERSION, matchInsurers } from "../worker/src/matcher.js";
 import type { AppetiteRow } from "../worker/src/matcher-types.js";
 import { buildQuoteReview } from "../worker/src/quote-review.js";
-import { RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 } from "../worker/src/recommendation-evidence-v2.js";
+import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 } from "../worker/src/recommendation-evidence-v2.js";
 import { TAXONOMY_VERSION } from "../worker/src/taxonomy.js";
 
 // supabase-js builds a Realtime client eagerly inside createClient(), and on
@@ -1168,6 +1168,9 @@ const LIVE_BEHAVIOUR = {
   matcherVersion: MATCHER_VERSION,
   taxonomyVersion: TAXONOMY_VERSION,
   evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+  qualityModelVersion: QUALITY_MODEL_VERSION,
+  // The phase-24 recommendation stubs seed no atlas_insurers rows.
+  activeInsurers: [] as { id: string; name: string }[],
 };
 
 const recFp = (over: Partial<Parameters<typeof buildRecommendationFingerprint>[0]> = {}) =>

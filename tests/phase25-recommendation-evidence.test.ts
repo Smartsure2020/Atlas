@@ -353,6 +353,7 @@ test("15. appetite rule changes retain existing fingerprint invalidation behavio
     submissionId: SUB, extractionId: EXT, reviewedAt: GENERATED, availableDocuments: ["Claims history"],
     matcherVersion: MATCHER_VERSION, taxonomyVersion: TAXONOMY_VERSION,
     evidenceSchemaVersion: "recommendation-evidence-v1",
+    qualityModelVersion: "recommendation-quality-v1", activeInsurers: [] as { id: string; name: string }[],
   };
   const first = buildRecommendationFingerprint({ ...common, activeRuleIds: ["rule-1:2026-01-01"] });
   const changed = buildRecommendationFingerprint({ ...common, activeRuleIds: ["rule-1:2026-10-16"] });

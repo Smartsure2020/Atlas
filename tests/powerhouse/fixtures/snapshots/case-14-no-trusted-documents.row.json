@@ -263,7 +263,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_3818b00c"
+      "recommendation_input_fingerprint": "fp_ccbbdfda"
     },
     "matcher_input": {
       "product_candidates": [
@@ -669,6 +669,7 @@
           "basis": "only_candidate",
           "tied_rule_ids": [],
           "tied_rules_disagree": false,
+          "tie_differences": [],
           "matching_rule_count": 1,
           "omitted_risk_only_rule_count": 0
         },
@@ -684,10 +685,12 @@
             "selection_basis": "only_candidate",
             "tied_rule_ids": [],
             "tied_rules_disagree": false,
+            "tie_differences": [],
             "outcome": "preferred",
             "reflected_in_insurer_outcome": true
           }
         ],
+        "implied_product_evaluations": [],
         "considered_rules": [
           {
             "rule_id": "alpha-motor",
@@ -703,6 +706,7 @@
             ],
             "scored": true,
             "not_scored_reason": null,
+            "listed_because": "scored_rule",
             "conditions": [
               {
                 "kind": "preferred",
@@ -720,6 +724,10 @@
               }
             ],
             "snapshot_resolved": true,
+            "required_documents": [
+              "Claims history",
+              "Risk survey"
+            ],
             "source": "manual",
             "source_document_id": "doc-guide",
             "source_file_name": "guide.pdf",
@@ -729,11 +737,12 @@
           }
         ],
         "quality": {
-          "state": "decision_ready",
+          "state": "caution",
           "blocker_count": 0,
-          "material_count": 0,
+          "material_count": 1,
           "advisory_count": 2,
           "gap_ids": [
+            "gap:required_documents_unevidenced:insurer-alpha:-:-:-:trusted_required_document",
             "gap:required_document_missing:insurer-alpha:-:-:-:Claims history",
             "gap:required_document_missing:insurer-alpha:-:-:-:Risk survey"
           ]
@@ -822,6 +831,7 @@
           "basis": "only_candidate",
           "tied_rule_ids": [],
           "tied_rules_disagree": false,
+          "tie_differences": [],
           "matching_rule_count": 1,
           "omitted_risk_only_rule_count": 0
         },
@@ -837,10 +847,12 @@
             "selection_basis": "only_candidate",
             "tied_rule_ids": [],
             "tied_rules_disagree": false,
+            "tie_differences": [],
             "outcome": "standard",
             "reflected_in_insurer_outcome": true
           }
         ],
+        "implied_product_evaluations": [],
         "considered_rules": [
           {
             "rule_id": "beta-motor",
@@ -856,8 +868,10 @@
             ],
             "scored": true,
             "not_scored_reason": null,
+            "listed_because": "scored_rule",
             "conditions": [],
             "snapshot_resolved": true,
+            "required_documents": [],
             "source": "manual",
             "source_document_id": "doc-guide",
             "source_file_name": "guide.pdf",
@@ -876,10 +890,10 @@
       }
     ],
     "quality": {
-      "model": "recommendation-quality-v1",
+      "model": "recommendation-quality-v2",
       "state": "caution",
       "blocker_count": 0,
-      "material_count": 1,
+      "material_count": 2,
       "advisory_count": 2,
       "gaps": [
         {
@@ -894,6 +908,19 @@
           "code": "no_trusted_documents",
           "severity": "material",
           "scope": "recommendation"
+        },
+        {
+          "gap_id": "gap:required_documents_unevidenced:insurer-alpha:-:-:-:trusted_required_document",
+          "insurer_id": "insurer-alpha",
+          "rule_id": null,
+          "section_key": null,
+          "field_path": null,
+          "missing": [
+            "trusted_required_document"
+          ],
+          "code": "required_documents_unevidenced",
+          "severity": "material",
+          "scope": "insurer"
         },
         {
           "gap_id": "gap:required_document_missing:insurer-alpha:-:-:-:Claims history",
