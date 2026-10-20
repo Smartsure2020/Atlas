@@ -273,6 +273,16 @@ export type SectionOutcomeV2 =
   | "preferred"
   | "standard";
 
+/** Aspects in which equally good (tied) rules differ in a way that could change the outcome. */
+export type TieDifferenceV2 =
+  | "appetite_level"
+  | "hard_decline"
+  | "soft_decline"
+  | "preferred_terms"
+  | "caution_terms"
+  | "referral_terms"
+  | "required_documents";
+
 export interface SectionEvaluationV2 {
   section: string;
   section_key: string;
@@ -282,6 +292,7 @@ export interface SectionEvaluationV2 {
   selection_basis: SelectionBasisV2 | null;
   tied_rule_ids: string[];
   tied_rules_disagree: boolean;
+  tie_differences: TieDifferenceV2[];
   outcome: SectionOutcomeV2 | null;
   reflected_in_insurer_outcome: boolean;
 }
@@ -296,8 +307,11 @@ export interface ConsideredRuleV2 {
   selected_for_section_keys: string[];
   scored: boolean;
   not_scored_reason: "lower_taxonomy_quality" | "lost_tie_canonical_order" | null;
+  listed_because: "scored_rule" | "section_applicable" | "product_relevant" | "tied_for_best" | "material_risk_only";
   conditions: RuleConditionV2[];
   snapshot_resolved: boolean;
+  /** The rule's own required-document set; null when the snapshot was not resolved. */
+  required_documents: string[] | null;
   source: "ai_extracted" | "manual" | null;
   source_document_id: string | null;
   source_file_name: string | null;
@@ -313,10 +327,13 @@ export interface ScoredEvidenceOutcomeV2 extends ScoredEvidenceOutcome {
     basis: SelectionBasisV2 | null;
     tied_rule_ids: string[];
     tied_rules_disagree: boolean;
+    tie_differences: TieDifferenceV2[];
     matching_rule_count: number;
     omitted_risk_only_rule_count: number;
   };
   section_evaluations: SectionEvaluationV2[];
+  /** Product lines implied when no cover section was declared; not requested sections, not scored. */
+  implied_product_evaluations: SectionEvaluationV2[];
   considered_rules: ConsideredRuleV2[];
   quality: {
     state: IntelligenceState;

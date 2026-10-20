@@ -14,6 +14,7 @@ import {
   provenanceOf,
   recommendationQuality,
   resolveEvidence,
+  scoreTies,
   type InsurerEvidenceView,
 } from "../lib/recommendation-evidence";
 import type { Recommendation } from "../lib/recommendations";
@@ -30,6 +31,12 @@ import case14 from "../../tests/powerhouse/fixtures/snapshots/case-14-no-trusted
 import histComplete from "../../tests/powerhouse/fixtures/snapshots/historical-v1-complete.row.json";
 import histGaps from "../../tests/powerhouse/fixtures/snapshots/historical-v1-gaps.row.json";
 import histNull from "../../tests/powerhouse/fixtures/snapshots/historical-null.row.json";
+import case11 from "../../tests/powerhouse/fixtures/snapshots/case-11-tie-determinism.row.json";
+import case17 from "../../tests/powerhouse/fixtures/snapshots/case-17-tie-required-documents.row.json";
+import case18 from "../../tests/powerhouse/fixtures/snapshots/case-18-multi-product-no-declared-sections.row.json";
+import case19 from "../../tests/powerhouse/fixtures/snapshots/case-19-material-risk-only-rule.row.json";
+import case20 from "../../tests/powerhouse/fixtures/snapshots/case-20-section-preferred-portfolio-hard-decline.row.json";
+import case21 from "../../tests/powerhouse/fixtures/snapshots/case-21-unrelated-clean-document.row.json";
 
 const row = (value: unknown) => value as unknown as Recommendation;
 const evidenceOf = (value: unknown) => resolveEvidence(row(value).evidence_json);
@@ -49,19 +56,22 @@ describe("resolveEvidence", () => {
     expect(evidenceOf(case05)).toMatchObject({ kind: "ready", version: "v2" });
   });
 
-  it("degrades unknown or malformed packets to 'unsupported' and never throws", () => {
+  it("an unknown schema version or a non-packet value is 'unsupported' and never throws", () => {
     const future = { schema_version: "recommendation-evidence-v9", insurers: [], provenance: {}, quality: {}, trusted_documents: [] };
     expect(resolveEvidence(future)).toEqual({ kind: "unsupported", schemaVersion: "recommendation-evidence-v9" });
-    for (const junk of ["garbage", 42, true, [], {}, { schema_version: 2 }, { schema_version: "recommendation-evidence-v2" }]) {
+    for (const junk of ["garbage", 42, true, [], {}, { schema_version: 2 }]) {
       expect(() => resolveEvidence(junk)).not.toThrow();
       expect(resolveEvidence(junk).kind).toBe("unsupported");
     }
-    // v2 claimed but the v2-only structure is missing → not trusted as v2.
-    const hollow = { ...(row(case05).evidence_json as object) } as Record<string, unknown>;
-    delete hollow.scoring_scope;
-    expect(resolveEvidence(hollow).kind).toBe("unsupported");
   });
 
+  it("a KNOWN schema version whose packet is hollow is 'malformed' (never repaired, never defaulted)", () => {
+    expect(resolveEvidence({ schema_version: "recommendation-evidence-v2" })).toEqual({ kind: "malformed", schemaVersion: "recommendation-evidence-v2" });
+    expect(resolveEvidence({ schema_version: "recommendation-evidence-v1" })).toEqual({ kind: "malformed", schemaVersion: "recommendation-evidence-v1" });
+    const hollow = { ...(row(case05).evidence_json as object) } as Record<string, unknown>;
+    delete hollow.scoring_scope;
+    expect(resolveEvidence(hollow).kind).toBe("malformed");
+  });
   it("insurerView returns null for an insurer the packet does not describe (nothing fabricated)", () => {
     expect(insurerView(evidenceOf(case05), "insurer-unknown")).toBeNull();
     expect(insurerView({ kind: "absent" }, "insurer-alpha")).toBeNull();
@@ -245,5 +255,195 @@ describe("privacy of what the UI model exposes", () => {
     const text = JSON.stringify([all, recommendationQuality(evidence)]);
     for (const sentinel of sentinels) expect(text).not.toContain(sentinel);
     for (const forbidden of ["storage_path", "signed_url", "http://", "https://"]) expect(text).not.toContain(forbidden);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Remediation R6 — hollow packets fail safe at the parser boundary
+// ---------------------------------------------------------------------------
+
+type Mutator = (packet: any) => void;
+
+function mutated(source: unknown, mutate: Mutator): unknown {
+  const copy = JSON.parse(JSON.stringify((row(source) as { evidence_json: unknown }).evidence_json));
+  mutate(copy);
+  return copy;
+}
+
+const scoredIndex = (packet: any) => packet.insurers.findIndex((i: any) => i.status === "scored");
+
+const HOLLOW_V2: [string, Mutator][] = [
+  ["quality.gaps missing", (p) => { delete p.quality.gaps; }],
+  ["quality.gaps not an array", (p) => { p.quality.gaps = "none"; }],
+  ["quality.state invalid", (p) => { p.quality.state = "great"; }],
+  ["quality block missing", (p) => { delete p.quality; }],
+  ["insurer outcome without rule_evidence", (p) => { delete p.insurers[scoredIndex(p)].rule_evidence; }],
+  ["insurer outcome without required_documents", (p) => { delete p.insurers[scoredIndex(p)].required_documents; }],
+  ["insurer outcome without score_reconciliation", (p) => { delete p.insurers[scoredIndex(p)].score_reconciliation; }],
+  ["insurer outcome without outcome_reasons", (p) => { delete p.insurers[scoredIndex(p)].outcome_reasons; }],
+  ["insurer outcome without section_evaluations", (p) => { delete p.insurers[scoredIndex(p)].section_evaluations; }],
+  ["insurer outcome without implied_product_evaluations", (p) => { delete p.insurers[scoredIndex(p)].implied_product_evaluations; }],
+  ["insurer outcome without considered_rules", (p) => { delete p.insurers[scoredIndex(p)].considered_rules; }],
+  ["insurer outcome without its own quality", (p) => { delete p.insurers[scoredIndex(p)].quality; }],
+  ["insurer outcome without selection", (p) => { delete p.insurers[scoredIndex(p)].selection; }],
+  ["score is a string", (p) => { p.insurers[scoredIndex(p)].score = "100"; }],
+  ["insurer is null", (p) => { p.insurers[0] = null; }],
+  ["insurer without status", (p) => { delete p.insurers[0].status; }],
+  ["rule_evidence item without evidence_id", (p) => { delete p.insurers[scoredIndex(p)].rule_evidence[0].evidence_id; }],
+  ["rule term not an object", (p) => { p.insurers[scoredIndex(p)].rule_evidence.find((r: any) => r.matched_rule_terms.length).matched_rule_terms[0] = "x"; }],
+  ["considered rule without conditions", (p) => { delete p.insurers[scoredIndex(p)].considered_rules[0].conditions; }],
+  ["considered rule without required_documents", (p) => { delete p.insurers[scoredIndex(p)].considered_rules[0].required_documents; }],
+  ["section evaluation without tie_differences", (p) => { delete p.insurers[scoredIndex(p)].section_evaluations[0].tie_differences; }],
+  ["gap without severity", (p) => { delete p.quality.gaps[0].severity; }],
+  ["trusted_documents missing", (p) => { delete p.trusted_documents; }],
+  ["provenance missing", (p) => { delete p.provenance; }],
+  ["requested_sections missing", (p) => { delete p.requested_sections; }],
+  ["scoring_scope missing", (p) => { delete p.scoring_scope; }],
+];
+
+describe("R6 — hollow v2 packets are 'malformed', never crash, and are never reconstructed", () => {
+  it.each(HOLLOW_V2)("%s", (_label, mutate) => {
+    const packet = mutated(case05, mutate);
+    let view: ReturnType<typeof resolveEvidence> | undefined;
+    expect(() => { view = resolveEvidence(packet); }).not.toThrow();
+    expect(view).toEqual({ kind: "malformed", schemaVersion: "recommendation-evidence-v2" });
+    // The malformed result carries no packet at all: nothing downstream can read half of it.
+    expect(JSON.stringify(view)).not.toContain("insurer-alpha");
+    expect(insurerView(view!, "insurer-alpha")).toBeNull();
+    expect(recommendationQuality(view!)).toBeNull();
+    expect(noDataInsurers(view!)).toEqual([]);
+  });
+
+  it("the unmutated packet is accepted (the guards do not reject good data)", () => {
+    for (const source of [case01, case05, case06, case07, case08, case09, case10, case11, case12, case14, case17, case18, case19, case20, case21]) {
+      expect(resolveEvidence((row(source) as { evidence_json: unknown }).evidence_json).kind).toBe("ready");
+    }
+  });
+
+  it("hollow v1 packets are malformed too; genuine historical v1 and null stay readable", () => {
+    expect(resolveEvidence(mutated(histComplete, (p) => { delete p.quality.status; })).kind).toBe("malformed");
+    expect(resolveEvidence(mutated(histComplete, (p) => { delete p.insurers[0].rule_evidence; })).kind).toBe("malformed");
+    expect(resolveEvidence(mutated(histGaps, (p) => { p.quality.gaps = [{ code: 1 }]; })).kind).toBe("malformed");
+    expect(evidenceOf(histComplete)).toMatchObject({ kind: "ready", version: "v1" });
+    expect(evidenceOf(histGaps)).toMatchObject({ kind: "ready", version: "v1" });
+    expect(evidenceOf(histNull)).toEqual({ kind: "absent" });
+  });
+
+  it("randomised damage (500 single-field deletions anywhere in the packet) never throws", () => {
+    const base = JSON.parse(JSON.stringify((row(case18) as { evidence_json: unknown }).evidence_json));
+    const paths: (string | number)[][] = [];
+    const walk = (value: unknown, path: (string | number)[]) => {
+      if (value && typeof value === "object") {
+        for (const key of Object.keys(value as object)) {
+          paths.push([...path, key]);
+          walk((value as Record<string, unknown>)[key], [...path, key]);
+        }
+      }
+    };
+    walk(base, []);
+    let seed = 12345;
+    for (let i = 0; i < 500; i++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const path = paths[seed % paths.length];
+      const copy = JSON.parse(JSON.stringify(base));
+      let cursor = copy;
+      for (const key of path.slice(0, -1)) cursor = cursor[key];
+      delete cursor[path[path.length - 1]];
+      expect(() => {
+        const view = resolveEvidence(copy);
+        if (view.kind === "ready") for (const o of copy.insurers) insurerView(view, o.insurer_id);
+      }).not.toThrow();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Remediation R3 / R4 / R5 / R7 / R8 / R9 — what the view model carries
+// ---------------------------------------------------------------------------
+
+describe("R3 — a tied rule's own required documents are shown", () => {
+  it("each considered rule keeps its own documents; the tie names what differs", () => {
+    const alpha = scored(case17, "insurer-alpha");
+    expect(alpha.considered!.map((r) => [r.ruleId, r.requiredDocuments])).toEqual([
+      ["alpha-motor-a", ["Claims history"]],
+      ["alpha-motor-b", ["Risk survey"]],
+    ]);
+    const section = alpha.sections![0];
+    expect(section.tiedDisagree).toBe(true);
+    expect(section.tieDifferences).toEqual(["required documents"]);
+    expect(alpha.selection!.tie_differences).toEqual(["required_documents"]);
+  });
+});
+
+describe("R4 — undeclared sections with several products", () => {
+  it("shows implied products separately; no requested section is invented", () => {
+    const alpha = scored(case18, "insurer-alpha");
+    expect(alpha.sections).toEqual([]);
+    expect(alpha.impliedProducts!.map((p) => [p.section, p.outcome, p.reflected])).toEqual([
+      ["commercial_motor", "preferred", true],
+      ["goods_in_transit", "hard_decline", false],
+    ]);
+    expect(alpha.gaps.map((g) => g.code)).toEqual(
+      expect.arrayContaining(["implied_product_hard_decline_not_reflected", "multiple_products_without_declared_sections"])
+    );
+    expect(alpha.gaps.find((g) => g.code === "implied_product_hard_decline_not_reflected")!.section).toBe("goods_in_transit");
+    expect(recommendationQuality(evidenceOf(case18))!.state).toBe("incomplete");
+    // A single implied product: nothing is produced.
+    expect(scored(case18, "insurer-gamma").impliedProducts).toEqual([]);
+  });
+  it("v1 has no implied-product data: null means 'not captured'", () => {
+    expect(scored(histComplete, "insurer-alpha").impliedProducts).toBeNull();
+  });
+});
+
+describe("R5 — a material risk-only rule is listed with why", () => {
+  it("lists it as material_risk_only and keeps the plain loser count-only", () => {
+    const alpha = scored(case19, "insurer-alpha");
+    const listed = alpha.considered!.find((r) => r.ruleId === "alpha-cyber-transport")!;
+    expect(listed.listedBecause).toBe("material_risk_only");
+    expect(listed.conditions.map((c) => c.kind)).toEqual(["caution"]);
+    expect(alpha.considered!.some((r) => r.ruleId === "alpha-marine-transport")).toBe(false);
+    expect(alpha.selection!.omitted_risk_only_rule_count).toBe(1);
+  });
+});
+
+describe("R7 — equal-score ranks are disclosed", () => {
+  it("names the viable insurers that share a score; a unique score has none", () => {
+    expect(scored(case11, "z-1").tiedScoreWith).toEqual(["Beta Mutual"]);
+    expect(scored(case11, "a-9").tiedScoreWith).toEqual(["Alpha Mutual"]);
+    expect(scored(case11, "m-5").tiedScoreWith).toEqual([]);
+    const ties = scoreTies(evidenceOf(case11));
+    expect(ties).toHaveLength(1);
+    expect(ties[0].score).toBe(70);
+    expect([...ties[0].insurers].sort()).toEqual(["Alpha Mutual", "Beta Mutual"]);
+  });
+  it("ruled-out insurers are never 'tied' (ruling out is itself a business distinction)", () => {
+    expect(scoreTies(evidenceOf(case05))).toEqual([]);
+    expect(scored(case05, "insurer-gamma").tiedScoreWith).toEqual([]);
+  });
+});
+
+describe("R8 — the section rule outcome and the insurer's overall outcome are separate", () => {
+  it("a preferred section under a portfolio hard decline reports both truths", () => {
+    const alpha = scored(case20, "insurer-alpha");
+    expect(alpha.sections!.map((s) => [s.outcome, s.reflected])).toEqual([["preferred", true]]);
+    expect(alpha.overall).toEqual({ ruledOut: true, reason: "a portfolio-level rule declines this risk" });
+    expect(scored(case20, "insurer-beta").overall).toEqual({ ruledOut: false, reason: null });
+  });
+  it("a hard decline on the scored rule or its level reads accordingly", () => {
+    expect(scored(case05, "insurer-gamma").overall.reason).toBe("a declined-risk term matched the rule that set this insurer's score");
+    expect(scored(case01, "insurer-delta").overall.reason).toBe("the rule that set this insurer's score is declined");
+  });
+});
+
+describe("R9 — relevant trusted documents", () => {
+  it("an unrelated clean document leaves the required-document gap standing", () => {
+    const alpha = scored(case21, "insurer-alpha");
+    expect(alpha.trustedDocuments).toEqual(["Policy schedule"]);
+    const gap = alpha.gaps.find((g) => g.code === "required_documents_unevidenced")!;
+    expect(gap.severity).toBe("material");
+    expect(gap.copy.title).toBe("None of this insurer's required documents is evidenced");
+    expect(gap.missing).toEqual(["trusted_required_document"]);
+    expect(recommendationQuality(evidenceOf(case21))!.state).toBe("caution");
   });
 });

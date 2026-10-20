@@ -44,6 +44,12 @@ import case14 from "../../tests/powerhouse/fixtures/snapshots/case-14-no-trusted
 import histComplete from "../../tests/powerhouse/fixtures/snapshots/historical-v1-complete.row.json";
 import histGaps from "../../tests/powerhouse/fixtures/snapshots/historical-v1-gaps.row.json";
 import histNull from "../../tests/powerhouse/fixtures/snapshots/historical-null.row.json";
+import case11 from "../../tests/powerhouse/fixtures/snapshots/case-11-tie-determinism.row.json";
+import case17 from "../../tests/powerhouse/fixtures/snapshots/case-17-tie-required-documents.row.json";
+import case18 from "../../tests/powerhouse/fixtures/snapshots/case-18-multi-product-no-declared-sections.row.json";
+import case19 from "../../tests/powerhouse/fixtures/snapshots/case-19-material-risk-only-rule.row.json";
+import case20 from "../../tests/powerhouse/fixtures/snapshots/case-20-section-preferred-portfolio-hard-decline.row.json";
+import case21 from "../../tests/powerhouse/fixtures/snapshots/case-21-unrelated-clean-document.row.json";
 
 const AVAILABLE: ExtractionConfidenceState = { state: "available", value: 0.9, source: "provider", available: true };
 const asRec = (value: unknown) => value as unknown as Recommendation;
@@ -141,15 +147,15 @@ describe("Evidence Mode — per-insurer drawer (v2)", () => {
     expect(within(dialog).getByText(/The score orders candidates; the reasons below are what to act on/)).toBeInTheDocument();
   });
 
-  it("shows the hidden section decline as 'Hard decline' and 'Not reflected in the score'", async () => {
+  it("shows the hidden section decline as 'Hard decline' and 'Not reflected in section scoring'", async () => {
     renderPanel(asRec(case05));
     const { dialog } = await openEvidence("Alpha Insurance");
     const sections = within(dialog).getByRole("heading", { name: "Requested sections" }).closest(".atlas-block") as HTMLElement;
     const list = sections.querySelector(".atlas-ev__sections") as HTMLElement;
     expect(within(list).getByText("Goods in transit")).toBeInTheDocument();
     expect(within(list).getByText("Hard decline")).toBeInTheDocument();
-    expect(within(list).getByText("Not reflected in the score")).toBeInTheDocument();
-    expect(within(sections).getByText("Reflected in the score")).toBeInTheDocument();
+    expect(within(list).getByText("Not reflected in section scoring")).toBeInTheDocument();
+    expect(within(sections).getByText("Reflected in section scoring")).toBeInTheDocument();
     expect(within(dialog).getByText("Blocker")).toBeInTheDocument();
   });
 
@@ -339,8 +345,8 @@ describe("Evidence Mode — historical and future evidence", () => {
     expect(screen.getAllByRole("heading", { level: 3 }).length).toBeGreaterThan(0);
   });
 
-  it("garbage evidence_json never crashes the panel", () => {
-    for (const junk of ["garbage", 7, [], { schema_version: "recommendation-evidence-v2" }]) {
+  it("non-packet evidence_json never crashes the panel (unsupported format)", () => {
+    for (const junk of ["garbage", 7, []]) {
       const { unmount } = renderPanel({ ...asRec(case01), evidence_json: junk } as unknown as Recommendation);
       expect(screen.getByText("Evidence format not supported")).toBeInTheDocument();
       unmount();
@@ -404,5 +410,184 @@ describe("Evidence Mode — accessibility and operation", () => {
     const { user } = await openEvidence("Alpha Insurance");
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Remediation (R3–R10)
+// ---------------------------------------------------------------------------
+
+function damaged(source: unknown, mutate: (packet: any) => void): Recommendation {
+  const copy = JSON.parse(JSON.stringify(source));
+  mutate(copy.evidence_json);
+  return copy as Recommendation;
+}
+
+describe("R6 — a hollow v2 packet fails safe in the panel", () => {
+  const HOLLOW: [string, (packet: any) => void][] = [
+    ["missing quality.gaps", (p) => { delete p.quality.gaps; }],
+    ["an insurer outcome missing rule_evidence", (p) => { delete p.insurers[0].rule_evidence; }],
+    ["an insurer outcome missing considered_rules", (p) => { delete p.insurers[0].considered_rules; }],
+    ["a mistyped score", (p) => { p.insurers[0].score = "100"; }],
+    ["an empty v2 shell", (p) => { for (const key of Object.keys(p)) if (key !== "schema_version") delete p[key]; }],
+  ];
+
+  it.each(HOLLOW)("%s: no crash, a safe message, no evidence buttons, recommendation intact", (_label, mutate) => {
+    renderPanel(damaged(case05, mutate));
+    const panel = screen.getByRole("region", { name: "Intelligence quality" });
+    expect(within(panel).getByText(/Detailed evidence could not be displayed for this recommendation\./)).toBeInTheDocument();
+    expect(within(panel).getByText(/does not rebuild it from current appetite data/)).toBeInTheDocument();
+    // Nothing is reconstructed or implied: no state, counts, gaps or evidence entry points.
+    expect(within(panel).queryByText(/Decision ready|Use with caution|Incomplete/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Why Atlas ranked this/ })).toBeNull();
+    // The recommendation itself still renders.
+    expect(screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent)).toContain("Alpha Insurance");
+  });
+
+  it("the open drawer cannot be reached for a malformed packet, and a direct render says the same safe thing", () => {
+    const evidence = resolveEvidence(damaged(case05, (p) => { delete p.quality.gaps; }).evidence_json);
+    expect(evidence.kind).toBe("malformed");
+    render(<EvidenceDrawer open onClose={() => undefined} evidence={evidence} insurerId="insurer-alpha" canViewDiagnostics />);
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("Detailed evidence could not be displayed for this recommendation.")).toBeInTheDocument();
+    expect(dialog.textContent).not.toContain("Alpha Insurance"); // nothing reconstructed from the broken packet
+  });
+
+  it("historical v1 and null behaviour are preserved next to it", () => {
+    const { unmount } = renderPanel(asRec(histNull));
+    expect(screen.getByText("Detailed evidence was not captured for this historical recommendation.", { exact: false })).toBeInTheDocument();
+    unmount();
+    renderPanel(asRec(histComplete));
+    expect(screen.getByText("Phase 1A evidence: complete")).toBeInTheDocument();
+  });
+});
+
+describe("R7 — equal-score display order is disclosed", () => {
+  it("the quality panel says tied insurers' order is a technical tie-break, not a preference", () => {
+    renderPanel(asRec(case11));
+    const panel = screen.getByRole("region", { name: "Intelligence quality" });
+    const ties = within(panel).getByRole("list", { name: "Tied scores" });
+    expect(within(ties).getByText(/Alpha Mutual and Beta Mutual share a score of 70\. Tied score — display order is deterministic, not an underwriting preference\./)).toBeInTheDocument();
+  });
+
+  it("the drawer says it for a tied insurer, and not for an insurer with a unique score", async () => {
+    renderPanel(asRec(case11));
+    const first = await openEvidence("Alpha Mutual");
+    expect(within(first.dialog).getByText(/Tied score — display order is deterministic, not an underwriting preference\. Same score as Beta Mutual\./)).toBeInTheDocument();
+    await first.user.click(screen.getByRole("button", { name: "Close panel" }));
+    const second = await openEvidence("Gamma Mutual");
+    expect(within(second.dialog).queryByText(/Tied score/)).toBeNull();
+  });
+
+  it("ruled-out insurers never get the cue, and ranks and scores are shown unchanged", async () => {
+    const { unmount } = renderPanel(asRec(case05));
+    expect(screen.queryByRole("list", { name: "Tied scores" })).toBeNull();
+    unmount();
+    renderPanel(asRec(case11));
+    expect(screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent).slice(0, 3)).toEqual(["Gamma Mutual", "Alpha Mutual", "Beta Mutual"]);
+  });
+});
+
+describe("R8 — section rule outcome and overall insurer outcome are both stated", () => {
+  it("a preferred section under a portfolio hard decline says 'Ruled out' in the same view", async () => {
+    renderPanel(asRec(case20));
+    const { dialog } = await openEvidence("Alpha Insurance");
+    const sections = within(dialog).getByRole("heading", { name: "Requested sections" }).closest(".atlas-block") as HTMLElement;
+    expect(within(sections).getByTestId("overall-outcome")).toHaveTextContent("Overall insurer outcome: Ruled out — a portfolio-level rule declines this risk.");
+    expect(within(sections).getByTestId("overall-outcome")).toHaveTextContent(/Section rule outcomes below describe each section's own rule, not the insurer's verdict/);
+    const list = sections.querySelector(".atlas-ev__sections") as HTMLElement;
+    expect(within(list).getByText("Preferred")).toBeInTheDocument();
+    expect(within(list).getByText("Reflected in section scoring")).toBeInTheDocument();
+    // The old wording that read as the insurer's verdict is gone.
+    expect(within(dialog).queryByText("Reflected in the score")).toBeNull();
+  });
+
+  it("a viable insurer reads 'Not ruled out'", async () => {
+    renderPanel(asRec(case20));
+    const { dialog } = await openEvidence("Beta Insurance");
+    expect(within(dialog).getByTestId("overall-outcome")).toHaveTextContent("Overall insurer outcome: Not ruled out.");
+  });
+});
+
+describe("R3 — a tied rule's own required documents", () => {
+  it("shows each considered rule's documents and what differs between the tied rules", async () => {
+    renderPanel(asRec(case17));
+    const { dialog } = await openEvidence("Alpha Insurance");
+    const docs = within(dialog).getAllByTestId("considered-documents").map((node) => node.textContent);
+    expect(docs).toEqual(["Requires: Claims history", "Requires: Risk survey"]);
+    expect(within(dialog).getByText(/they differ in: required documents/)).toBeInTheDocument();
+  });
+});
+
+describe("R4 — undeclared sections with several products", () => {
+  it("the panel is 'Incomplete' and lists the undeclared-product blocker and material limitation, naming the insurer", () => {
+    renderPanel(asRec(case18));
+    const panel = screen.getByRole("region", { name: "Intelligence quality" });
+    expect(within(panel).getAllByText("Incomplete").length).toBeGreaterThan(0);
+    const limitations = within(panel).getByRole("list", { name: "Limitations that affect reliance" });
+    expect(within(limitations).getByText("A possible product is declined but not reflected in the score")).toBeInTheDocument();
+    expect(within(limitations).getAllByText("No cover sections were declared, but several products apply")).toHaveLength(2);
+    expect(within(limitations).getByText(/Insurer: Alpha Insurance\. Section: goods_in_transit\./)).toBeInTheDocument();
+    expect(within(panel).queryByText(/Requested cover sections:/)).toBeNull(); // none is invented
+  });
+
+  it("the drawer shows possible products apart from requested sections and says nothing is combined", async () => {
+    renderPanel(asRec(case18));
+    const { dialog } = await openEvidence("Beta Insurance");
+    expect(within(dialog).getByText("Possible products — no cover sections were declared")).toBeInTheDocument();
+    expect(within(dialog).getByText("Section evaluation is not complete")).toBeInTheDocument();
+    expect(within(dialog).getByText(/does not combine these products into the score/)).toBeInTheDocument();
+    const possible = within(dialog).getByRole("list", { name: "Possible products" });
+    expect(within(possible).getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("an insurer with a single implied product shows no such block", async () => {
+    renderPanel(asRec(case18));
+    const { dialog } = await openEvidence("Gamma Insurance");
+    expect(within(dialog).queryByText("Possible products — no cover sections were declared")).toBeNull();
+  });
+});
+
+describe("R5 — a material risk-only rule is listed", () => {
+  it("lists it with why, and counts the plain loser", async () => {
+    renderPanel(asRec(case19));
+    const { dialog } = await openEvidence("Alpha Insurance");
+    expect(within(dialog).getByText("Rules Atlas considered (2)")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("cyber × transport").length).toBeGreaterThan(0); // considered list + provenance
+    expect(within(dialog).getByText(/matches the risk type only, listed because it carries something material/)).toBeInTheDocument();
+    expect(within(dialog).getByText("high value")).toBeInTheDocument();
+    expect(within(dialog).getByText(/1 further rule matched only the risk type and is not listed\./)).toBeInTheDocument();
+  });
+});
+
+describe("R9 — an unrelated clean document does not improve reliance", () => {
+  it("says none of the required documents is evidenced, and the state is not 'Decision ready'", () => {
+    renderPanel(asRec(case21));
+    const panel = screen.getByRole("region", { name: "Intelligence quality" });
+    expect(within(panel).getAllByText("Use with caution").length).toBeGreaterThan(0);
+    expect(within(panel).queryByText("Decision ready")).toBeNull();
+    expect(within(panel).getByText("None of this insurer's required documents is evidenced")).toBeInTheDocument();
+    expect(within(panel).getByText(/Missing: a trusted copy of any required document\./)).toBeInTheDocument();
+  });
+});
+
+describe("R10 — diagnostics copy does not overstate the audience", () => {
+  it("says the area is for managers/admins but the identifiers are already in the data every underwriting role receives", async () => {
+    renderPanel(asRec(case05), { canViewDiagnostics: true });
+    const { dialog } = await openEvidence("Alpha Insurance");
+    const note = within(dialog).getByText(/This area is shown to managers and administrators/);
+    expect(note.textContent).toMatch(/every role with underwriting-intelligence access already receives/);
+    expect(dialog.textContent).not.toMatch(/administrators only/);
+  });
+});
+
+describe("Remediation — accessibility of the new surfaces", () => {
+  it("the implied-product drawer and the tied-score panel have no axe violations", async () => {
+    const { container, unmount } = renderPanel(asRec(case11));
+    expect(await axe(container)).toHaveNoViolations();
+    unmount();
+    const second = renderPanel(asRec(case18));
+    await openEvidence("Beta Insurance");
+    expect(await axe(second.container)).toHaveNoViolations();
   });
 });

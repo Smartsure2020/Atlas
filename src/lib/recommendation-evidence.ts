@@ -34,6 +34,7 @@ import type {
   SectionEvaluationV2,
 } from "./recommendations";
 import type { Tone } from "./status";
+import { isReadableV1, isReadableV2 } from "./recommendation-evidence-guards";
 
 /* ---------------------------------------------------------------------------
    Resolving what the row actually holds
@@ -42,8 +43,13 @@ import type { Tone } from "./status";
 export type EvidenceView =
   /** Historical recommendation: `evidence_json` is null/absent. */
   | { kind: "absent" }
-  /** A schema this build cannot read, or a packet missing required structure. */
+  /** A schema version (or non-packet value) this build does not know how to read. */
   | { kind: "unsupported"; schemaVersion: string | null }
+  /**
+   * A known schema version whose packet is hollow or mistyped, so it cannot be
+   * displayed safely. Nothing is repaired, defaulted or reconstructed.
+   */
+  | { kind: "malformed"; schemaVersion: string | null }
   | { kind: "ready"; version: "v1"; evidence: RecommendationEvidenceV1 }
   | { kind: "ready"; version: "v2"; evidence: RecommendationEvidenceV2 };
 
@@ -52,26 +58,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Classify `evidence_json` without trusting it. Structural checks are the
- * minimum the view needs to render safely; they do not validate semantics.
+ * Classify `evidence_json` without trusting it. This is the ONLY place the raw
+ * packet is validated: a known schema version passes only if every field the
+ * display code reads is present with the right shape (see
+ * recommendation-evidence-guards), and a dry run of the view model succeeds.
+ * Anything else is reported — "unsupported" for an unknown format, "malformed"
+ * for a hollow known format — and never repaired, defaulted or reconstructed.
+ * This function never throws.
  */
 export function resolveEvidence(value: unknown): EvidenceView {
   if (value === null || value === undefined) return { kind: "absent" };
   if (!isRecord(value)) return { kind: "unsupported", schemaVersion: null };
   const schema = typeof value.schema_version === "string" ? value.schema_version : null;
-  const structural =
-    Array.isArray(value.insurers) &&
-    isRecord(value.provenance) &&
-    isRecord(value.quality) &&
-    Array.isArray(value.trusted_documents);
-  if (!structural) return { kind: "unsupported", schemaVersion: schema };
-  if (schema === "recommendation-evidence-v1") {
-    return { kind: "ready", version: "v1", evidence: value as unknown as RecommendationEvidenceV1 };
+  try {
+    let view: EvidenceView;
+    if (schema === "recommendation-evidence-v1") {
+      if (!isReadableV1(value)) return { kind: "malformed", schemaVersion: schema };
+      view = { kind: "ready", version: "v1", evidence: value as unknown as RecommendationEvidenceV1 };
+    } else if (schema === "recommendation-evidence-v2") {
+      if (!isReadableV2(value)) return { kind: "malformed", schemaVersion: schema };
+      view = { kind: "ready", version: "v2", evidence: value as unknown as RecommendationEvidenceV2 };
+    } else {
+      return { kind: "unsupported", schemaVersion: schema };
+    }
+    // Dry run: every derivation the UI will perform must succeed NOW, so a render
+    // can never be the first thing to discover a bad packet.
+    recommendationQuality(view);
+    for (const outcome of view.evidence.insurers as { insurer_id: string }[]) insurerView(view, outcome.insurer_id);
+    return view;
+  } catch {
+    return { kind: "malformed", schemaVersion: schema };
   }
-  if (schema === "recommendation-evidence-v2" && isRecord(value.scoring_scope) && Array.isArray(value.requested_sections)) {
-    return { kind: "ready", version: "v2", evidence: value as unknown as RecommendationEvidenceV2 };
-  }
-  return { kind: "unsupported", schemaVersion: schema };
 }
 
 /* ---------------------------------------------------------------------------
@@ -254,6 +271,34 @@ const GAP_COPY: Record<string, GapCopy> = {
     title: "No trusted documents were available",
     body: "Atlas counts only active documents with a clean scan. None were available when this ran.",
   },
+  required_documents_unevidenced: {
+    title: "None of this insurer's required documents is evidenced",
+    body: "This insurer requires documents and none of them is among the trusted documents. Other clean documents on the file do not satisfy the requirement.",
+  },
+  multiple_products_without_declared_sections: {
+    title: "No cover sections were declared, but several products apply",
+    body: "The reviewed submission lists no cover sections, yet this insurer has rules for more than one product line the submission implies. Atlas cannot claim a complete section evaluation. It has not invented requested sections and does not combine products into the score.",
+  },
+  implied_product_hard_decline_not_reflected: {
+    title: "A possible product is declined but not reflected in the score",
+    body: "No cover section was declared. This insurer's rule for another product line the submission implies is a hard decline, yet the insurer's score and status come from a different rule. The insurer is not treated as declined merely because sections were not declared.",
+  },
+  implied_product_soft_decline_not_reflected: {
+    title: "A possible decline in another product is not reflected in the score",
+    body: "No cover section was declared. A declined-risk term matched only in AI-inferred information for another product line the submission implies. A person should confirm it.",
+  },
+  implied_product_referral_not_reflected: {
+    title: "A referral trigger in another product is not reflected in the score",
+    body: "No cover section was declared. Another product line the submission implies has a referral trigger that the insurer-level referral flag and score do not include.",
+  },
+  implied_product_caution_not_reflected: {
+    title: "A caution in another product is not reflected in the score",
+    body: "No cover section was declared. Another product line the submission implies carries a caution that the score does not include.",
+  },
+  implied_product_rule_conflict: {
+    title: "Rules for one possible product disagree",
+    body: "Several equally good rules apply to a product line the submission implies and they disagree. Atlas used a fixed identity order to pick one; that is not an underwriting judgement.",
+  },
 };
 
 /** Wording for the machine tokens in a gap's `missing` list. */
@@ -274,8 +319,24 @@ const MISSING_LABEL: Record<string, string> = {
   unambiguous_rule_selection: "an unambiguous choice between rules",
   requested_cover_sections: "requested cover sections",
   trusted_document: "trusted document",
+  trusted_required_document: "a trusted copy of any required document",
   confidence: "confidence rating",
 };
+
+/** Wording for the aspects in which tied rules differ. */
+const TIE_DIFFERENCE_LABEL: Record<string, string> = {
+  appetite_level: "appetite level",
+  hard_decline: "hard-decline conditions",
+  soft_decline: "possible-decline conditions",
+  preferred_terms: "preferred terms",
+  caution_terms: "caution terms",
+  referral_terms: "referral triggers",
+  required_documents: "required documents",
+};
+
+export function tieDifferenceLabel(token: string): string {
+  return TIE_DIFFERENCE_LABEL[token] ?? token.replace(/_/g, " ");
+}
 
 export function missingLabel(token: string): string {
   return MISSING_LABEL[token] ?? token.replace(/_/g, " ");
@@ -366,6 +427,8 @@ export interface SectionLine {
   selectedRule: { ruleId: string; productLine: string; riskType: string; appetiteLevel: string } | null;
   tied: boolean;
   tiedDisagree: boolean;
+  /** Human labels of what differs between the tied rules (empty when they are equivalent). */
+  tieDifferences: string[];
   reflected: boolean;
 }
 
@@ -376,6 +439,10 @@ export interface ConsideredLine {
   appetiteLevel: string;
   scored: boolean;
   notScoredReason: ConsideredRuleV2["not_scored_reason"];
+  /** Why this rule is listed (scored rule, applies to a section, product-relevant, tied, or material risk-only). */
+  listedBecause: ConsideredRuleV2["listed_because"];
+  /** The rule's own required documents; null when the rule snapshot was not resolved (never inferred). */
+  requiredDocuments: string[] | null;
   sectionNames: string[];
   conditions: {
     kind: string;
@@ -418,7 +485,21 @@ export interface InsurerEvidenceView {
   trustedDocuments: string[];
   /** v2 only; null on v1 means "not captured", never "none". */
   sections: SectionLine[] | null;
+  /**
+   * v2 only. Product lines implied when NO cover section was declared and this
+   * insurer has rules for several of them. NOT requested sections, NOT scored.
+   * Empty on v2 means none apply; null on v1 means "not captured".
+   */
+  impliedProducts: SectionLine[] | null;
   considered: ConsideredLine[] | null;
+  /**
+   * The insurer's overall outcome, kept apart from per-section rule outcomes so
+   * a "Preferred" section can never read as the insurer's verdict when a
+   * portfolio-level hard decline rules the insurer out.
+   */
+  overall: { ruledOut: boolean; reason: string | null };
+  /** Other viable insurers with the SAME score (display order among them is technical, not preference). */
+  tiedScoreWith: string[];
   selection: ScoredEvidenceOutcomeV2["selection"] | null;
   scoringStatement: string | null;
   gaps: GapLine[];
@@ -484,6 +565,62 @@ function ruleLine(rule: EvidenceRule): RuleLine {
   };
 }
 
+/**
+ * The insurer's OVERALL outcome, read from the recorded hard-decline entry (which
+ * rule ruled it out). Reported apart from per-section rule outcomes.
+ */
+function overallOutcome(
+  outcome: ScoredEvidenceOutcome | ScoredEvidenceOutcomeV2,
+  lines: RuleLine[]
+): { ruledOut: boolean; reason: string | null } {
+  if (!outcome.ruled_out) return { ruledOut: false, reason: null };
+  const decline = lines.find((line) => line.effect === "hard_decline");
+  const reason =
+    decline?.component === "portfolio_declined"
+      ? "a portfolio-level rule declines this risk"
+      : decline?.component === "declined"
+      ? "a declined-risk term matched the rule that set this insurer's score"
+      : decline?.component === "base"
+      ? "the rule that set this insurer's score is declined"
+      : "a hard decline applies";
+  return { ruledOut: true, reason };
+}
+
+/**
+ * Names of the OTHER viable insurers that share this insurer's score. Their
+ * display order is a technical tie-break (name, then id), never a preference.
+ * Ruled-out insurers are excluded: "ruled out" is itself a business distinction.
+ */
+function tiedScoreNames(
+  evidence: RecommendationEvidence,
+  outcome: ScoredEvidenceOutcome | ScoredEvidenceOutcomeV2
+): string[] {
+  if (outcome.ruled_out) return [];
+  return (evidence.insurers as { status: string; insurer_id: string; insurer_name: string; score: number | null; ruled_out?: boolean }[])
+    .filter(
+      (other) =>
+        other.status === "scored" &&
+        other.insurer_id !== outcome.insurer_id &&
+        other.ruled_out === false &&
+        other.score === outcome.score
+    )
+    .map((other) => other.insurer_name);
+}
+
+/** Groups of viable insurers sharing a score (size ≥ 2), for the recommendation-level cue. */
+export function scoreTies(view: EvidenceView): { score: number; insurers: string[] }[] {
+  if (view.kind !== "ready") return [];
+  const byScore = new Map<number, string[]>();
+  for (const item of view.evidence.insurers as { status: string; insurer_name: string; score: number | null; ruled_out?: boolean }[]) {
+    if (item.status !== "scored" || item.ruled_out !== false || typeof item.score !== "number") continue;
+    byScore.set(item.score, [...(byScore.get(item.score) ?? []), item.insurer_name]);
+  }
+  return [...byScore.entries()]
+    .filter(([, names]) => names.length >= 2)
+    .map(([score, insurers]) => ({ score, insurers }))
+    .sort((a, b) => b.score - a.score);
+}
+
 function scoredView(
   version: "v1" | "v2",
   evidence: RecommendationEvidence,
@@ -519,32 +656,41 @@ function scoredView(
       })),
   }));
 
-  const sections: SectionLine[] | null = v2Outcome
-    ? v2Outcome.section_evaluations.map<SectionLine>((section) => {
-        const selected = section.selected_rule_id ? ruleContext.get(section.selected_rule_id) : undefined;
-        const considered = v2Outcome.considered_rules.find((rule) => rule.rule_id === section.selected_rule_id);
-        return {
-          section: section.section,
-          sectionKey: section.section_key,
-          status: section.status,
-          outcome: section.outcome,
-          outcomeMeta: section.outcome ? SECTION_OUTCOME[section.outcome] : null,
-          selectedRule: section.selected_rule_id
-            ? {
-                ruleId: section.selected_rule_id,
-                productLine: selected?.productLine ?? "",
-                riskType: selected?.riskType ?? "",
-                appetiteLevel: considered?.appetite_level ?? "",
-              }
-            : null,
-          tied: section.tied_rule_ids.length > 1,
-          tiedDisagree: section.tied_rules_disagree,
-          reflected: section.reflected_in_insurer_outcome,
-        };
-      })
-    : null;
+  const toSectionLine = (section: SectionEvaluationV2): SectionLine => {
+    const selected = section.selected_rule_id ? ruleContext.get(section.selected_rule_id) : undefined;
+    const selectedConsidered = v2Outcome?.considered_rules.find((rule) => rule.rule_id === section.selected_rule_id);
+    return {
+      section: section.section,
+      sectionKey: section.section_key,
+      status: section.status,
+      outcome: section.outcome,
+      outcomeMeta: section.outcome ? SECTION_OUTCOME[section.outcome] : null,
+      selectedRule: section.selected_rule_id
+        ? {
+            ruleId: section.selected_rule_id,
+            productLine: selected?.productLine ?? "",
+            riskType: selected?.riskType ?? "",
+            appetiteLevel: selectedConsidered?.appetite_level ?? "",
+          }
+        : null,
+      tied: section.tied_rule_ids.length > 1,
+      tiedDisagree: section.tied_rules_disagree,
+      tieDifferences: section.tie_differences.map(tieDifferenceLabel),
+      reflected: section.reflected_in_insurer_outcome,
+    };
+  };
+  const sections: SectionLine[] | null = v2Outcome ? v2Outcome.section_evaluations.map(toSectionLine) : null;
+  const impliedProducts: SectionLine[] | null = v2Outcome ? v2Outcome.implied_product_evaluations.map(toSectionLine) : null;
 
+  // Names for gap wording: requested sections, plus the product lines implied when
+  // no section was declared (their keys appear on the implied-product gaps).
   const sectionName = new Map((v2Evidence?.requested_sections ?? []).map((item) => [item.section_key, item.section]));
+  for (const insurer of (v2Evidence?.insurers ?? []) as (ScoredEvidenceOutcomeV2 | { status: string })[]) {
+    if (insurer.status !== "scored") continue;
+    for (const implied of (insurer as ScoredEvidenceOutcomeV2).implied_product_evaluations) {
+      if (!sectionName.has(implied.section_key)) sectionName.set(implied.section_key, implied.section);
+    }
+  }
   const considered: ConsideredLine[] | null = v2Outcome
     ? v2Outcome.considered_rules.map<ConsideredLine>((rule) => ({
         ruleId: rule.rule_id,
@@ -553,6 +699,8 @@ function scoredView(
         appetiteLevel: rule.appetite_level,
         scored: rule.scored,
         notScoredReason: rule.not_scored_reason,
+        listedBecause: rule.listed_because,
+        requiredDocuments: rule.required_documents,
         sectionNames: rule.section_keys.map((key) => sectionName.get(key) ?? key),
         conditions: rule.conditions.map((condition) => ({
           kind: condition.kind,
@@ -669,7 +817,10 @@ function scoredView(
     },
     trustedDocuments: evidence.trusted_documents.map((doc) => doc.document_type),
     sections,
+    impliedProducts,
     considered,
+    overall: overallOutcome(outcome, lines),
+    tiedScoreWith: tiedScoreNames(evidence, outcome),
     selection: v2Outcome ? v2Outcome.selection : null,
     scoringStatement: v2Evidence
       ? v2Evidence.scoring_scope.section_outcomes === "evaluated_not_aggregated"
@@ -753,6 +904,12 @@ export function recommendationQuality(view: EvidenceView): RecommendationQuality
   if (view.version === "v2") {
     const evidence = view.evidence;
     const sectionName = new Map(evidence.requested_sections.map((item) => [item.section_key, item.section]));
+    for (const insurer of evidence.insurers) {
+      if (insurer.status !== "scored") continue;
+      for (const implied of (insurer as ScoredEvidenceOutcomeV2).implied_product_evaluations) {
+        if (!sectionName.has(implied.section_key)) sectionName.set(implied.section_key, implied.section);
+      }
+    }
     return {
       mode: "v2",
       state: evidence.quality.state,

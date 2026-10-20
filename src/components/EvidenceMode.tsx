@@ -27,6 +27,7 @@ import {
   missingLabel,
   noDataInsurers,
   recommendationQuality,
+  scoreTies,
   type ConsideredLine,
   type DocumentLine,
   type EvidenceView,
@@ -44,6 +45,12 @@ import type { QualitySeverity } from "../lib/recommendations";
 
 export const HISTORICAL_NOTICE =
   "Detailed evidence was not captured for this historical recommendation.";
+
+/** Shown when a packet of a known format is hollow or mistyped. Nothing is reconstructed. */
+export const MALFORMED_NOTICE =
+  "Detailed evidence could not be displayed for this recommendation.";
+
+export const TIED_SCORE_CUE = "Tied score — display order is deterministic, not an underwriting preference.";
 
 function formatConfidenceDelta(value: number): string {
   if (value === 0) return "no confidence change";
@@ -218,9 +225,20 @@ export function IntelligenceQualityPanel({ evidence }: { evidence: EvidenceView 
       </section>
     );
   }
+  if (evidence.kind === "malformed") {
+    return (
+      <section className="atlas-ev__quality" aria-label="Intelligence quality">
+        <Notice tone="warning" title="Evidence could not be displayed">
+          {MALFORMED_NOTICE} The recorded evidence is incomplete or damaged, and Atlas does not rebuild it from current
+          appetite data. The recommendation itself is unaffected.
+        </Notice>
+      </section>
+    );
+  }
 
   const quality = recommendationQuality(evidence)!;
   const noData = noDataInsurers(evidence);
+  const ties = scoreTies(evidence);
 
   if (quality.mode === "v1") {
     return (
@@ -282,6 +300,15 @@ export function IntelligenceQualityPanel({ evidence }: { evidence: EvidenceView 
         <p className="atlas-text-dense atlas-text-muted">
           Requested cover sections: {quality.requestedSections.join(", ")}.
         </p>
+      )}
+      {ties.length > 0 && (
+        <ul className="atlas-ev__terms" aria-label="Tied scores">
+          {ties.map((tie) => (
+            <li key={tie.score} className="atlas-text-dense atlas-text-muted">
+              {tie.insurers.join(" and ")} share a score of {tie.score}. {TIED_SCORE_CUE}
+            </li>
+          ))}
+        </ul>
       )}
 
       {notable.length > 0 && (
@@ -358,6 +385,8 @@ export function EvidenceDrawer({
         <Notice tone="info" title="Evidence not available">
           {evidence.kind === "absent"
             ? HISTORICAL_NOTICE
+            : evidence.kind === "malformed"
+            ? MALFORMED_NOTICE
             : "This recommendation's evidence uses a format this version of Atlas cannot display."}
         </Notice>
       ) : !view ? (
@@ -425,6 +454,11 @@ function RankingExplanation({ view }: { view: InsurerEvidenceView }) {
         The score orders candidates; the reasons below are what to act on.
       </p>
       {view.scoringStatement && <p className="atlas-text-dense atlas-text-muted">{view.scoringStatement}</p>}
+      {view.tiedScoreWith.length > 0 && (
+        <p className="atlas-text-dense atlas-text-muted">
+          {TIED_SCORE_CUE} Same score as {view.tiedScoreWith.join(", ")}.
+        </p>
+      )}
       <div className="atlas-ev__flags">
         {view.flags.referral && <StatusBadge status={{ label: "Referral required", tone: "referral" }} />}
         {view.flags.seniorReview && <StatusBadge status={{ label: "Senior review", tone: "referral" }} />}
@@ -464,9 +498,20 @@ function RankingExplanation({ view }: { view: InsurerEvidenceView }) {
 
 function RequestedSections({ view }: { view: InsurerEvidenceView }) {
   const sections = view.sections ?? [];
+  const implied = view.impliedProducts ?? [];
   const considered = view.considered ?? [];
   return (
     <Block title="Requested sections">
+      {/* Two truths, kept apart: each section's own rule outcome, and the insurer's overall outcome. */}
+      <p className="atlas-text-dense" data-testid="overall-outcome">
+        <strong>Overall insurer outcome:</strong>{" "}
+        {view.overall.ruledOut
+          ? `Ruled out — ${view.overall.reason}.`
+          : "Not ruled out."}{" "}
+        <span className="atlas-text-muted">
+          Section rule outcomes below describe each section's own rule, not the insurer's verdict.
+        </span>
+      </p>
       {sections.length === 0 ? (
         <p className="atlas-text-dense atlas-text-muted">
           The reviewed submission recorded no requested cover sections, so there was nothing to evaluate section by
@@ -479,6 +524,20 @@ function RequestedSections({ view }: { view: InsurerEvidenceView }) {
           ))}
         </ul>
       )}
+      {implied.length > 0 && (
+        <>
+          <p className="atlas-block__title">Possible products — no cover sections were declared</p>
+          <Notice tone="warning" title="Section evaluation is not complete">
+            This insurer has rules for several product lines the submission implies, but no cover section was
+            declared. Atlas has not invented requested sections and does not combine these products into the score.
+          </Notice>
+          <ul className="atlas-ev__sections" aria-label="Possible products">
+            {implied.map((product) => (
+              <SectionRow key={product.sectionKey} section={product} />
+            ))}
+          </ul>
+        </>
+      )}
       {considered.length > 0 && (
         <Disclosure summary={`Rules Atlas considered (${considered.length})`}>
           <ul className="atlas-ev__rules">
@@ -489,7 +548,7 @@ function RequestedSections({ view }: { view: InsurerEvidenceView }) {
           {view.selection && view.selection.omitted_risk_only_rule_count > 0 && (
             <p className="atlas-text-dense atlas-text-muted">
               {view.selection.omitted_risk_only_rule_count} further rule
-              {view.selection.omitted_risk_only_rule_count === 1 ? "" : "s"} matched only the risk type and are not
+              {view.selection.omitted_risk_only_rule_count === 1 ? " matched only the risk type and is" : "s matched only the risk type and are"} not
               listed.
             </p>
           )}
@@ -511,9 +570,9 @@ function SectionRow({ section }: { section: SectionLine }) {
         )}
         {section.status === "evaluated" &&
           (section.reflected ? (
-            <StatusBadge status={{ label: "Reflected in the score", tone: "success" }} quiet />
+            <StatusBadge status={{ label: "Reflected in section scoring", tone: "success" }} quiet />
           ) : (
-            <StatusBadge status={{ label: "Not reflected in the score", tone: "warning" }} />
+            <StatusBadge status={{ label: "Not reflected in section scoring", tone: "warning" }} />
           ))}
       </div>
       {section.status === "no_applicable_rule" ? (
@@ -532,8 +591,10 @@ function SectionRow({ section }: { section: SectionLine }) {
       {section.tied && (
         <p className="atlas-text-dense">
           {section.tiedDisagree
-            ? "Several equally good rules apply here and they disagree. Atlas used a fixed identity order to pick one; that is not an underwriting judgement."
-            : "Several equally good rules apply here and they agree."}
+            ? `Several equally good rules apply here and they disagree${
+                section.tieDifferences.length > 0 ? ` (they differ in: ${section.tieDifferences.join(", ")})` : ""
+              }. Atlas used a fixed identity order to pick one; that is not an underwriting judgement.`
+            : "Several equally good rules apply here and they are equivalent in outcome."}
         </p>
       )}
     </li>
@@ -562,6 +623,14 @@ function ConsideredRow({ rule }: { rule: ConsideredLine }) {
       <p className="atlas-list__meta">
         Rule appetite {rule.appetiteLevel}
         {rule.sectionNames.length > 0 && <> · applies to {rule.sectionNames.join(", ")}</>}
+        {rule.listedBecause === "material_risk_only" && <> · matches the risk type only, listed because it carries something material</>}
+      </p>
+      <p className="atlas-list__meta" data-testid="considered-documents">
+        {rule.requiredDocuments === null
+          ? "Required documents: not recorded (rule snapshot unavailable)"
+          : rule.requiredDocuments.length === 0
+          ? "Requires no documents"
+          : `Requires: ${rule.requiredDocuments.join(", ")}`}
       </p>
       {rule.conditions.length === 0 ? (
         <p className="atlas-text-dense atlas-text-muted">No preferred, caution, referral or decline terms matched.</p>
@@ -794,7 +863,9 @@ function Diagnostics({ view }: { view: InsurerEvidenceView }) {
   return (
     <Disclosure summary="Diagnostics (internal staff)">
       <p className="atlas-text-dense atlas-text-muted">
-        Technical identifiers for tracing this result. Shown to managers and administrators only.
+        Technical identifiers for tracing this result. This area is shown to managers and administrators; the
+        identifiers themselves are part of the recommendation data that every role with underwriting-intelligence
+        access already receives.
       </p>
       <KeyValue items={rows} wide />
     </Disclosure>

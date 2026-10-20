@@ -40,16 +40,27 @@ for evidence, quality or provenance, and nothing here changes a score.
   and the quality gate raises it (`scored_rule_selection_tie`).
 * Proven by a 200-shuffle property test, a handler-level byte-identical test, and
   tie fixtures.
-* **Every possible difference from v1 is one of exactly two intentional classes**
-  (anything else fails the differential): `order_only` — equal-score insurers
-  appear in the defined name/id order instead of arrival order (v1 listed
-  portfolio-only insurers after product-rule insurers; the ranking shape,
-  `(ruled_out, score)` down the list, is proven identical); and `tie_rule` — when
-  several rules tie on taxonomy quality, the canonical-first rule is scored
-  instead of "whichever row the database returned first". For a given database
-  state v1's choice was arbitrary, so a re-run can differ from an old result
-  **only** where such a tie exists; when the tied rules disagree the quality gate
-  now says so.
+* **Every possible difference from v1 is one of exactly three intentional classes**
+  (anything else fails the differential):
+  1. `order_only` — equal-score insurers appear in the defined name/id order
+     instead of arrival order (v1 listed portfolio-only insurers after
+     product-rule insurers; the ranking shape, `(ruled_out, score)` down the list,
+     is proven identical);
+  2. `tie_rule` — when several rules tie on taxonomy quality, the canonical-first
+     rule is scored instead of "whichever row the database returned first". For a
+     given database state v1's choice was arbitrary, so a re-run can differ from
+     an old result **only** where such a tie exists; when the tied rules disagree
+     the quality gate now says so;
+  3. `portfolio_order` — an insurer with **two or more** active portfolio rules,
+     where rows arrive in a different order. Portfolio rules are applied in row
+     order (a document-derived hard decline stops the loop), so the *descriptive
+     trail* can differ — `matched_rules` order, scoring notes, which portfolio rule
+     a ruled-out insurer is "scored against", score components, the order of
+     required-document evidence — while every **authoritative** field is equal:
+     score, band, rule status, `ruled_out`, the referral / manual / senior-review
+     flags, confidence and its availability, and the *set* of missing required
+     documents. v2 processes portfolio rules in canonical order, so its trail no
+     longer depends on database order.
 
 ### 2.2 Section intelligence (2.1, 2.4)
 
@@ -60,7 +71,7 @@ For each insurer the matcher now also returns, read-only:
   the tied rule ids, and how many matching rules were not listed.
 * `section_evaluations` — one per **requested cover section** (de-duplicated by
   canonical key): applicable rule ids, the selected rule, the selection basis,
-  whether tied rules disagree, a worst-first `outcome`
+  whether tied rules disagree and in which aspects (`tie_differences`), a worst-first `outcome`
   (`hard_decline > soft_decline_referral > referral > caution > preferred > standard`,
   or `no_applicable_rule`), and `reflected_in_insurer_outcome`.
 * `considered_rules` — the relevant rules the selector saw, with taxonomy quality,
@@ -74,10 +85,36 @@ Conditions come from the **same** term scan (`findMatches`) the scorer uses; the
 is no second scoring engine. `soft_decline_referral` (AI-inferred only) is kept
 distinct from `hard_decline` at every level.
 
-**Bound (2.4):** a rule is listed only if it relates to a submitted product
-(taxonomy quality ≥ 2), is applicable to a requested section, or tied for best.
-Risk-type-only matches that lost are *counted* (`omitted_risk_only_rule_count`),
-not listed. There is no numeric cap — the bound is semantic relevance.
+**Bound (2.4):** a rule is listed (`listed_because`) if it is the scored rule, is
+applicable to a requested section, relates to a submitted product (taxonomy
+quality ≥ 2), tied for best, **or is a risk-only loser that carries something
+material**. A risk-only rule is material when any of these fired: a caution term,
+a referral trigger, a soft or hard decline (level or term), or a required-document
+set that differs from the scored rule's. Other risk-type-only losers are *counted*
+(`omitted_risk_only_rule_count`), not listed, and a rule that matches neither the
+product nor the risk type is neither listed nor counted. There is no numeric cap —
+the bound is semantic relevance — and the materiality test reuses the conditions
+the scorer's own term scan already produced (no second matching engine).
+
+**Tie profile (R2).** Equally good rules *disagree* (`tie_differences` non-empty)
+when choosing one over the other could change the outcome or the evidence an
+underwriter relies on. Compared: `appetite_level`; `hard_decline` and
+`soft_decline` conditions (kind, origin, term); `preferred_terms`,
+`caution_terms` and `referral_terms` (the exact matched terms, hence the count and
+the score effect); and `required_documents` (canonical keys — case, separators and
+order ignored). **Not** compared: notes, sources, locators, ids, product-line
+spelling or any other metadata. The canonical identity order remains the
+deterministic *technical* tie-break and is never presented as policy. These are
+descriptive matcher fields; no score, rank or flag changes, so matcher version
+`2026-10-section-evaluation-v2` remains appropriate (Batch 2 has not been
+released; production still runs the v1 matcher).
+
+**Implied products (R4).** When the submission declares **no** cover section and
+the insurer has rules for two or more distinct product lines the product
+candidates imply, `implied_product_evaluations` evaluates each of them the way a
+requested section is evaluated. These are **not** requested sections (none is
+invented, `requested_sections` stays empty) and are never aggregated; they exist so
+the quality gate can see a hidden decline/referral/caution.
 
 `section_evaluations` and `considered_rules` live in `evidence_json` only. The
 compatibility columns (`reasoning_json.top`, `secondary_options_json`,
@@ -149,7 +186,9 @@ Compatibility:
 ## 5. Quality gate (P1C)
 
 Pure, deterministic, no LLM, no thresholds. Module:
-`worker/src/recommendation-quality.ts`. Model version `recommendation-quality-v1`.
+`worker/src/recommendation-quality.ts`. Model version `recommendation-quality-v2` (v1 was
+the pre-remediation table; the version is part of the fingerprint and of every persisted
+quality block).
 
 It controls **presentation and reliance only**. It never blocks the underwriter,
 never changes a score/rank/flag, and **never turns `incomplete` into a decline**.
@@ -187,9 +226,9 @@ carries a hard decline, soft decline or referral (as an effect or a condition).
 | `taxonomy_match_missing` | insurer | **material** | no product rule related to the submission | Existing semantics: manual review, provisional ranking. |
 | `recommended_insurer_unscored` | recommendation | **blocker** | the first non-ruled-out insurer has `manual_review_required` | The recommendation itself has no deterministic basis. |
 | `scored_rule_product_unmatched` | insurer | **material** | scored rule matched the risk type only (taxonomy quality 1) | The score rests on a rule for a different product line. |
-| `scored_rule_selection_tie` | insurer | **blocker** if tied rules differ on hard decline; **material** if they differ only in level/other conditions; no gap if they agree | scored rule chosen by identity among equally good rules | The insurer's score/ruling depends on an arbitrary tie. |
+| `scored_rule_selection_tie` | insurer | **blocker** if the tied rules differ on *whether a hard decline applies* (the choice can rule the insurer out); **material** if they differ in any other tie aspect (level, soft decline, preferred / caution / referral terms, required documents); no gap if outcome-equivalent | scored rule chosen by identity among equally good rules that disagree (§2.2 tie profile) | The insurer's score, ruling or paperwork depends on an arbitrary tie. |
 | `requested_section_not_evaluated` | section | **material** (viable insurer) / advisory (ruled out) | no product rule relates to the requested section | The outcome says nothing about that section. |
-| `section_rule_conflict` | section | **blocker** if tied rules for the section differ on hard decline; else **material** | several equally good rules for one section disagree | Section outcome depends on an arbitrary tie. |
+| `section_rule_conflict` | section | **blocker** if tied rules for the section differ on whether a hard decline applies; else **material** | several equally good rules for one section disagree (§2.2 tie profile) | Section outcome depends on an arbitrary tie. |
 | `section_hard_decline_not_reflected` | section | **blocker** (viable) / advisory (ruled out) | section's selected rule has a hard decline but is not the scored rule | The insurer is shown viable while declining a requested section. |
 | `section_soft_decline_not_reflected` | section | **material** / advisory | AI-inferred decline in an unscored section | Distinct from a hard decline; needs human confirmation. |
 | `section_referral_not_reflected` | section | **material** / advisory | referral trigger in an unscored section | The insurer-level referral flag does not show it. |
@@ -197,6 +236,11 @@ carries a hard decline, soft decline or referral (as an effect or a condition).
 | `section_outcome_not_scored` | section | advisory | unscored section with no adverse outcome | The aggregation limitation (§3), with nothing adverse behind it. |
 | `required_document_missing` | insurer | advisory | a required document is not trusted-present, insurer not ruled out | Does not change appetite fit; effect already carried by the confidence adjustment and the document checklist. One gap per canonical document. |
 | `no_trusted_documents` | recommendation | **material** if any non-ruled-out insurer lists required documents; else advisory | zero active exact-clean documents | Document evidence is wholly absent and something is required. |
+| `required_documents_unevidenced` | insurer | **material** | a non-ruled-out insurer requires documents and **none** of them is trusted-present (whatever else is trusted); partial evidence stays per-document advisory | Removes the old cliff where one unrelated clean document erased the signal. Quality classification only: document trust and the confidence penalty are unchanged. |
+| `multiple_products_without_declared_sections` | insurer | **material** (viable) / advisory (ruled out) | no cover section declared and the insurer has rules for ≥ 2 implied product lines | Atlas cannot claim a complete section evaluation; no section is invented and nothing is aggregated. |
+| `implied_product_hard_decline_not_reflected` | section | **blocker** (viable) / advisory (ruled out) | an implied product's selected rule is a hard decline and is not the scored rule | Hidden-conflict rule, applied to implied products. The insurer is **not** declined merely because sections were not declared. |
+| `implied_product_soft_decline_not_reflected` / `_referral_` / `_caution_` | section | **material** / advisory | the same, for an AI-inferred decline / referral trigger / caution | As the requested-section equivalents. |
+| `implied_product_rule_conflict` | section | **blocker** if tied rules differ on a hard decline; else **material** | equally good rules inside one implied product disagree | As `section_rule_conflict`. |
 | `requested_sections_not_declared` | recommendation | advisory | no cover sections in the reviewed submission | Section evaluation had nothing to evaluate. |
 
 "Ruled out" downgrades only the *not-reflected* and *not-evaluated* rows: an
@@ -204,12 +248,28 @@ insurer already ruled out cannot be made worse by a section Atlas did not score.
 
 ## 6. Fingerprint versioning (2.5)
 
-`buildRecommendationFingerprint` now takes **required** `matcherVersion`,
-`taxonomyVersion`, `evidenceSchemaVersion` and hashes them. Required (not
-optional) so a future caller cannot forget. A completed job from an older matcher,
-taxonomy or evidence schema no longer answers `unchanged_input`; the next run
-recomputes. Historical job rows are untouched (they simply stop matching).
-Regression tests exercise the real endpoint cache path.
+`buildRecommendationFingerprint` takes **required** `matcherVersion`,
+`taxonomyVersion`, `evidenceSchemaVersion`, `qualityModelVersion` and
+`activeInsurers`, and hashes them with the existing inputs (submission, extraction,
+reviewed-at, active rule id + update stamp, trusted document set). Required (not
+optional) so a future caller cannot forget.
+
+* **Behaviour versions.** A completed job from an older matcher, taxonomy, evidence
+  schema or quality model no longer answers `unchanged_input`.
+* **Active insurer inventory (R1).** `no_data_for` — hence the persisted evidence
+  and quality — depends on which insurers are *active* and what they are called,
+  not only on appetite rules. The endpoint now loads `atlas_insurers where
+  active` **before** `beginJob`, fingerprints the canonical `[id, name]` pairs
+  (sorted by UTF-16 code units, de-duplicated, so database row order never matters)
+  and reuses the same rows to build `no_data_for` (one query, not two). Activating,
+  deactivating or renaming an insurer therefore forces a recompute; an unchanged
+  inventory still hits the cache. A failed inventory read is **not** an empty
+  inventory: the endpoint fails closed (`503 insurer_inventory_unavailable`, no job
+  created), like the document-trust check.
+
+Historical job rows are untouched (they simply stop matching). Regression tests
+exercise the real endpoint cache path for activate / deactivate / rename / identical
+inventory / row-order change.
 
 ## 7. Tie ordering (2.6)
 
@@ -308,20 +368,49 @@ colour alone); the excerpt is labelled "Source excerpt for this rule" and not
 offered as proof of a matched term; "Incomplete" is worded as a reliance signal
 ("Nothing is blocked or declined by this"); ordinary users see no raw JSON and no
 technical IDs; managers and administrators (existing `canManage` convention) get a
-collapsed "Diagnostics (internal staff)" area of labelled values; no raw document
-bodies, storage paths or signed URLs exist anywhere in the data it receives.
+collapsed "Diagnostics (internal staff)" area of labelled values. Access policy is
+**unchanged**: the identifiers are part of the recommendation data every role with
+underwriting-intelligence access already receives from the API, so the UI copy says
+the *area* is shown to managers and administrators — it no longer claims the IDs are
+restricted to them. No raw document bodies, storage paths or signed URLs exist
+anywhere in the data it receives.
+
+Hardening added after independent review:
+
+* **Hollow packets (R6).** `resolveEvidence()` is the single parser boundary: a known
+  schema passes only if every field the display code reads is present with the right
+  primitive shape (`recommendation-evidence-guards.ts`) and a dry run of the view
+  model succeeds; otherwise the result is `malformed` — "Detailed evidence could not
+  be displayed for this recommendation." — with no packet, no defaults and no
+  reconstruction from current appetite. Unknown versions stay `unsupported`.
+* **Equal scores (R7).** Viable insurers that share a score get the cue "Tied score —
+  display order is deterministic, not an underwriting preference." in the quality
+  panel and in the drawer. Ranks and scores are unchanged; ruled-out insurers are
+  never "tied".
+* **Section vs overall (R8).** The Requested-sections block states the insurer's
+  **overall outcome** ("Ruled out — a portfolio-level rule declines this risk" /
+  "Not ruled out") apart from each section's own rule outcome, and section badges now
+  read "Reflected in section scoring", so a "Preferred" section can no longer read as
+  the insurer's verdict.
+* **Implied products (R4)** are shown under "Possible products — no cover sections were
+  declared", separate from requested sections, with the statement that nothing is
+  invented or combined. Considered rules show their own required documents (R3) and,
+  for risk-only rules, why they are listed (R5).
 
 | State | Behaviour |
 | --- | --- |
 | v2 | Full quality panel + drawer |
 | v1 complete / gaps_present | Coarse status as recorded; "Recorded before the intelligence quality gate"; sections / considered rules / severities shown as not captured; gaps listed as "Not classified (evidence v1)" |
 | `evidence_json` null / absent | "Detailed evidence was not captured for this historical recommendation."; no evidence button |
-| unknown or malformed | "Evidence format not supported"; recommendation still renders |
+| unknown schema version / non-packet value | "Evidence format not supported"; recommendation still renders |
+| known schema, hollow or mistyped packet | "Detailed evidence could not be displayed for this recommendation."; no evidence button, no reconstruction; recommendation still renders |
 | no-data insurer | "No active appetite data available" |
 | no trusted documents | "No trusted documents were available" |
 
-Tests: `src/test/recommendation-evidence.test.ts` (22) and
-`src/test/evidence-mode.test.tsx` (31), rendered against the **real** rows the
+Tests: `src/test/recommendation-evidence.test.ts` and `src/test/evidence-mode.test.tsx`
+(including 25 hollow-packet mutations, a 500-deletion randomised-damage run, the
+tied-score cue, portfolio/section wording and the implied-product views), rendered
+against the **real** rows the
 backend produces (`tests/powerhouse/fixtures/snapshots`, drift-checked by the
 Worker suite) — including axe, Escape / focus return, privacy sentinels, and the
 historical cases.
@@ -329,8 +418,9 @@ historical cases.
 ## 11. Deterministic acceptance benchmark (P1D)
 
 `npm run test:powerhouse-acceptance` (also in `npm test`), no network. It runs, in
-order: the 15 cases; the frontend snapshot drift check; the v1 baseline golden;
-matcher v2; quality gate; evidence v2; persistence contract; a randomised
+order: the cases; the frontend snapshot drift check; the v1 baseline golden;
+matcher v2; quality gate; evidence v2; persistence contract (including the
+active-insurer cache invalidation); the remediation suite (R2–R5, R9); a randomised
 old-vs-new differential; and the Phase 1A 500-fixture differential.
 
 | # | Case | What it pins |
@@ -350,6 +440,17 @@ old-vs-new differential; and the Phase 1A 500-fixture differential.
 | 13 | Historical evidence v1 / null | read back verbatim, vocabulary not rewritten |
 | 14 | No trusted documents | empty trusted set; `no_trusted_documents` material; caution |
 | 15 | Trusted exact-clean document | only active + clean counts; decision_ready |
+| 16 | Tie that changes the score | equally good rules with different preferred terms: material, score = canonical-first rule's |
+| 17 | Tie that changes required documents | `tie_differences = [required_documents]`; each considered rule keeps its own documents |
+| 18 | Several products, no declared sections | no section invented; implied-product hard decline is a blocker; neutral insurer is material, never decision_ready; single product raises nothing |
+| 19 | Material risk-only rule | caution-bearing risk-only rule listed (`material_risk_only`); plain loser count-only; unrelated rule neither |
+| 20 | Preferred section + portfolio hard decline | section rule `preferred` reflected, overall `ruled_out`, caused by the portfolio rule |
+| 21 | Unrelated clean document | trust and confidence unchanged; `required_documents_unevidenced` material; caution |
+
+Also in the chain (not fixtures): activate / deactivate / rename of a zero-rule
+insurer, identical inventory, and DB row-order of the inventory, all through the real
+handler/cache path; the equal-score and hollow-packet UI behaviour lives in the
+frontend suite against the same backend-generated rows.
 
 Per case (committed `*.expected.json` **plus** hand-written intent assertions that
 do not come from the golden): insurer order, score, rank, rule effects,
@@ -357,13 +458,20 @@ referral/decline state, section outcomes, document outcomes, quality state,
 evidence schema, privacy result. Every case is re-run with reversed and shuffled
 appetite rows and must persist an identical row, and is compared with a **frozen
 copy of the production v1 matcher** (`tests/powerhouse/reference`, verbatim from
-`34441a0`) and classified `identical | order_only | tie_rule` — anything else
-fails.
+`34441a0`) and classified `identical | order_only | tie_rule | portfolio_order` —
+anything else fails. (Cases 8 and 14 intentionally changed quality classification
+under R9; no score, rank, flag or confidence changed anywhere.)
 
-Differential (3000 randomised fixtures per corpus, single- and multi-section):
-corpus A (canonical rows) — every insurer's answer equals v1; corpus B (rows
-shuffled, names unrelated to ids, i.e. production's unspecified DB order) — every
-difference is a named, intentional class. Counts are printed by the run.
+Differential (3000 randomised fixtures per corpus, single- and multi-section, up to
+**three portfolio rules per insurer**): corpus A (canonical rows) — every insurer's
+answer equals v1; corpus B (rows shuffled, names unrelated to ids, i.e. production's
+unspecified DB order) — every difference is a named, intentional class **within its
+category**. Each fixture is filed under one category (tied-rule > multi-portfolio >
+ordinary) and the run prints counts by category × corpus × section-count so the
+reviewer sees ordinary non-tied cases, tied-rule cases, multi-portfolio cases and
+shuffled-vs-canonical input separately: an ordinary fixture may only be
+`identical`/`order_only`; a multi-portfolio fixture (no tie) only
+`identical`/`order_only`/`portfolio_order`.
 
 ## 12. Business decisions required (not code decisions)
 
@@ -382,9 +490,9 @@ difference is a named, intentional class. Counts are printed by the run.
 
 ## 13. Known remaining limitations
 
-* The recommendation fingerprint is a 32-bit hash and does not include the active
-  insurer list (so adding an insurer with no rules does not invalidate a cached
-  run). Found, out of scope.
+* The recommendation fingerprint is still a 32-bit hash (collision risk is
+  small but real). Replacing it is out of scope; the active insurer inventory is now
+  part of it (R1).
 * Section matching uses taxonomy relatedness on the rule's `product_line` only;
   rules keyed on `risk_type` without a related product line are risk-only matches.
 * `outcome_reasons.evidence_gaps` (v1-style strings) is retained for continuity;
@@ -393,32 +501,73 @@ difference is a named, intentional class. Counts are printed by the run.
 
 ## 14. Verification record
 
-Run on the final branch head (nothing pushed, migrated or deployed).
+Run on the remediation head (nothing pushed, migrated or deployed).
 
 | Check | Result |
 | --- | --- |
-| Backend, every script in `npm test` (45; compiled once, same node commands) | all exit 0, ~1025 tests, 0 failures |
-| Matcher / recommendation / Phase 1A evidence + handler / Phase 24 document trust | pass |
-| `npm run test:powerhouse-acceptance` | 108 tests, 0 failures; differential: zero unexpected differences |
+| Backend, every script in `npm test` (45; compiled once, same node commands) | all exit 0, ~1086 tests, 0 failures |
+| Matcher / recommendation / Phase 1A evidence + handler / Phase 24 document trust / quality | pass |
+| `npm run test:powerhouse-acceptance` | ~169 tests, 0 failures; differential: zero unexpected authoritative differences |
 | Phase 1A 500-fixture differential | unchanged pinned hash `b14d9927…a36` |
-| Frontend vitest | 724 tests in 40 files (baseline 671 in 38; +53 new); see note |
+| Mutation probes (11) | 11/11 killed — see §15 |
+| Frontend vitest (quiet machine) | 783 tests in 40 files, 0 failures |
 | Frontend `tsc -b` + production build | pass |
 | Worker `tsc --noEmit` | pass |
 | `wrangler deploy --dry-run --env production` (local bundle; nothing uploaded) | pass, bindings unchanged, pipeline `legacy`, no Graph vars |
 | `git diff --check` | clean |
 
-Note on the frontend suite: under full-suite parallel load a few **unrelated**
-tests are timing-flaky on this machine (`WorkQueue` first test, `pipeline-dashboard`
-"manager defaults to All", `insurer-intelligence-workbench` "preserves the user's
-tab choice"). The untouched baseline `34441a0` fails `WorkQueue` the same way under
-the same load (670/671), and every one of these files passes when run on its own
-on this branch (the insurer-intelligence file 6/6, WorkQueue + pipeline-dashboard
-48/48). The 53 new tests passed in every run.
+Under heavy parallel load a few **unrelated** frontend tests have been timing-flaky on
+this machine in earlier runs (`WorkQueue` first test, `pipeline-dashboard` "manager
+defaults to All", `insurer-intelligence-workbench` "preserves the user's tab choice").
+The untouched baseline `34441a0` fails `WorkQueue` the same way under the same load,
+and each passes alone. The final full run on an idle machine was clean.
 
-Old-vs-new matcher differential (3000 randomised fixtures per corpus, frozen v1
-reference): scoring identical for every insurer in every fixture with canonical
-rows (single-section 1501 identical + 11 order_only; multi-section 1479 identical
-+ 9 order_only; 0 tie_rule); with production-like unspecified row order every
-difference is `order_only` or `tie_rule` (single-section 733 / 344 / 435;
-multi-section 639 / 268 / 581 — identical / order_only / tie_rule); unexpected
-differences 0; live-matcher order-invariance failures 0.
+### Old-vs-new matcher differential (frozen v1 reference, 3000 fixtures per corpus)
+
+Authoritative scoring is unchanged; the only differences are the three named classes.
+Run output, by category (n = fixtures; classes = identical / order_only / tie_rule /
+portfolio_order):
+
+| Corpus | Category | single-section | multi-section |
+| --- | --- | --- | --- |
+| A canonical rows | 1. ordinary | 106 / 1 / 0 / 0 | 66 / 0 / 0 / 0 |
+| A canonical rows | 2. tied-rule | 724 / 7 / 0 / 0 | 944 / 3 / 0 / 0 |
+| A canonical rows | 3. multi-portfolio | 663 / 8 / 0 / 0 | 478 / 0 / 0 / 0 |
+| B shuffled rows | 1. ordinary | 87 / 20 / 0 / 0 | 59 / 7 / 0 / 0 |
+| B shuffled rows | 2. tied-rule | 158 / 67 / 438 / 68 | 187 / 88 / 612 / 60 |
+| B shuffled rows | 3. multi-portfolio | 338 / 157 / 0 / 176 | 274 / 93 / 0 / 111 |
+
+Unexpected authoritative differences: **0**. Category/class violations: **0**.
+Live-matcher order-invariance failures: **0**. Corpus A shows no `tie_rule` or
+`portfolio_order` at all, because with canonical rows v1 and v2 process rules in the
+same order.
+
+## 15. Remediation after independent review (R1–R10)
+
+The review confirmed the accepted architecture (deterministic authoritative matcher,
+additive section intelligence, no scoring change, privacy minimisation, historical
+compatibility) and found the defects below. Nothing here changes a score, rank, flag
+or confidence; the quality model is bumped to `recommendation-quality-v2` and is part
+of the fingerprint and of every persisted quality block. The matcher version is
+**not** bumped: only descriptive fields changed, and Batch 2 has not been released.
+
+| # | Defect | Fix |
+| --- | --- | --- |
+| R1 | Active insurer inventory missing from the fingerprint, so activate / deactivate / rename of a zero-rule insurer was answered "unchanged" | Inventory loaded before `beginJob`, canonical `[id, name]` in the fingerprint, reused for `no_data_for`; failed read fails closed (§6) |
+| R2 | Tie disagreement compared only level + condition *kinds* | Full tie profile (§2.2): terms/counts, soft vs hard decline, documents; metadata never compared |
+| R3 | Losing tied rule lost its required documents | `ConsideredRuleEvidence.required_documents` (point-in-time, de-duplicated, sorted; `null` if unresolved) |
+| R4 | Several products + no declared sections read `decision_ready` | `implied_product_evaluations`; material gap; hidden-conflict rules applied; no section invented, no aggregation |
+| R5 | Material risk-only rules vanished | Listed when a caution / referral / soft or hard decline fired or required documents differ (§2.2) |
+| R6 | Hollow v2 packets could crash Evidence Mode | Strict parser boundary + dry run; `malformed` state (§10) |
+| R7 | Equal scores read as ranked preference | "Tied score — display order is deterministic, not an underwriting preference." |
+| R8 | "Preferred, reflected in the score" beside a portfolio hard decline | Overall insurer outcome stated apart from section rule outcome |
+| R9 | One irrelevant clean document erased the missing-documents signal | `required_documents_unevidenced` per insurer (trust and confidence untouched) |
+| R10 | Docs / copy | Third differential class documented and exercised (multi-portfolio fixtures); diagnostics copy no longer claims the IDs are restricted |
+
+Mutation probes (each must make the suite fail; all did): active insurer inventory
+removed from the fingerprint; `QUALITY_MODEL_VERSION` removed from the fingerprint;
+tied preferred-count disagreement ignored; tied required-document disagreement
+ignored; multi-product/no-sections downgraded to advisory; material risk-only rule
+omitted; irrelevant trusted document makes quality ready; malformed v2 crashes the UI
+(guard **and** dry-run net removed, and guard alone); equal-score disclosure removed
+(view model and panel).
