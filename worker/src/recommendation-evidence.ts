@@ -213,7 +213,7 @@ function hasDisplayValue(value: unknown): boolean {
   return String(value).trim().length > 0;
 }
 
-function compareCodeUnits(a: string, b: string): number {
+export function compareCodeUnits(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
@@ -294,7 +294,7 @@ export function buildReviewedRiskEvidence(
   return facts;
 }
 
-function canonicalRisk(risk: MatchInputRisk): PersistedMatcherInput {
+export function canonicalRisk(risk: MatchInputRisk): PersistedMatcherInput {
   const uniqueSorted = (values: string[]) => [...new Set(values)].sort(compareCodeUnits);
   return {
     product_candidates: [...risk.product_candidates],
@@ -309,6 +309,23 @@ function canonicalRisk(risk: MatchInputRisk): PersistedMatcherInput {
     overall_confidence: risk.overall_confidence,
     overall_confidence_available: risk.overall_confidence_available,
   };
+}
+
+/** Marker on the privacy-minimised compatibility snapshot in reasoning_json. */
+export const MATCHER_INPUT_SNAPSHOT_MINIMISED = "matcher-input-minimised-v1";
+
+/**
+ * The shape persisted at `reasoning_json.matcher_input` for NEW recommendations.
+ * It is the same privacy-minimised copy as `evidence_json.matcher_input` plus a
+ * version marker, so readers can tell it from historical rows (which carry the
+ * raw matcher input under no marker). Property names that existing readers use
+ * (`available_documents`, `product_candidates`, `overall_confidence*`, …) are
+ * unchanged; only `features[].text` — client free text — is gone.
+ */
+export function minimisedMatcherInputSnapshot(risk: MatchInputRisk): PersistedMatcherInput & {
+  snapshot_version: typeof MATCHER_INPUT_SNAPSHOT_MINIMISED;
+} {
+  return { snapshot_version: MATCHER_INPUT_SNAPSHOT_MINIMISED, ...canonicalRisk(risk) };
 }
 
 const EFFECT_ORDER: Record<EvidenceEffect, number> = {
@@ -326,7 +343,7 @@ function evidenceId(ruleId: string, component: string, suffix?: string): string 
   return `rule:${ruleId}:${component}${suffix ? `:${suffix}` : ""}`;
 }
 
-function snapshotRule(
+export function snapshotRule(
   rule: AppetiteRow,
   insurerName: string,
   input: {
@@ -381,7 +398,7 @@ function snapshotRule(
   };
 }
 
-function ruleEvidenceFor(
+export function ruleEvidenceFor(
   insurer: InsurerScore,
   appetiteById: Map<string, AppetiteRow>
 ): {
@@ -448,7 +465,7 @@ function ids(evidence: RuleEvidence[], predicate: (item: RuleEvidence) => boolea
   return evidence.filter(predicate).map((item) => item.evidence_id);
 }
 
-function outcomeFor(
+export function outcomeFor(
   insurer: InsurerScore,
   rules: RuleEvidence[],
   unresolvedRuleIds: string[],
@@ -509,7 +526,7 @@ function outcomeFor(
   };
 }
 
-function noDataOutcome(insurer: { insurer_id: string; insurer_name: string }): InsurerOutcomeEvidence {
+export function noDataOutcome(insurer: { insurer_id: string; insurer_name: string }): InsurerOutcomeEvidence {
   return {
     insurer_id: insurer.insurer_id,
     insurer_name: insurer.insurer_name,

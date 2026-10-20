@@ -667,6 +667,7 @@ export default function SubmissionDetail({
                 openMissingInfo={openMissingInfo}
                 onRefresh={() => load({ silent: true })}
                 onGoToTab={onTabChange}
+                canViewDiagnostics={canManage}
               />
             </TabPanel>
           )}

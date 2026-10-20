@@ -1,0 +1,354 @@
+{
+  "golden_schema": "powerhouse-baseline-golden-v1",
+  "recorded_against": {
+    "commit": "34441a0",
+    "matcher_version": "2026-07-token-matching-v1",
+    "taxonomy_version": "2026-07-token-aliases-v1"
+  },
+  "as_listed": {
+    "insurers": [
+      {
+        "position": 1,
+        "rank": 1,
+        "insurer_id": "insurer-alpha",
+        "insurer_name": "Alpha Insurance",
+        "score": 100,
+        "band": "preferred",
+        "rule_status": "preferred",
+        "confidence": 0.9,
+        "confidence_available": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": false,
+        "scored_against_appetite_id": "alpha-motor",
+        "matched_rules": [
+          {
+            "appetite_id": "alpha-motor",
+            "list": "base",
+            "effect": "preferred",
+            "score_contribution": 100,
+            "matched_strings": []
+          },
+          {
+            "appetite_id": "alpha-motor",
+            "list": "preferred",
+            "effect": "preferred",
+            "score_contribution": 5,
+            "matched_strings": [
+              "transport fleet"
+            ]
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 105,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": -5,
+          "final_score": 100
+        },
+        "confidence_reconciliation": {
+          "input_confidence": 0.9,
+          "input_confidence_available": true,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": 0.9
+        },
+        "missing_required_documents": [],
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "scoring_notes": [
+          "Base preferred (commercial_motor × transport) → 100",
+          "Preferred-risk matches +5: transport fleet (from: primary risk type)"
+        ]
+      },
+      {
+        "position": 2,
+        "rank": 2,
+        "insurer_id": "insurer-gamma",
+        "insurer_name": "Gamma Insurance",
+        "score": 100,
+        "band": "preferred",
+        "rule_status": "preferred",
+        "confidence": 0.9,
+        "confidence_available": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": false,
+        "scored_against_appetite_id": "gamma-motor",
+        "matched_rules": [
+          {
+            "appetite_id": "gamma-motor",
+            "list": "base",
+            "effect": "preferred",
+            "score_contribution": 100,
+            "matched_strings": []
+          },
+          {
+            "appetite_id": "gamma-motor",
+            "list": "preferred",
+            "effect": "preferred",
+            "score_contribution": 5,
+            "matched_strings": [
+              "transport fleet"
+            ]
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 105,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": -5,
+          "final_score": 100
+        },
+        "confidence_reconciliation": {
+          "input_confidence": 0.9,
+          "input_confidence_available": true,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": 0.9
+        },
+        "missing_required_documents": [],
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "scoring_notes": [
+          "Base preferred (commercial_motor × transport) → 100",
+          "Preferred-risk matches +5: transport fleet (from: primary risk type)"
+        ]
+      },
+      {
+        "position": 3,
+        "rank": 3,
+        "insurer_id": "insurer-beta",
+        "insurer_name": "Beta Insurance",
+        "score": 70,
+        "band": "standard",
+        "rule_status": "standard",
+        "confidence": 0.9,
+        "confidence_available": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": false,
+        "scored_against_appetite_id": "beta-motor",
+        "matched_rules": [
+          {
+            "appetite_id": "beta-motor",
+            "list": "base",
+            "effect": "standard",
+            "score_contribution": 70,
+            "matched_strings": []
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 70,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": 0,
+          "final_score": 70
+        },
+        "confidence_reconciliation": {
+          "input_confidence": 0.9,
+          "input_confidence_available": true,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": 0.9
+        },
+        "missing_required_documents": [],
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "scoring_notes": [
+          "Base standard (commercial_motor × transport) → 70"
+        ]
+      }
+    ],
+    "no_data_for": []
+  },
+  "reversed": {
+    "insurers": [
+      {
+        "position": 1,
+        "rank": 1,
+        "insurer_id": "insurer-alpha",
+        "insurer_name": "Alpha Insurance",
+        "score": 100,
+        "band": "preferred",
+        "rule_status": "preferred",
+        "confidence": 0.9,
+        "confidence_available": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": false,
+        "scored_against_appetite_id": "alpha-motor",
+        "matched_rules": [
+          {
+            "appetite_id": "alpha-motor",
+            "list": "base",
+            "effect": "preferred",
+            "score_contribution": 100,
+            "matched_strings": []
+          },
+          {
+            "appetite_id": "alpha-motor",
+            "list": "preferred",
+            "effect": "preferred",
+            "score_contribution": 5,
+            "matched_strings": [
+              "transport fleet"
+            ]
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 105,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": -5,
+          "final_score": 100
+        },
+        "confidence_reconciliation": {
+          "input_confidence": 0.9,
+          "input_confidence_available": true,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": 0.9
+        },
+        "missing_required_documents": [],
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "scoring_notes": [
+          "Base preferred (commercial_motor × transport) → 100",
+          "Preferred-risk matches +5: transport fleet (from: primary risk type)"
+        ]
+      },
+      {
+        "position": 2,
+        "rank": 2,
+        "insurer_id": "insurer-beta",
+        "insurer_name": "Beta Insurance",
+        "score": 70,
+        "band": "standard",
+        "rule_status": "standard",
+        "confidence": 0.9,
+        "confidence_available": true,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": false,
+        "scored_against_appetite_id": "beta-motor",
+        "matched_rules": [
+          {
+            "appetite_id": "beta-motor",
+            "list": "base",
+            "effect": "standard",
+            "score_contribution": 70,
+            "matched_strings": []
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 70,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": 0,
+          "final_score": 70
+        },
+        "confidence_reconciliation": {
+          "input_confidence": 0.9,
+          "input_confidence_available": true,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": 0.9
+        },
+        "missing_required_documents": [],
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "scoring_notes": [
+          "Base standard (commercial_motor × transport) → 70"
+        ]
+      },
+      {
+        "position": 3,
+        "rank": 3,
+        "insurer_id": "insurer-gamma",
+        "insurer_name": "Gamma Insurance",
+        "score": 0,
+        "band": "ruled_out",
+        "rule_status": "ruled_out",
+        "confidence": 0,
+        "confidence_available": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "ruled_out": true,
+        "scored_against_appetite_id": "gamma-git",
+        "matched_rules": [
+          {
+            "appetite_id": "gamma-git",
+            "list": "base",
+            "effect": "hard_decline",
+            "score_contribution": 0,
+            "matched_strings": []
+          }
+        ],
+        "required_documents": [],
+        "score_reconciliation": {
+          "component_subtotal": 0,
+          "hard_decline_adjustment": 0,
+          "clamp_adjustment": 0,
+          "final_score": 0
+        },
+        "confidence_reconciliation": {
+          "input_confidence": null,
+          "input_confidence_available": false,
+          "required_document_adjustment": 0,
+          "manual_review_cap_adjustment": 0,
+          "final_confidence": null
+        },
+        "missing_required_documents": [],
+        "unmatched_sections": [],
+        "unmatched_product_candidates": [],
+        "nearby_rule_matches": [],
+        "scoring_notes": [
+          "Base declined (goods_in_transit × transport) → 0",
+          "Insurer's appetite for this line/type is declined."
+        ]
+      }
+    ],
+    "no_data_for": []
+  },
+  "evidence_v1_as_listed": {
+    "insurer-alpha": {
+      "rule_ids": [
+        "alpha-motor"
+      ],
+      "effects": [
+        "preferred",
+        "preferred"
+      ]
+    },
+    "insurer-gamma": {
+      "rule_ids": [
+        "gamma-motor"
+      ],
+      "effects": [
+        "preferred",
+        "preferred"
+      ]
+    },
+    "insurer-beta": {
+      "rule_ids": [
+        "beta-motor"
+      ],
+      "effects": [
+        "standard"
+      ]
+    }
+  },
+  "evidence_v1_quality_status": "complete"
+}

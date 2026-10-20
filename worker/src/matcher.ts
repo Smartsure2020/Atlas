@@ -27,6 +27,28 @@
  * match preserves predictable scoring (no inflation from multi-cover bundles).
  * The structural fix — per-cover-section scoring — is the better answer
  * eventually but is deliberately deferred.
+ *
+ * POWERHOUSE (matcher 2026-10-section-evaluation-v2) — what changed and what
+ * deliberately did not:
+ *
+ *   UNCHANGED  Every score, band, rule_status, ruled_out, referral, review flag,
+ *              required-document effect, confidence value and scoring note is
+ *              produced by exactly the v1 scoring code path. A one-section
+ *              submission is byte-for-byte v1 (see tests/powerhouse).
+ *              How several section outcomes would combine into one insurer
+ *              score is a business decision this module does NOT make.
+ *
+ *   ADDED      (a) Deterministic input order: appetite rows are put in a
+ *                  canonical order before matching, and equal-scoring insurers
+ *                  are ordered by a defined key, so no result depends on the
+ *                  order the database returned rows in.
+ *              (b) Additive, read-only section intelligence per insurer:
+ *                  `selection`, `section_evaluations`, `considered_rules`.
+ *                  These re-run the SAME term scan used for scoring against
+ *                  rules the single-best-rule selector did not pick, so a
+ *                  decline / referral / caution in another requested section
+ *                  is visible instead of silently dropped. They never feed
+ *                  back into `score`, `rank` or any flag.
  */
 
 import type { AppetiteRow, AppetiteLevel } from "./matcher-types";
@@ -42,7 +64,15 @@ import {
  * every recommendation (with the matcher input) so an old recommendation can
  * be reconstructed and defended without replaying current code against it.
  */
-export const MATCHER_VERSION = "2026-07-token-matching-v1";
+export const MATCHER_VERSION = "2026-10-section-evaluation-v2";
+
+/**
+ * The matcher version that preceded Powerhouse. Scoring semantics are identical
+ * between the two; v2 adds deterministic ordering and section intelligence.
+ * Kept so parity tests and historical-row display can name it without
+ * hard-coding the string in several places.
+ */
+export const MATCHER_VERSION_V1 = "2026-07-token-matching-v1";
 
 const BASE_SCORE: Record<AppetiteLevel, number> = {
   preferred: 100,
@@ -182,6 +212,139 @@ export interface ConfidenceReconciliation {
   final_confidence: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// Section intelligence (read-only; never feeds the score)
+// ---------------------------------------------------------------------------
+
+/** What a rule's term lists produced against the submitted features. */
+export type RuleConditionKind =
+  | "hard_decline"
+  | "soft_decline_referral"
+  | "referral"
+  | "caution"
+  | "preferred";
+
+export type RuleConditionOrigin =
+  | "appetite_level"
+  | "declined_risks"
+  | "referral_triggers"
+  | "caution_risks"
+  | "preferred_risks";
+
+export interface RuleCondition {
+  kind: RuleConditionKind;
+  origin: RuleConditionOrigin;
+  /** Insurer-owned terms paired with the authoritative feature-source label.
+   *  Empty for `appetite_level` origin (the rule itself is declined). */
+  matched_rule_terms: MatchedRuleTerm[];
+}
+
+/**
+ * How one rule was chosen among its competitors. `only_candidate`: a single
+ * rule qualified. `highest_taxonomy_quality`: one rule strictly outscored the
+ * rest. `tie_broken_by_canonical_order`: several rules were equally good and
+ * the lowest canonical rule order won — a policy-neutral identity tie-break,
+ * NOT an underwriting judgement.
+ */
+export type SelectionBasis =
+  | "only_candidate"
+  | "highest_taxonomy_quality"
+  | "tie_broken_by_canonical_order";
+
+/**
+ * Worst-first label for the selected rule of a section. Presentation
+ * precedence only (hard_decline > soft_decline_referral > referral > caution >
+ * preferred > standard); it is never used to compute a score.
+ */
+export type SectionOutcome =
+  | "hard_decline"
+  | "soft_decline_referral"
+  | "referral"
+  | "caution"
+  | "preferred"
+  | "standard";
+
+export interface RequestedSection {
+  /** As submitted (first spelling seen). */
+  section: string;
+  /** Canonical taxonomy key — the identity used for matching and de-duplication. */
+  section_key: string;
+}
+
+/**
+ * The aspects in which equally good (tied) rules can differ in a way that could
+ * change the underwriting outcome or the evidence an underwriter relies on.
+ * Metadata that cannot (notes, sources, ids) is deliberately NOT compared.
+ */
+export type TieDifference =
+  | "appetite_level"
+  | "hard_decline"
+  | "soft_decline"
+  | "preferred_terms"
+  | "caution_terms"
+  | "referral_terms"
+  | "required_documents";
+
+export interface SectionEvaluation extends RequestedSection {
+  status: "evaluated" | "no_applicable_rule";
+  /** Product rules whose product line relates to this section, best first. */
+  applicable_rule_ids: string[];
+  selected_rule_id: string | null;
+  selection_basis: SelectionBasis | null;
+  /** Equally good rules (including the selected one) when more than one tied. */
+  tied_rule_ids: string[];
+  /** True when `tie_differences` is non-empty. */
+  tied_rules_disagree: boolean;
+  /** Which outcome-relevant aspects differ between the tied rules (empty when equivalent). */
+  tie_differences: TieDifference[];
+  outcome: SectionOutcome | null;
+  /** True only when the selected rule is the one that set the insurer's score. */
+  reflected_in_insurer_outcome: boolean;
+}
+
+/** Why a rule appears in `considered_rules` (highest-precedence reason). */
+export type ConsideredListReason =
+  | "scored_rule"
+  | "section_applicable"
+  | "product_relevant"
+  | "tied_for_best"
+  | "material_risk_only";
+
+export interface ConsideredRule {
+  rule_id: string;
+  product_line: string;
+  risk_type: string;
+  appetite_level: AppetiteLevel;
+  /** Whole-submission taxonomy quality used by the v1 selector (1, 2 or 3). */
+  taxonomy_quality: 1 | 2 | 3;
+  /** Requested sections this rule is applicable to (canonical keys). */
+  section_keys: string[];
+  /** Sections for which this rule is the selected rule. */
+  selected_for_section_keys: string[];
+  /** True when this rule set the insurer's base outcome and score. */
+  scored: boolean;
+  not_scored_reason: "lower_taxonomy_quality" | "lost_tie_canonical_order" | null;
+  listed_because: ConsideredListReason;
+  conditions: RuleCondition[];
+}
+
+export interface InsurerSelection {
+  /** The single product rule the score is based on (null: none qualified). */
+  product_rule_id: string | null;
+  taxonomy_quality: 1 | 2 | 3 | null;
+  basis: SelectionBasis | null;
+  tied_rule_ids: string[];
+  /** True when `tie_differences` is non-empty. */
+  tied_rules_disagree: boolean;
+  tie_differences: TieDifference[];
+  /** Product rules with quality >= 1 (the selector's candidate pool). */
+  matching_rule_count: number;
+  /** Matching rules NOT listed in `considered_rules`: risk-type-only matches
+   *  that neither tied for best, nor relate to a requested product/section, nor
+   *  carry a material condition or document difference. */
+  omitted_risk_only_rule_count: number;
+}
+
 export interface InsurerScore {
   insurer_id: string;
   insurer_name: string;
@@ -213,11 +376,27 @@ export interface InsurerScore {
   unmatched_sections: string[];
   unmatched_product_candidates: string[];
   nearby_rule_matches: string[];
+  /** How the single scoring rule was selected. Read-only; absent on historical payloads. */
+  selection?: InsurerSelection;
+  /** One entry per requested cover section. Read-only; never aggregated into `score`. */
+  section_evaluations?: SectionEvaluation[];
+  /**
+   * Present ONLY when the submission declared no cover sections AND this insurer
+   * has product rules for two or more distinct product lines implied by the
+   * product candidates. These are NOT requested sections (none is invented and
+   * nothing is aggregated); they let the quality gate see a decline/referral in
+   * a product the legacy single-rule score does not reflect.
+   */
+  implied_product_evaluations?: SectionEvaluation[];
+  /** Relevant rules the selector saw, bounded to the submitted product/section/risk. */
+  considered_rules?: ConsideredRule[];
 }
 
 export interface MatchResult {
   insurers: InsurerScore[];
   no_data_for: { insurer_id: string; insurer_name: string }[];
+  /** The de-duplicated cover sections the submission asked for. */
+  requested_sections?: RequestedSection[];
 }
 
 const lower = (s: string) => s.toLowerCase();
@@ -394,14 +573,402 @@ function unmatchedFromRisk(risk: MatchInputRisk, productRules: AppetiteRow[]): {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic ordering
+// ---------------------------------------------------------------------------
+
+/** Locale-independent comparison: UTF-16 code units, the same everywhere. */
+export function compareCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Canonical order for appetite rows: insurer, then canonical product line,
+ * then canonical risk type, then rule id. It carries no underwriting meaning —
+ * it exists so that "which rule is first" never depends on the order the
+ * database happened to return rows in. Returns a new array.
+ */
+export function canonicalAppetiteOrder(rows: readonly AppetiteRow[]): AppetiteRow[] {
+  return rows
+    .map((row) => ({
+      row,
+      // Null-safe: ordering must never be less tolerant of a malformed row than
+      // the v1 matcher was (v1 never inspected inactive rows at all).
+      productKey: normTaxonomy(row.product_line ?? ""),
+      riskKey: normTaxonomy(row.risk_type ?? ""),
+    }))
+    .sort(
+      (a, b) =>
+        compareCodeUnits(String(a.row.insurer_id), String(b.row.insurer_id)) ||
+        compareCodeUnits(a.productKey, b.productKey) ||
+        compareCodeUnits(a.riskKey, b.riskKey) ||
+        compareCodeUnits(String(a.row.id), String(b.row.id))
+    )
+    .map((entry) => entry.row);
+}
+
+// ---------------------------------------------------------------------------
+// Section intelligence — read-only evaluation of rules the scorer did not use.
+// Everything below re-uses the scoring scan (`findMatches`) so a condition is
+// reported exactly when scoring WOULD have seen it had that rule been selected.
+// ---------------------------------------------------------------------------
+
+export function requestedSectionsOf(risk: MatchInputRisk): RequestedSection[] {
+  const seen = new Set<string>();
+  const sections: RequestedSection[] = [];
+  for (const raw of risk.section_candidates ?? []) {
+    const section = typeof raw === "string" ? raw.trim() : "";
+    if (!section) continue;
+    const key = normTaxonomy(section);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    sections.push({ section, section_key: key });
+  }
+  return sections;
+}
+
+function termPairs(hits: FeatureHit[]): MatchedRuleTerm[] {
+  return hits.flatMap<MatchedRuleTerm>((hit) =>
+    hit.sources.length > 0
+      ? hit.sources.map((source) => ({ term: hit.candidate, input_source: source }))
+      : [{ term: hit.candidate, input_source: null }]
+  );
+}
+
+/** Conditions in a fixed order so output is stable. */
+function conditionsFor(rule: AppetiteRow, features: RiskFeature[]): RuleCondition[] {
+  const conditions: RuleCondition[] = [];
+  if (rule.appetite_level === "declined") {
+    conditions.push({ kind: "hard_decline", origin: "appetite_level", matched_rule_terms: [] });
+  }
+  const declined = findMatches(features, rule.declined_risks);
+  const declinedDocument = declined.filter((hit) => !hit.ai_only);
+  const declinedAiOnly = declined.filter((hit) => hit.ai_only);
+  if (declinedDocument.length > 0) {
+    conditions.push({ kind: "hard_decline", origin: "declined_risks", matched_rule_terms: termPairs(declinedDocument) });
+  }
+  if (declinedAiOnly.length > 0) {
+    conditions.push({ kind: "soft_decline_referral", origin: "declined_risks", matched_rule_terms: termPairs(declinedAiOnly) });
+  }
+  const preferred = findMatches(features, rule.preferred_risks);
+  if (preferred.length > 0) {
+    conditions.push({ kind: "preferred", origin: "preferred_risks", matched_rule_terms: termPairs(preferred) });
+  }
+  const caution = findMatches(features, rule.caution_risks);
+  if (caution.length > 0) {
+    conditions.push({ kind: "caution", origin: "caution_risks", matched_rule_terms: termPairs(caution) });
+  }
+  const referral = findMatches(features, rule.referral_triggers);
+  if (referral.length > 0) {
+    conditions.push({ kind: "referral", origin: "referral_triggers", matched_rule_terms: termPairs(referral) });
+  }
+  return conditions;
+}
+
+function sectionOutcomeOf(rule: AppetiteRow, conditions: RuleCondition[]): SectionOutcome {
+  const has = (kind: RuleConditionKind) => conditions.some((condition) => condition.kind === kind);
+  if (has("hard_decline")) return "hard_decline";
+  if (has("soft_decline_referral")) return "soft_decline_referral";
+  if (has("referral")) return "referral";
+  if (has("caution") || rule.appetite_level === "caution") return "caution";
+  return rule.appetite_level === "preferred" ? "preferred" : "standard";
+}
+
+// --------------------------------------------------------------------------
+// Tie profile. Two equally good rules DISAGREE when choosing one over the other
+// could change the underwriting outcome or the evidence an underwriter relies on:
+// appetite level, hard/soft decline, the exact preferred / caution / referral
+// terms that hit (which fixes the score effect), and the required-document set.
+// Nothing else is compared: notes, sources, ids, product-line spelling and
+// document ORDER/CASE are irrelevant and must never manufacture a disagreement.
+// --------------------------------------------------------------------------
+
+/** Canonical key for a required-document label: same normalisation `hasRequiredDoc` uses. */
+export function documentKey(label: string): string {
+  return lower(label).replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Deterministic, de-duplicated (by canonical key), sorted document keys. */
+function canonicalDocumentKeys(labels: readonly string[] | null | undefined): string[] {
+  return [...new Set((labels ?? []).map(documentKey).filter(Boolean))].sort(compareCodeUnits);
+}
+
+function termSet(conditions: RuleCondition[], kind: RuleConditionKind): string {
+  const terms = new Set<string>();
+  for (const condition of conditions) {
+    if (condition.kind !== kind) continue;
+    if (condition.origin === "appetite_level") terms.add("@appetite_level");
+    for (const pair of condition.matched_rule_terms) terms.add(`${condition.origin}:${lower(pair.term).trim()}`);
+  }
+  return [...terms].sort(compareCodeUnits).join("\u0000");
+}
+
+function ruleProfile(rule: AppetiteRow, conditions: RuleCondition[]): Record<TieDifference, string> {
+  return {
+    appetite_level: rule.appetite_level,
+    hard_decline: termSet(conditions, "hard_decline"),
+    soft_decline: termSet(conditions, "soft_decline_referral"),
+    preferred_terms: termSet(conditions, "preferred"),
+    caution_terms: termSet(conditions, "caution"),
+    referral_terms: termSet(conditions, "referral"),
+    required_documents: canonicalDocumentKeys(rule.required_documents).join("\u0000"),
+  };
+}
+
+const TIE_ASPECTS: TieDifference[] = [
+  "appetite_level",
+  "hard_decline",
+  "soft_decline",
+  "preferred_terms",
+  "caution_terms",
+  "referral_terms",
+  "required_documents",
+];
+
+/** The aspects in which any two of the tied rules differ (empty = outcome-equivalent). */
+function tieDifferences(rules: AppetiteRow[], conditionsOf: (rule: AppetiteRow) => RuleCondition[]): TieDifference[] {
+  if (rules.length < 2) return [];
+  const profiles = rules.map((rule) => ruleProfile(rule, conditionsOf(rule)));
+  return TIE_ASPECTS.filter((aspect) => new Set(profiles.map((profile) => profile[aspect])).size > 1);
+}
+
+function qualityLevel(value: number): 1 | 2 | 3 {
+  return value >= 3 ? 3 : value === 2 ? 2 : 1;
+}
+
+function riskCandidatesRelate(riskCandidates: string[], rule: AppetiteRow): boolean {
+  const ruleRisk = normTaxonomy(rule.risk_type);
+  if (!ruleRisk) return false;
+  return riskCandidates.some((candidate) => {
+    if (!candidate) return false;
+    const key = normTaxonomy(candidate);
+    return !!key && taxonomyKeysRelated(ruleRisk, key);
+  });
+}
+
+/** A condition an underwriter must be told about even on a rule that lost selection. */
+const MATERIAL_KINDS: ReadonlySet<RuleConditionKind> = new Set([
+  "hard_decline",
+  "soft_decline_referral",
+  "referral",
+  "caution",
+]);
+
+function buildInsurerIntel(input: {
+  productRules: AppetiteRow[];
+  qualities: number[];
+  bestQuality: number;
+  usedRule: AppetiteRow | null;
+  sections: RequestedSection[];
+  risk: MatchInputRisk;
+  features: RiskFeature[];
+}): Pick<InsurerScore, "selection" | "section_evaluations" | "considered_rules" | "implied_product_evaluations"> {
+  const { productRules, qualities, bestQuality, usedRule, sections, risk, features } = input;
+
+  // ---- per-rule facts, in canonical rule order ------------------------------
+  const conditionCache = new Map<string, RuleCondition[]>();
+  const conditionsOf = (rule: AppetiteRow): RuleCondition[] => {
+    const cached = conditionCache.get(rule.id);
+    if (cached) return cached;
+    const computed = conditionsFor(rule, features);
+    conditionCache.set(rule.id, computed);
+    return computed;
+  };
+
+  type Applicable = { rule: AppetiteRow; quality: number };
+
+  /** Evaluate one group of applicable rules (a requested section, or an implied product line). */
+  const evaluateGroup = (label: RequestedSection, applicable: Applicable[]): SectionEvaluation => {
+    if (applicable.length === 0) {
+      return {
+        ...label,
+        status: "no_applicable_rule",
+        applicable_rule_ids: [],
+        selected_rule_id: null,
+        selection_basis: null,
+        tied_rule_ids: [],
+        tied_rules_disagree: false,
+        tie_differences: [],
+        outcome: null,
+        reflected_in_insurer_outcome: false,
+      };
+    }
+    const top = applicable[0].quality;
+    const tied = applicable.filter((entry) => entry.quality === top);
+    const selected = tied[0].rule;
+    const differences = tieDifferences(tied.map((entry) => entry.rule), conditionsOf);
+    return {
+      ...label,
+      status: "evaluated",
+      applicable_rule_ids: applicable.map((entry) => entry.rule.id),
+      selected_rule_id: selected.id,
+      selection_basis:
+        applicable.length === 1 ? "only_candidate" : tied.length > 1 ? "tie_broken_by_canonical_order" : "highest_taxonomy_quality",
+      tied_rule_ids: tied.length > 1 ? tied.map((entry) => entry.rule.id) : [],
+      tied_rules_disagree: differences.length > 0,
+      tie_differences: differences,
+      outcome: sectionOutcomeOf(selected, conditionsOf(selected)),
+      reflected_in_insurer_outcome: usedRule?.id === selected.id,
+    };
+  };
+
+  // ---- requested sections ----------------------------------------------------
+  const sectionApplicable = new Map<string, Applicable[]>();
+  for (const section of sections) {
+    const applicable: Applicable[] = [];
+    for (const rule of productRules) {
+      const productKey = normTaxonomy(rule.product_line);
+      if (!productKey || !taxonomyKeysRelated(productKey, section.section_key)) continue;
+      applicable.push({ rule, quality: riskCandidatesRelate(risk.risk_candidates, rule) ? 3 : 2 });
+    }
+    // Best quality first; canonical order (the input order) breaks ties.
+    applicable.sort((a, b) => b.quality - a.quality);
+    sectionApplicable.set(section.section_key, applicable);
+  }
+
+  // ---- insurer-level selection ---------------------------------------------
+  const matchingIndexes = productRules
+    .map((_, index) => index)
+    .filter((index) => qualities[index] >= 1);
+  const tiedAtBest = usedRule
+    ? matchingIndexes.filter((index) => qualities[index] === bestQuality)
+    : [];
+  const tiedRules = tiedAtBest.map((index) => productRules[index]);
+  const selectionDifferences = tieDifferences(tiedRules, conditionsOf);
+
+  const selection: InsurerSelection = {
+    product_rule_id: usedRule?.id ?? null,
+    taxonomy_quality: usedRule ? qualityLevel(bestQuality) : null,
+    basis: !usedRule
+      ? null
+      : matchingIndexes.length === 1
+      ? "only_candidate"
+      : tiedRules.length > 1
+      ? "tie_broken_by_canonical_order"
+      : "highest_taxonomy_quality",
+    tied_rule_ids: tiedRules.length > 1 ? tiedRules.map((rule) => rule.id) : [],
+    tied_rules_disagree: selectionDifferences.length > 0,
+    tie_differences: selectionDifferences,
+    matching_rule_count: matchingIndexes.length,
+    omitted_risk_only_rule_count: 0,
+  };
+
+  const selectedForSections = new Map<string, string[]>();
+  const sectionEvaluations: SectionEvaluation[] = sections.map((section) => {
+    const evaluation = evaluateGroup(section, sectionApplicable.get(section.section_key) ?? []);
+    if (evaluation.selected_rule_id) {
+      const list = selectedForSections.get(evaluation.selected_rule_id) ?? [];
+      list.push(section.section_key);
+      selectedForSections.set(evaluation.selected_rule_id, list);
+    }
+    return evaluation;
+  });
+
+  // ---- implied products (ONLY when no cover section was declared) -------------
+  // Not requested sections and never aggregated: each distinct product line this
+  // insurer has a rule for, among the product candidates, is evaluated so a
+  // decline/referral in a product the single-rule score does not reflect is seen.
+  let impliedProducts: SectionEvaluation[] | undefined;
+  if (sections.length === 0) {
+    const groups = new Map<string, Applicable[]>();
+    const display = new Map<string, string>();
+    productRules.forEach((rule, index) => {
+      if (qualities[index] < 2) return; // not related to any product candidate
+      const key = normTaxonomy(rule.product_line);
+      if (!key) return;
+      const list = groups.get(key) ?? [];
+      list.push({ rule, quality: riskCandidatesRelate(risk.risk_candidates, rule) ? 3 : 2 });
+      groups.set(key, list);
+      if (!display.has(key)) display.set(key, rule.product_line);
+    });
+    if (groups.size >= 2) {
+      impliedProducts = [...groups.keys()].sort(compareCodeUnits).map((key) => {
+        const applicable = groups.get(key)!;
+        applicable.sort((a, b) => b.quality - a.quality);
+        return evaluateGroup({ section: display.get(key)!, section_key: key }, applicable);
+      });
+    }
+  }
+
+  // ---- considered rules: bounded to what is relevant ------------------------
+  const applicableRuleIds = new Set<string>();
+  for (const list of sectionApplicable.values()) for (const entry of list) applicableRuleIds.add(entry.rule.id);
+
+  // Documents the scored rule asks for; a loser that asks for a DIFFERENT set is
+  // material (the underwriter would chase different paperwork).
+  const scoredDocs = canonicalDocumentKeys(usedRule?.required_documents).join("\u0000");
+
+  const considered: ConsideredRule[] = [];
+  let omitted = 0;
+  productRules.forEach((rule, index) => {
+    const quality = qualities[index];
+    if (quality < 1) return;
+    const isScored = usedRule?.id === rule.id;
+    const conditions = conditionsOf(rule);
+    let reason: ConsideredListReason | null = null;
+    if (isScored) reason = "scored_rule";
+    else if (applicableRuleIds.has(rule.id)) reason = "section_applicable";
+    else if (quality >= 2) reason = "product_relevant";
+    else if (quality === bestQuality) reason = "tied_for_best";
+    else {
+      // A risk-type-only loser: counted, not dumped — unless it carries something
+      // the underwriter must know (any caution / referral / soft or hard decline
+      // that fired, or a materially different required-document set).
+      const documents = canonicalDocumentKeys(rule.required_documents).join("\u0000");
+      const materialCondition = conditions.some((condition) => MATERIAL_KINDS.has(condition.kind));
+      const materialDocuments = documents !== "" && documents !== scoredDocs;
+      if (materialCondition || materialDocuments) reason = "material_risk_only";
+    }
+    if (!reason) {
+      omitted++;
+      return;
+    }
+    considered.push({
+      rule_id: rule.id,
+      product_line: rule.product_line,
+      risk_type: rule.risk_type,
+      appetite_level: rule.appetite_level,
+      taxonomy_quality: qualityLevel(quality),
+      section_keys: sections
+        .filter((section) => (sectionApplicable.get(section.section_key) ?? []).some((entry) => entry.rule.id === rule.id))
+        .map((section) => section.section_key),
+      selected_for_section_keys: selectedForSections.get(rule.id) ?? [],
+      scored: isScored,
+      not_scored_reason: isScored
+        ? null
+        : quality < bestQuality
+        ? "lower_taxonomy_quality"
+        : "lost_tie_canonical_order",
+      listed_because: reason,
+      conditions,
+    });
+  });
+  // Scored rule first, then better quality, then canonical order (already the input order).
+  considered.sort(
+    (a, b) => Number(b.scored) - Number(a.scored) || b.taxonomy_quality - a.taxonomy_quality
+  );
+  selection.omitted_risk_only_rule_count = omitted;
+
+  return {
+    selection,
+    section_evaluations: sectionEvaluations,
+    considered_rules: considered,
+    ...(impliedProducts ? { implied_product_evaluations: impliedProducts } : {}),
+  };
+}
+
 export function matchInsurers(
   risk: MatchInputRisk,
   allAppetite: AppetiteRow[]
 ): MatchResult {
   const features = normalizeFeatures(risk.features);
+  const requestedSections = requestedSectionsOf(risk);
+  const intelByInsurer = new Map<string, ReturnType<typeof buildInsurerIntel>>();
   const productByInsurer = new Map<string, AppetiteRow[]>();
   const portfolioByInsurer = new Map<string, AppetiteRow[]>();
-  for (const row of allAppetite) {
+  // Canonical order: nothing below may depend on the order rows arrived in.
+  // Inactive rows are dropped first, exactly as v1 ignored them.
+  for (const row of canonicalAppetiteOrder(allAppetite.filter((candidate) => candidate.is_active))) {
     if (!row.is_active) continue;
     if (isPortfolio(row)) {
       const arr = portfolioByInsurer.get(row.insurer_id) ?? [];
@@ -427,17 +994,16 @@ export function matchInsurers(
     const portfolioRules = portfolioByInsurer.get(insurerId) ?? [];
 
     // Best-fit product rule using candidate-list substring taxonomy matching.
+    // Strict `>`: the first rule in canonical order wins every tie.
+    const qualities = productRules.map((r) =>
+      taxonomyQualityWithCandidates(risk.product_candidates, risk.risk_candidates, r)
+    );
     let bestRule: AppetiteRow | null = null;
     let bestQuality = -1;
-    for (const r of productRules) {
-      const quality = taxonomyQualityWithCandidates(
-        risk.product_candidates,
-        risk.risk_candidates,
-        r
-      );
-      if (quality > bestQuality) {
-        bestQuality = quality;
-        bestRule = r;
+    for (let index = 0; index < productRules.length; index++) {
+      if (qualities[index] > bestQuality) {
+        bestQuality = qualities[index];
+        bestRule = productRules[index];
       }
     }
 
@@ -448,6 +1014,10 @@ export function matchInsurers(
     // vanish from the recommendation.
 
     const usedRule = bestQuality >= 1 ? bestRule : null;
+    intelByInsurer.set(
+      insurerId,
+      buildInsurerIntel({ productRules, qualities, bestQuality, usedRule, sections: requestedSections, risk, features })
+    );
     const insurerName =
       usedRule?.insurer_name ??
       productRules[0]?.insurer_name ??
@@ -765,13 +1335,25 @@ export function matchInsurers(
     });
   }
 
+  // Section intelligence is attached after scoring so it can never influence it.
+  for (const insurer of scored) {
+    const intel = intelByInsurer.get(insurer.insurer_id);
+    if (intel) Object.assign(insurer, intel);
+  }
+
+  // Ruled-out last, then score; equal scores fall back to a defined key
+  // (insurer name, then id) instead of the order rows happened to arrive in.
   scored.sort((a, b) => {
     if (a.ruled_out !== b.ruled_out) return a.ruled_out ? 1 : -1;
-    return b.score - a.score;
+    return (
+      b.score - a.score ||
+      compareCodeUnits(a.insurer_name, b.insurer_name) ||
+      compareCodeUnits(a.insurer_id, b.insurer_id)
+    );
   });
   scored.forEach((insurer, index) => { insurer.rank = index + 1; });
 
-  return { insurers: scored, no_data_for: noData };
+  return { insurers: scored, no_data_for: noData, requested_sections: requestedSections };
 }
 
 /**

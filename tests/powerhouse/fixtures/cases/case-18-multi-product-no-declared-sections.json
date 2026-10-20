@@ -1,0 +1,44 @@
+{
+  "fixture_schema": "powerhouse-case-v1",
+  "id": "case-18-multi-product-no-declared-sections",
+  "title": "Several products implied, but no cover section declared",
+  "description": "cover_sections is empty while the product line names two products (Commercial motor, Goods in transit). Alpha is preferred for motor but declines Goods in transit; Beta is clean for both; Gamma only has a motor rule. No section is invented and nothing is aggregated.",
+  "intent": [
+    "requested_sections stays EMPTY and no section evaluation is invented",
+    "Alpha keeps its legacy score (100) and is NOT declined merely because sections were not declared",
+    "Alpha's undeclared-product hard decline is a BLOCKER (hidden-conflict rules): state incomplete",
+    "Beta with nothing adverse is MATERIAL (cannot claim a complete section evaluation) — never decision_ready",
+    "Gamma, with a single implied product, raises no multi-product gap",
+    "the global requested_sections_not_declared scope note remains advisory"
+  ],
+  "rule_defaults": {
+    "notes": null, "rating_notes": null, "line_of_business": "commercial", "source": "manual",
+    "source_document_id": "doc-guide", "source_file_name": "guide.pdf", "source_page": 4,
+    "source_section": "Section 4", "source_quote": "Synthetic guideline excerpt.",
+    "ingestion_confidence": 0.95, "is_active": true, "updated_at": "2026-10-15T00:00:00.000Z",
+    "preferred_risks": [], "caution_risks": [], "declined_risks": [], "required_documents": [], "referral_triggers": []
+  },
+  "reviewed_compact": {
+    "schema_version": "case-v1",
+    "extracted_client": { "occupation_or_business_description": "transport fleet", "risk_address": "1 Synthetic Road", "entity_type": "Company" },
+    "current_cover": { "cover_sections": [], "endorsements": [], "exclusions": [] },
+    "risk_classification": {
+      "product_line": "commercial motor, goods in transit", "risk_type": "transport", "primary_risk_type": "transport fleet",
+      "secondary_risk_types": [], "business_sector": "transport", "complexity_level": "medium"
+    },
+    "red_flags": []
+  },
+  "documents": [{ "document_type": "Claims history", "status": "active", "scan_status": "clean" }],
+  "insurers": [
+    { "id": "insurer-alpha", "name": "Alpha Insurance", "active": true },
+    { "id": "insurer-beta", "name": "Beta Insurance", "active": true },
+    { "id": "insurer-gamma", "name": "Gamma Insurance", "active": true }
+  ],
+  "rules": [
+    { "id": "alpha-motor", "insurer_id": "insurer-alpha", "insurer_name": "Alpha Insurance", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "preferred", "preferred_risks": ["transport fleet"] },
+    { "id": "alpha-git", "insurer_id": "insurer-alpha", "insurer_name": "Alpha Insurance", "product_line": "goods_in_transit", "risk_type": "cargo", "appetite_level": "declined" },
+    { "id": "beta-motor", "insurer_id": "insurer-beta", "insurer_name": "Beta Insurance", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "standard" },
+    { "id": "beta-git", "insurer_id": "insurer-beta", "insurer_name": "Beta Insurance", "product_line": "goods_in_transit", "risk_type": "cargo", "appetite_level": "standard" },
+    { "id": "gamma-motor", "insurer_id": "insurer-gamma", "insurer_name": "Gamma Insurance", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "standard" }
+  ]
+}

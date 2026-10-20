@@ -40,7 +40,12 @@ import {
   type ReasoningOutput,
 } from "./matcher-reasoning";
 import { composeExplanation, verifyPolish } from "./explanation-composer";
-import { buildRecommendationEvidence } from "./recommendation-evidence";
+import { minimisedMatcherInputSnapshot } from "./recommendation-evidence";
+import {
+  QUALITY_MODEL_VERSION,
+  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+  buildRecommendationEvidenceV2,
+} from "./recommendation-evidence-v2";
 import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
 import { logOperationError } from "./phase6-hardening";
@@ -59,11 +64,11 @@ const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 interface RecommendationEndpointDependencies {
-  buildEvidence: typeof buildRecommendationEvidence;
+  buildEvidence: typeof buildRecommendationEvidenceV2;
 }
 
 const DEFAULT_RECOMMENDATION_DEPENDENCIES: RecommendationEndpointDependencies = {
-  buildEvidence: buildRecommendationEvidence,
+  buildEvidence: buildRecommendationEvidenceV2,
 };
 
 // ----------------------------------------------------------------------------
@@ -118,7 +123,7 @@ function valueStrings(value: unknown): string[] {
  * behaviour (available:true) so the alerting/matching contracts do not
  * silently change under legacy data.
  */
-function resolveConfidenceProvenance(
+export function resolveConfidenceProvenance(
   reviewed: Record<string, unknown>,
   extracted: Record<string, unknown>,
   columnConfidence: unknown
@@ -155,7 +160,7 @@ function resolveConfidenceProvenance(
   return { overall_confidence: 0.7, overall_confidence_available: true };
 }
 
-function deriveRisk(
+export function deriveRisk(
   reviewed: Record<string, unknown>,
   availableDocs: string[],
   overallConfidence: number,
@@ -355,7 +360,12 @@ export async function handleRunRecommendation(
         "source_page, source_section, source_file_name, ingestion_confidence, " +
         "source, source_document_id, is_active, updated_at"
     )
-    .eq("is_active", true);
+    .eq("is_active", true)
+    // Deterministic input order. The matcher re-sorts canonically itself
+    // (canonicalAppetiteOrder), so this is belt-and-braces: nothing depends on
+    // the order PostgreSQL happens to return rows in.
+    .order("insurer_id", { ascending: true })
+    .order("id", { ascending: true });
   const appetite = (appetiteRaw ?? []) as unknown as AppetiteRow[];
 
   if (appetite.length === 0) {
@@ -365,6 +375,31 @@ export async function handleRunRecommendation(
     );
   }
 
+  // ---- Load the active insurer inventory (BEFORE the cache decision) ----
+  // Insurers with ZERO active rules never enter the matcher (its input is
+  // appetite rows) yet they are part of the persisted result (`no_data_for`).
+  // So the inventory is a fingerprint input: activating, deactivating or
+  // renaming an insurer must not be answered "unchanged" from a stale job.
+  // A failed read is NOT an empty inventory — fail closed, like document trust.
+  const { data: insurerRows, error: insurerError } = await admin
+    .from("atlas_insurers")
+    .select("id, name")
+    .eq("active", true);
+  if (insurerError) {
+    logOperationError({
+      endpoint: "recommend",
+      operation: "load_active_insurers",
+      code: "insurer_inventory_unavailable",
+      submissionId,
+      status: 503,
+    });
+    return json({ error: "insurer_inventory_unavailable", detail: "retry_later" }, 503);
+  }
+  const activeInsurers = ((insurerRows ?? []) as { id: string; name: string }[]).map((row) => ({
+    id: row.id,
+    name: row.name,
+  }));
+
   const inputFp = buildRecommendationFingerprint({
     submissionId,
     extractionId: extraction.id,
@@ -373,6 +408,14 @@ export async function handleRunRecommendation(
       (a) => `${a.id}:${a.updated_at ?? ""}`
     ),
     availableDocuments: availableDocs,
+    // Behaviour versions: a deploy that changes matching, taxonomy, the
+    // persisted evidence contract or the quality classification must not be
+    // answered from a stale cache.
+    matcherVersion: MATCHER_VERSION,
+    taxonomyVersion: TAXONOMY_VERSION,
+    evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+    qualityModelVersion: QUALITY_MODEL_VERSION,
+    activeInsurers,
   });
   const job = await beginJob(
     admin,
@@ -415,16 +458,10 @@ export async function handleRunRecommendation(
   // Insurers with ZERO active rules never enter the matcher (its input is
   // appetite rows), so surface them explicitly: the underwriter must see
   // "Atlas has no appetite data for X" rather than X silently vanishing.
-  const { data: insurerRows } = await admin
-    .from("atlas_insurers")
-    .select("id, name")
-    .eq("active", true);
+  // Uses the inventory already loaded (and fingerprinted) above — no second read.
   result.no_data_for = [
     ...result.no_data_for,
-    ...insurersWithoutActiveRules(
-      (insurerRows ?? []) as { id: string; name: string }[],
-      appetite
-    ),
+    ...insurersWithoutActiveRules(activeInsurers, appetite),
   ];
 
   // ---- Build reasoning context map (id -> source_quote/notes) ----
@@ -518,10 +555,19 @@ export async function handleRunRecommendation(
   const notRecommended = result.insurers.filter((i) => i.ruled_out);
 
   const reasoningById = new Map(reasoning.per_insurer.map((r) => [r.insurer_id, r.reasoning]));
-  const enriched = (s: InsurerScore) => ({
-    ...s,
-    reasoning: reasoningById.get(s.insurer_id) ?? "",
-  });
+  // The compatibility columns (reasoning_json.top, secondary_options_json,
+  // not_recommended_json) keep their historical shape. Section intelligence
+  // lives only in evidence_json, so it is not duplicated three times.
+  const enriched = (s: InsurerScore) => {
+    const {
+      selection: _selection,
+      section_evaluations: _sections,
+      implied_product_evaluations: _implied,
+      considered_rules: _considered,
+      ...legacy
+    } = s;
+    return { ...legacy, reasoning: reasoningById.get(s.insurer_id) ?? "" };
+  };
 
   // Generate the durable identity before insert so the evidence packet can
   // name the exact persisted recommendation without a second write.
@@ -566,11 +612,14 @@ export async function handleRunRecommendation(
       manual_review_required: top?.manual_review_required ?? false,
       unmatched_sections: top?.unmatched_sections ?? [],
       unmatched_product_candidates: top?.unmatched_product_candidates ?? [],
-      // Reconstruction snapshot: the exact derived input the matcher ran on,
-      // and which matcher/taxonomy behaviour produced the scores. Without
-      // this, explaining an old recommendation would mean replaying CURRENT
-      // code against the reviewed JSON — wrong after any matcher change.
-      matcher_input: risk,
+      // Compatibility snapshot of the matcher input. PRIVACY-MINIMISED: the
+      // taxonomy candidates, trusted document labels and confidence are kept,
+      // but client free text (feature values) is NOT — only each feature's
+      // source label and AI-inference flag. No runtime consumer reads the raw
+      // text (see docs/powerhouse-p1b-p2-intelligence-quality.md §privacy),
+      // and the explanation of a run lives in evidence_json. Historical rows
+      // keep their original shape and are never rewritten.
+      matcher_input: minimisedMatcherInputSnapshot(risk),
       matcher_version: MATCHER_VERSION,
       taxonomy_version: TAXONOMY_VERSION,
       reasoning_source: reasoningSource,

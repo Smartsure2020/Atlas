@@ -1,0 +1,66 @@
+{
+  "fixture_schema": "powerhouse-fixture-v1",
+  "id": "baseline-multi-section",
+  "title": "Checkpoint A — known limitation: one best product rule per insurer",
+  "description": "A submission requests two cover sections (Commercial motor, Goods in transit). Each insurer has a strongly preferred/standard motor rule and a separate Goods in transit rule that is declined, caution or referral. The pre-change matcher scores each insurer against ONE product rule and silently drops the other section.",
+  "rule_defaults": {
+    "notes": null,
+    "rating_notes": null,
+    "source": "manual",
+    "source_document_id": "doc-guideline",
+    "source_file_name": "guideline.pdf",
+    "source_page": 4,
+    "source_section": "Section 4",
+    "source_quote": "Synthetic guideline excerpt.",
+    "ingestion_confidence": 0.95,
+    "line_of_business": "commercial",
+    "is_active": true,
+    "preferred_risks": [],
+    "caution_risks": [],
+    "declined_risks": [],
+    "required_documents": [],
+    "referral_triggers": []
+  },
+  "risk": {
+    "product_candidates": ["commercial motor", "transport", "Commercial motor", "Goods in transit"],
+    "section_candidates": ["Commercial motor", "Goods in transit"],
+    "risk_candidates": ["transport", "logistics"],
+    "features": [
+      { "text": "transport fleet", "source": "primary risk type" },
+      { "text": "high value cargo", "source": "endorsements" },
+      { "text": "cross border haulage", "source": "occupation/business description" }
+    ],
+    "available_documents": [],
+    "overall_confidence": 0.9,
+    "overall_confidence_available": true
+  },
+  "rules": [
+    {
+      "id": "alpha-motor", "insurer_id": "insurer-alpha", "insurer_name": "Alpha Insurance",
+      "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "preferred",
+      "preferred_risks": ["transport fleet"]
+    },
+    {
+      "id": "alpha-git", "insurer_id": "insurer-alpha", "insurer_name": "Alpha Insurance",
+      "product_line": "goods_in_transit", "risk_type": "cargo", "appetite_level": "declined"
+    },
+    {
+      "id": "beta-motor", "insurer_id": "insurer-beta", "insurer_name": "Beta Insurance",
+      "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "standard"
+    },
+    {
+      "id": "beta-git", "insurer_id": "insurer-beta", "insurer_name": "Beta Insurance",
+      "product_line": "goods_in_transit", "risk_type": "cargo", "appetite_level": "caution",
+      "caution_risks": ["high value cargo"], "referral_triggers": ["cross border"]
+    },
+    {
+      "id": "gamma-motor", "insurer_id": "insurer-gamma", "insurer_name": "Gamma Insurance",
+      "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "preferred",
+      "preferred_risks": ["transport fleet"]
+    },
+    {
+      "id": "gamma-git", "insurer_id": "insurer-gamma", "insurer_name": "Gamma Insurance",
+      "product_line": "goods_in_transit", "risk_type": "transport", "appetite_level": "declined"
+    }
+  ]
+}

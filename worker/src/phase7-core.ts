@@ -70,6 +70,24 @@ export function buildRecommendationFingerprint(input: {
   activeRuleIds: string[];
   /** The exact `availableDocs` handed to deriveRisk(): trusted documents only. */
   availableDocuments: string[];
+  /**
+   * Behaviour versions are REQUIRED inputs. A cached "unchanged" answer is only
+   * valid if the code that would recompute it is the code that produced it, so
+   * a change to matching semantics, taxonomy data or the persisted evidence
+   * contract must invalidate every previously completed recommendation job.
+   * (Required rather than optional so a future call site cannot forget them.)
+   */
+  matcherVersion: string;
+  taxonomyVersion: string;
+  evidenceSchemaVersion: string;
+  /** Version of the quality classification table that shapes the persisted quality block. */
+  qualityModelVersion: string;
+  /**
+   * The ACTIVE insurer inventory (id + name). It determines `no_data_for` — the
+   * insurers with zero active rules — so activating, deactivating or renaming an
+   * insurer changes the persisted recommendation even when no appetite rule did.
+   */
+  activeInsurers: { id: string; name: string }[];
 }) {
   return inputFingerprint({
     type: "recommendation",
@@ -78,7 +96,23 @@ export function buildRecommendationFingerprint(input: {
     reviewed_at: input.reviewedAt ?? null,
     active_rule_ids: [...input.activeRuleIds].sort(),
     available_documents: canonicalDocumentEvidence(input.availableDocuments),
+    matcher_version: input.matcherVersion,
+    taxonomy_version: input.taxonomyVersion,
+    evidence_schema_version: input.evidenceSchemaVersion,
+    quality_model_version: input.qualityModelVersion,
+    active_insurers: canonicalInsurerInventory(input.activeInsurers),
   });
+}
+
+/**
+ * Canonical, order-independent form of the active insurer inventory: unique
+ * `[id, name]` pairs sorted by UTF-16 code units (never locale-dependent), so the
+ * database's row order can never change a fingerprint.
+ */
+export function canonicalInsurerInventory(insurers: readonly { id: string; name: string }[]): [string, string][] {
+  const pairs = new Map<string, [string, string]>();
+  for (const insurer of insurers) pairs.set(`${insurer.id}\u0000${insurer.name}`, [String(insurer.id), String(insurer.name)]);
+  return [...pairs.values()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
 }
 
 export function buildQuoteReviewFingerprint(input: {

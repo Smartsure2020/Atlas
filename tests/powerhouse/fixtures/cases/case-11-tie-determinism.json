@@ -1,0 +1,40 @@
+{
+  "fixture_schema": "powerhouse-case-v1",
+  "id": "case-11-tie-determinism",
+  "title": "Ties: equal-score insurers and equal-quality rules",
+  "description": "Two insurers have identical rules and identical scores; their ids sort opposite to their names. Gamma has two equally good rules that disagree (preferred motor vs declined goods-in-transit). Order must be defined and independent of row order.",
+  "intent": [
+    "equal-score insurers are ordered by name, then id (names Alpha<Beta although ids z-1>a-9)",
+    "Gamma's rule tie resolves to the canonical-first rule and is flagged as a blocker, not hidden",
+    "the whole result is byte-identical under reversed and shuffled rule order (runner permutation check)"
+  ],
+  "rule_defaults": {
+    "notes": null, "rating_notes": null, "line_of_business": "commercial", "source": "manual",
+    "source_document_id": "doc-guide", "source_file_name": "guide.pdf", "source_page": 4,
+    "source_section": "Section 4", "source_quote": "Synthetic guideline excerpt.",
+    "ingestion_confidence": 0.95, "is_active": true, "updated_at": "2026-10-15T00:00:00.000Z",
+    "preferred_risks": [], "caution_risks": [], "declined_risks": [], "required_documents": [], "referral_triggers": []
+  },
+  "reviewed_compact": {
+    "schema_version": "case-v1",
+    "extracted_client": { "occupation_or_business_description": "transport fleet", "risk_address": "1 Synthetic Road", "entity_type": "Company" },
+    "current_cover": { "cover_sections": ["Commercial motor", "Goods in transit"], "endorsements": [], "exclusions": [] },
+    "risk_classification": {
+      "product_line": "commercial motor", "risk_type": "transport", "primary_risk_type": "transport fleet",
+      "secondary_risk_types": [], "business_sector": "transport", "complexity_level": "medium"
+    },
+    "red_flags": []
+  },
+  "documents": [{ "document_type": "Claims history", "status": "active", "scan_status": "clean" }],
+  "insurers": [
+    { "id": "z-1", "name": "Alpha Mutual", "active": true },
+    { "id": "a-9", "name": "Beta Mutual", "active": true },
+    { "id": "m-5", "name": "Gamma Mutual", "active": true }
+  ],
+  "rules": [
+    { "id": "r-beta", "insurer_id": "a-9", "insurer_name": "Beta Mutual", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "standard" },
+    { "id": "r-alpha", "insurer_id": "z-1", "insurer_name": "Alpha Mutual", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "standard" },
+    { "id": "r-gamma-git", "insurer_id": "m-5", "insurer_name": "Gamma Mutual", "product_line": "goods_in_transit", "risk_type": "transport", "appetite_level": "declined" },
+    { "id": "r-gamma-motor", "insurer_id": "m-5", "insurer_name": "Gamma Mutual", "product_line": "commercial_motor", "risk_type": "transport", "appetite_level": "preferred", "preferred_risks": ["transport fleet"] }
+  ]
+}

@@ -1,0 +1,104 @@
+{
+  "expected_schema": "powerhouse-case-expected-v1",
+  "parity_vs_frozen_v1": {
+    "class": "identical",
+    "differing_insurers": []
+  },
+  "observation": {
+    "evidence_schema": "recommendation-evidence-v2",
+    "matcher_version": "2026-10-section-evaluation-v2",
+    "recommended": "Alpha Insurance",
+    "insurer_order": [
+      "insurer-alpha",
+      "insurer-beta"
+    ],
+    "insurers": {
+      "insurer-alpha": {
+        "rank": 1,
+        "score": 100,
+        "band": "preferred",
+        "rule_status": "preferred",
+        "confidence": 0.9,
+        "ruled_out": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "scored_rule": "alpha-motor",
+        "selection_basis": "only_candidate",
+        "rule_effects": [
+          "base|preferred|alpha-motor|100",
+          "preferred|preferred|alpha-motor|5"
+        ],
+        "sections": [
+          {
+            "section": "commercial_motor",
+            "status": "evaluated",
+            "selected": "alpha-motor",
+            "outcome": "preferred",
+            "reflected": true
+          }
+        ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "alpha-motor|scored_rule|scored|docs="
+        ],
+        "omitted_risk_only": 0,
+        "documents": [],
+        "quality": "decision_ready",
+        "gaps": []
+      },
+      "insurer-beta": {
+        "rank": 2,
+        "score": 70,
+        "band": "standard",
+        "rule_status": "standard",
+        "confidence": 0.9,
+        "ruled_out": false,
+        "referral_required": false,
+        "manual_review_required": false,
+        "senior_review_required": false,
+        "scored_rule": "beta-motor",
+        "selection_basis": "only_candidate",
+        "rule_effects": [
+          "base|standard|beta-motor|70"
+        ],
+        "sections": [
+          {
+            "section": "commercial_motor",
+            "status": "evaluated",
+            "selected": "beta-motor",
+            "outcome": "standard",
+            "reflected": true
+          }
+        ],
+        "implied_products": [],
+        "tie_differences": [],
+        "considered": [
+          "beta-motor|scored_rule|scored|docs="
+        ],
+        "omitted_risk_only": 0,
+        "documents": [],
+        "quality": "decision_ready",
+        "gaps": []
+      }
+    },
+    "no_data": [],
+    "trusted_documents": [
+      "Claims history"
+    ],
+    "quality": {
+      "state": "decision_ready",
+      "blockers": 0,
+      "material": 0,
+      "advisory": 1,
+      "recommendation_gaps": [
+        "reviewed_fact_confidence_unavailable:advisory|field=red_flags[0].issue|missing=confidence"
+      ]
+    },
+    "privacy": {
+      "sentinel_hits": [],
+      "features_redacted": true
+    }
+  }
+}
