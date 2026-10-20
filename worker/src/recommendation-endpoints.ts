@@ -355,7 +355,12 @@ export async function handleRunRecommendation(
         "source_page, source_section, source_file_name, ingestion_confidence, " +
         "source, source_document_id, is_active, updated_at"
     )
-    .eq("is_active", true);
+    .eq("is_active", true)
+    // Deterministic input order. The matcher re-sorts canonically itself
+    // (canonicalAppetiteOrder), so this is belt-and-braces: nothing depends on
+    // the order PostgreSQL happens to return rows in.
+    .order("insurer_id", { ascending: true })
+    .order("id", { ascending: true });
   const appetite = (appetiteRaw ?? []) as unknown as AppetiteRow[];
 
   if (appetite.length === 0) {
@@ -518,10 +523,13 @@ export async function handleRunRecommendation(
   const notRecommended = result.insurers.filter((i) => i.ruled_out);
 
   const reasoningById = new Map(reasoning.per_insurer.map((r) => [r.insurer_id, r.reasoning]));
-  const enriched = (s: InsurerScore) => ({
-    ...s,
-    reasoning: reasoningById.get(s.insurer_id) ?? "",
-  });
+  // The compatibility columns (reasoning_json.top, secondary_options_json,
+  // not_recommended_json) keep their historical shape. Section intelligence
+  // lives only in evidence_json, so it is not duplicated three times.
+  const enriched = (s: InsurerScore) => {
+    const { selection: _selection, section_evaluations: _sections, considered_rules: _considered, ...legacy } = s;
+    return { ...legacy, reasoning: reasoningById.get(s.insurer_id) ?? "" };
+  };
 
   // Generate the durable identity before insert so the evidence packet can
   // name the exact persisted recommendation without a second write.

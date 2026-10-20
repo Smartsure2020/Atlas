@@ -37,6 +37,9 @@ function deepEq(actual: unknown, expected: unknown, message: string) {
 
 const GOLDEN = "baseline-multi-section.v1.golden.json";
 const V1_MATCHER_VERSION = "2026-07-token-matching-v1";
+// Widened on purpose: the live constant is a literal type that no longer
+// overlaps with the v1 string, and that is exactly what these guards compare.
+const LIVE_MATCHER_VERSION: string = MATCHER_VERSION;
 
 interface Golden {
   golden_schema: "powerhouse-baseline-golden-v1";
@@ -84,7 +87,7 @@ function runBoth() {
 
 if (process.env.POWERHOUSE_UPDATE_GOLDEN === "1") {
   if (existsSync(fixturePath(GOLDEN))) throw new Error("golden_already_recorded: refusing to overwrite the v1 baseline");
-  if (MATCHER_VERSION !== V1_MATCHER_VERSION) throw new Error("golden_must_be_recorded_against_v1_matcher");
+  if (LIVE_MATCHER_VERSION !== V1_MATCHER_VERSION) throw new Error("golden_must_be_recorded_against_v1_matcher");
   const { file, rules, asListed, reversed } = runBoth();
   const evidence = evidenceSummary(asListed, clone(file.risk), clone(rules));
   const golden: Golden = {
@@ -121,14 +124,31 @@ test("1. golden records the v1 matcher on the pinned commit", () => {
   eq(g.recorded_against.taxonomy_version, "2026-07-token-aliases-v1", "recorded against taxonomy v1");
 });
 
-test("2. authoritative answer for row-order-independent insurers equals the v1 golden", () => {
+test("2. PARITY: every insurer's authoritative answer equals the v1 golden when rows arrive as listed", () => {
+  const g = golden();
+  const { asListed } = runBoth();
+  // Full projection including position and rank: the whole v1 answer.
+  deepEq(projectV1(asListed), g.as_listed, "v2 reproduces the v1 answer for the listed row order");
+});
+
+test("2b. PARITY: row-order-independent insurers match the v1 golden for reversed rows too (position/rank excluded)", () => {
+  const g = golden();
+  const { reversed } = runBoth();
+  const now = projectV1(reversed);
+  const strip = ({ position: _p, rank: _r, ...rest }: V1Projection["insurers"][number]) => rest;
+  for (const insurerId of ["insurer-alpha", "insurer-beta"]) {
+    deepEq(strip(byId(now, insurerId)), strip(byId(g.reversed, insurerId)), `${insurerId} reversed`);
+  }
+});
+
+test("2c. INTENTIONAL DIFFERENCE: v2 is row-order invariant; v1 reversed-row Gamma (ruled out by tie accident) is now the canonical answer", () => {
   const g = golden();
   const { asListed, reversed } = runBoth();
-  const now = { asListed: projectV1(asListed), reversed: projectV1(reversed) };
-  for (const insurerId of ["insurer-alpha", "insurer-beta"]) {
-    deepEq(byId(now.asListed, insurerId), byId(g.as_listed, insurerId), `${insurerId} as listed`);
-    deepEq(byId(now.reversed, insurerId), byId(g.reversed, insurerId), `${insurerId} reversed`);
-  }
+  deepEq(projectV1(reversed), projectV1(asListed), "v2: reversing rows changes nothing");
+  const gamma = byId(projectV1(reversed), "insurer-gamma");
+  eq(gamma.scored_against_appetite_id, "gamma-motor", "canonical tie-break picks commercial_motor before goods_in_transit");
+  eq(gamma.ruled_out, false, "gamma is not ruled out by row-order accident");
+  eq(byId(g.reversed, "insurer-gamma").ruled_out, true, "the v1 golden recorded the accident");
 });
 
 // ---------------------------------------------------------------------------
@@ -190,7 +210,7 @@ test("7. LIMITATION: evidence v1 reports quality 'complete' although whole reque
 // describing what v1 was). They are executed only while the v1 matcher is live.
 // ---------------------------------------------------------------------------
 
-if (MATCHER_VERSION === V1_MATCHER_VERSION) {
+if (LIVE_MATCHER_VERSION === V1_MATCHER_VERSION) {
   test("8. BASELINE: recommendation fingerprint ignores matcher and taxonomy versions", () => {
     const core = readFileSync("worker/src/phase7-core.ts", "utf8");
     const fingerprint = core.slice(core.indexOf("export function buildRecommendationFingerprint"), core.indexOf("export function buildQuoteReviewFingerprint"));
