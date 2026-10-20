@@ -311,6 +311,23 @@ function canonicalRisk(risk: MatchInputRisk): PersistedMatcherInput {
   };
 }
 
+/** Marker on the privacy-minimised compatibility snapshot in reasoning_json. */
+export const MATCHER_INPUT_SNAPSHOT_MINIMISED = "matcher-input-minimised-v1";
+
+/**
+ * The shape persisted at `reasoning_json.matcher_input` for NEW recommendations.
+ * It is the same privacy-minimised copy as `evidence_json.matcher_input` plus a
+ * version marker, so readers can tell it from historical rows (which carry the
+ * raw matcher input under no marker). Property names that existing readers use
+ * (`available_documents`, `product_candidates`, `overall_confidence*`, …) are
+ * unchanged; only `features[].text` — client free text — is gone.
+ */
+export function minimisedMatcherInputSnapshot(risk: MatchInputRisk): PersistedMatcherInput & {
+  snapshot_version: typeof MATCHER_INPUT_SNAPSHOT_MINIMISED;
+} {
+  return { snapshot_version: MATCHER_INPUT_SNAPSHOT_MINIMISED, ...canonicalRisk(risk) };
+}
+
 const EFFECT_ORDER: Record<EvidenceEffect, number> = {
   preferred: 0,
   standard: 1,

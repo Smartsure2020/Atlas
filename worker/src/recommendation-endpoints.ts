@@ -40,7 +40,11 @@ import {
   type ReasoningOutput,
 } from "./matcher-reasoning";
 import { composeExplanation, verifyPolish } from "./explanation-composer";
-import { buildRecommendationEvidence } from "./recommendation-evidence";
+import {
+  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION,
+  buildRecommendationEvidence,
+  minimisedMatcherInputSnapshot,
+} from "./recommendation-evidence";
 import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
 import { logOperationError } from "./phase6-hardening";
@@ -378,6 +382,11 @@ export async function handleRunRecommendation(
       (a) => `${a.id}:${a.updated_at ?? ""}`
     ),
     availableDocuments: availableDocs,
+    // Behaviour versions: a deploy that changes matching, taxonomy or the
+    // persisted evidence contract must not be answered from a stale cache.
+    matcherVersion: MATCHER_VERSION,
+    taxonomyVersion: TAXONOMY_VERSION,
+    evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION,
   });
   const job = await beginJob(
     admin,
@@ -574,11 +583,14 @@ export async function handleRunRecommendation(
       manual_review_required: top?.manual_review_required ?? false,
       unmatched_sections: top?.unmatched_sections ?? [],
       unmatched_product_candidates: top?.unmatched_product_candidates ?? [],
-      // Reconstruction snapshot: the exact derived input the matcher ran on,
-      // and which matcher/taxonomy behaviour produced the scores. Without
-      // this, explaining an old recommendation would mean replaying CURRENT
-      // code against the reviewed JSON — wrong after any matcher change.
-      matcher_input: risk,
+      // Compatibility snapshot of the matcher input. PRIVACY-MINIMISED: the
+      // taxonomy candidates, trusted document labels and confidence are kept,
+      // but client free text (feature values) is NOT — only each feature's
+      // source label and AI-inference flag. No runtime consumer reads the raw
+      // text (see docs/powerhouse-p1b-p2-intelligence-quality.md §privacy),
+      // and the explanation of a run lives in evidence_json. Historical rows
+      // keep their original shape and are never rewritten.
+      matcher_input: minimisedMatcherInputSnapshot(risk),
       matcher_version: MATCHER_VERSION,
       taxonomy_version: TAXONOMY_VERSION,
       reasoning_source: reasoningSource,

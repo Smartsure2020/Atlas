@@ -349,7 +349,11 @@ test("14. semantically identical input produces deterministic evidence ordering"
 });
 
 test("15. appetite rule changes retain existing fingerprint invalidation behavior", () => {
-  const common = { submissionId: SUB, extractionId: EXT, reviewedAt: GENERATED, availableDocuments: ["Claims history"] };
+  const common = {
+    submissionId: SUB, extractionId: EXT, reviewedAt: GENERATED, availableDocuments: ["Claims history"],
+    matcherVersion: MATCHER_VERSION, taxonomyVersion: TAXONOMY_VERSION,
+    evidenceSchemaVersion: "recommendation-evidence-v1",
+  };
   const first = buildRecommendationFingerprint({ ...common, activeRuleIds: ["rule-1:2026-01-01"] });
   const changed = buildRecommendationFingerprint({ ...common, activeRuleIds: ["rule-1:2026-10-16"] });
   assert(first !== changed, "rule version change must change fingerprint");

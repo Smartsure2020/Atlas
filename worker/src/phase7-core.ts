@@ -70,6 +70,16 @@ export function buildRecommendationFingerprint(input: {
   activeRuleIds: string[];
   /** The exact `availableDocs` handed to deriveRisk(): trusted documents only. */
   availableDocuments: string[];
+  /**
+   * Behaviour versions are REQUIRED inputs. A cached "unchanged" answer is only
+   * valid if the code that would recompute it is the code that produced it, so
+   * a change to matching semantics, taxonomy data or the persisted evidence
+   * contract must invalidate every previously completed recommendation job.
+   * (Required rather than optional so a future call site cannot forget them.)
+   */
+  matcherVersion: string;
+  taxonomyVersion: string;
+  evidenceSchemaVersion: string;
 }) {
   return inputFingerprint({
     type: "recommendation",
@@ -78,6 +88,9 @@ export function buildRecommendationFingerprint(input: {
     reviewed_at: input.reviewedAt ?? null,
     active_rule_ids: [...input.activeRuleIds].sort(),
     available_documents: canonicalDocumentEvidence(input.availableDocuments),
+    matcher_version: input.matcherVersion,
+    taxonomy_version: input.taxonomyVersion,
+    evidence_schema_version: input.evidenceSchemaVersion,
   });
 }
 

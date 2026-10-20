@@ -56,9 +56,11 @@ import {
   buildRecommendationFingerprint,
   inputFingerprint,
 } from "../worker/src/phase7-core.js";
-import { matchInsurers } from "../worker/src/matcher.js";
+import { MATCHER_VERSION, matchInsurers } from "../worker/src/matcher.js";
 import type { AppetiteRow } from "../worker/src/matcher-types.js";
 import { buildQuoteReview } from "../worker/src/quote-review.js";
+import { RECOMMENDATION_EVIDENCE_SCHEMA_VERSION } from "../worker/src/recommendation-evidence.js";
+import { TAXONOMY_VERSION } from "../worker/src/taxonomy.js";
 
 // supabase-js builds a Realtime client eagerly inside createClient(), and on
 // Node < 22 (CI runs Node 20) that throws "without native WebSocket support"
@@ -1160,10 +1162,18 @@ test("33. every Worker file that calls Anthropic is classified; insurer guidelin
 const RULES = ["rule-1:2026-01-01T00:00:00Z", "rule-2:2026-01-02T00:00:00Z"];
 const DOCS = ["Policy schedule", "Claims history"];
 
+// The live behaviour versions the recommendation endpoint fingerprints with.
+// (Versions are required fingerprint inputs since Powerhouse Batch 2.)
+const LIVE_BEHAVIOUR = {
+  matcherVersion: MATCHER_VERSION,
+  taxonomyVersion: TAXONOMY_VERSION,
+  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION,
+};
+
 const recFp = (over: Partial<Parameters<typeof buildRecommendationFingerprint>[0]> = {}) =>
   buildRecommendationFingerprint({
     submissionId: SUB, extractionId: EXT, reviewedAt: "2026-01-02T00:00:00Z",
-    activeRuleIds: RULES, availableDocuments: DOCS, ...over,
+    activeRuleIds: RULES, availableDocuments: DOCS, ...LIVE_BEHAVIOUR, ...over,
   });
 
 const qrFp = (over: Partial<Parameters<typeof buildQuoteReviewFingerprint>[0]> = {}) =>
@@ -1301,7 +1311,7 @@ function jobWrite(stub: ReturnType<typeof installFetchStub>): { status: unknown 
 function recommendationCacheTables(documents: Row[], cachedFor: { docs: string[]; over?: Partial<Parameters<typeof buildRecommendationFingerprint>[0]> }): Record<string, Row[]> {
   const fp = buildRecommendationFingerprint({
     submissionId: SUB, extractionId: EXT, reviewedAt: "2026-01-02T00:00:00Z",
-    activeRuleIds: [RULE_STAMP], availableDocuments: cachedFor.docs, ...cachedFor.over,
+    activeRuleIds: [RULE_STAMP], availableDocuments: cachedFor.docs, ...LIVE_BEHAVIOUR, ...cachedFor.over,
   });
   return { ...recommendationTables(documents), atlas_jobs: [completedJob("recommendation", fp)] };
 }
