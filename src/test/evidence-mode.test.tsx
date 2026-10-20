@@ -429,6 +429,7 @@ describe("R6 — a hollow v2 packet fails safe in the panel", () => {
     ["an insurer outcome missing rule_evidence", (p) => { delete p.insurers[0].rule_evidence; }],
     ["an insurer outcome missing considered_rules", (p) => { delete p.insurers[0].considered_rules; }],
     ["a mistyped score", (p) => { p.insurers[0].score = "100"; }],
+    ["a misspelled section outcome ('prefered')", (p) => { p.insurers[0].section_evaluations[0].outcome = "prefered"; }],
     ["an empty v2 shell", (p) => { for (const key of Object.keys(p)) if (key !== "schema_version") delete p[key]; }],
   ];
 

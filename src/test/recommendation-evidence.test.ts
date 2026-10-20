@@ -294,6 +294,7 @@ const HOLLOW_V2: [string, Mutator][] = [
   ["considered rule without conditions", (p) => { delete p.insurers[scoredIndex(p)].considered_rules[0].conditions; }],
   ["considered rule without required_documents", (p) => { delete p.insurers[scoredIndex(p)].considered_rules[0].required_documents; }],
   ["section evaluation without tie_differences", (p) => { delete p.insurers[scoredIndex(p)].section_evaluations[0].tie_differences; }],
+  ["section outcome is not a known outcome (misspelled)", (p) => { p.insurers[scoredIndex(p)].section_evaluations[0].outcome = "prefered"; }],
   ["gap without severity", (p) => { delete p.quality.gaps[0].severity; }],
   ["trusted_documents missing", (p) => { delete p.trusted_documents; }],
   ["provenance missing", (p) => { delete p.provenance; }],
@@ -317,6 +318,17 @@ describe("R6 — hollow v2 packets are 'malformed', never crash, and are never r
   it("the unmutated packet is accepted (the guards do not reject good data)", () => {
     for (const source of [case01, case05, case06, case07, case08, case09, case10, case11, case12, case14, case17, case18, case19, case20, case21]) {
       expect(resolveEvidence((row(source) as { evidence_json: unknown }).evidence_json).kind).toBe("ready");
+    }
+  });
+
+  it("every contract section outcome (and null) is still accepted; only an unknown value is rejected", () => {
+    for (const outcome of ["hard_decline", "soft_decline_referral", "referral", "caution", "preferred", "standard", null]) {
+      const packet = mutated(case05, (p) => { p.insurers[scoredIndex(p)].section_evaluations[0].outcome = outcome; });
+      expect(resolveEvidence(packet).kind).toBe("ready");
+    }
+    for (const bad of ["prefered", "Preferred", "", "ruled_out", 1, {}]) {
+      const packet = mutated(case05, (p) => { p.insurers[scoredIndex(p)].section_evaluations[0].outcome = bad; });
+      expect(resolveEvidence(packet)).toEqual({ kind: "malformed", schemaVersion: "recommendation-evidence-v2" });
     }
   });
 

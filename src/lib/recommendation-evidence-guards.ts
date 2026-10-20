@@ -109,7 +109,11 @@ const SECTION_EVALUATION = (v: unknown) =>
     tied_rule_ids: strArr,
     tied_rules_disagree: isBool,
     tie_differences: TIE_DIFFERENCES,
-    outcome: strOrNull,
+    // The view model indexes SECTION_OUTCOME[outcome]; an unrecognised value must be
+    // rejected here, not rendered as an outcome with no label.
+    outcome: (x) =>
+      x === null ||
+      oneOf(x, ["hard_decline", "soft_decline_referral", "referral", "caution", "preferred", "standard"]),
     reflected_in_insurer_outcome: isBool,
   });
 
