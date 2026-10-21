@@ -50,6 +50,17 @@ import case18 from "../../tests/powerhouse/fixtures/snapshots/case-18-multi-prod
 import case19 from "../../tests/powerhouse/fixtures/snapshots/case-19-material-risk-only-rule.row.json";
 import case20 from "../../tests/powerhouse/fixtures/snapshots/case-20-section-preferred-portfolio-hard-decline.row.json";
 import case21 from "../../tests/powerhouse/fixtures/snapshots/case-21-unrelated-clean-document.row.json";
+import case22 from "../../tests/powerhouse/fixtures/snapshots/case-22-complete-single-section.row.json";
+import case23 from "../../tests/powerhouse/fixtures/snapshots/case-23-required-fact-missing.row.json";
+import case24 from "../../tests/powerhouse/fixtures/snapshots/case-24-required-document-missing-rule-provenance.row.json";
+import case25 from "../../tests/powerhouse/fixtures/snapshots/case-25-one-insurer-complete-another-incomplete.row.json";
+import case26 from "../../tests/powerhouse/fixtures/snapshots/case-26-section-without-applicable-rule.row.json";
+import case27 from "../../tests/powerhouse/fixtures/snapshots/case-27-multiple-products-no-declared-sections-completeness.row.json";
+import case28 from "../../tests/powerhouse/fixtures/snapshots/case-28-sources-agree.row.json";
+import case29 from "../../tests/powerhouse/fixtures/snapshots/case-29-sources-disagree.row.json";
+import case40 from "../../tests/powerhouse/fixtures/snapshots/case-40-privacy-sentinels-completeness-contradictions.row.json";
+import histV2Ready from "../../tests/powerhouse/fixtures/snapshots/historical-v2-decision-ready.row.json";
+import histV2Incomplete from "../../tests/powerhouse/fixtures/snapshots/historical-v2-incomplete.row.json";
 
 const AVAILABLE: ExtractionConfidenceState = { state: "available", value: 0.9, source: "provider", available: true };
 const asRec = (value: unknown) => value as unknown as Recommendation;
@@ -360,7 +371,7 @@ describe("Evidence Mode — audience and privacy", () => {
     const { dialog } = await openEvidence("Alpha Insurance");
     expect(within(dialog).queryByText(/Diagnostics/)).toBeNull();
     const text = dialog.textContent ?? "";
-    for (const forbidden of ["schema_version", "recommendation-evidence-v2", "rule:alpha", "fp_", "insurer-alpha", "gap:", "{\"", "extraction_id"]) {
+    for (const forbidden of ["schema_version", "recommendation-evidence-v2", "recommendation-evidence-v3", "rule:alpha", "fp_", "insurer-alpha", "gap:", "cmp:", "ctr:", "{\"", "extraction_id"]) {
       expect(text).not.toContain(forbidden);
     }
   });
@@ -371,7 +382,9 @@ describe("Evidence Mode — audience and privacy", () => {
     const summary = within(dialog).getByText("Diagnostics (internal staff)");
     expect(summary.closest("details")).not.toHaveAttribute("open");
     const details = summary.closest("details") as HTMLElement;
-    expect(within(details).getByText("recommendation-evidence-v2")).toBeInTheDocument();
+    expect(within(details).getByText("recommendation-evidence-v3")).toBeInTheDocument();
+    expect(within(details).getByText("recommendation-completeness-v1")).toBeInTheDocument();
+    expect(within(details).getByText("recommendation-contradictions-v1")).toBeInTheDocument();
     expect(within(details).getByText("2026-10-section-evaluation-v2")).toBeInTheDocument();
     expect(within(details).getByText("alpha-motor")).toBeInTheDocument();
     // Even diagnostics are labelled values, not a JSON dump.
@@ -589,6 +602,201 @@ describe("Remediation — accessibility of the new surfaces", () => {
     unmount();
     const second = renderPanel(asRec(case18));
     await openEvidence("Beta Insurance");
+    expect(await axe(second.container)).toHaveNoViolations();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch B — "What Atlas still needs" and "Conflicts to review"
+// ---------------------------------------------------------------------------
+
+const NEEDS = "What Atlas still needs";
+const CONFLICTS = "Conflicts to review";
+
+describe("Evidence Mode (v3) — What Atlas still needs", () => {
+  it("a complete case says nothing is outstanding and names no gaps", () => {
+    renderPanel(asRec(case22));
+    const panel = screen.getByRole("region", { name: NEEDS });
+    expect(within(panel).getAllByText("Nothing outstanding").length).toBeGreaterThan(0);
+    expect(within(panel).getByText(/Nothing outstanding for: Alpha Insurance, Beta Insurance\./)).toBeInTheDocument();
+    expect(panel.querySelectorAll("[data-completeness-item]")).toHaveLength(0);
+  });
+
+  it("one logical document is one row, with every insurer, rule and the reason it is required", async () => {
+    renderPanel(asRec(case24));
+    const panel = screen.getByRole("region", { name: NEEDS });
+    expect(within(panel).getAllByText("Material information outstanding").length).toBeGreaterThan(0);
+    const list = within(panel).getByRole("list", { name: "Required documents not evidenced" });
+    const rows = [...list.querySelectorAll<HTMLElement>("[data-completeness-item]")];
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]).getByText("Risk survey")).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/Insurers: Alpha Insurance, Beta Insurance\./)).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(within(rows[0]).getByText("Why Atlas says this is required"));
+    for (const line of [
+      "Alpha Insurance's product rule — not evidenced",
+      "Alpha Insurance's portfolio rule — not evidenced",
+      "Beta Insurance's product rule — not evidenced",
+    ]) {
+      expect(within(rows[0]).getByText(line)).toBeInTheDocument();
+    }
+    // A missing document never reads as a decline or a block — the panel says the opposite.
+    expect(within(panel).queryByText(/declined by atlas|ruled out/i)).toBeNull();
+    expect(within(panel).getByText(/Nothing is blocked or declined by this/)).toBeInTheDocument();
+  });
+
+  it("insurers are grouped, worst first, and a section with no rule is stated in plain words", () => {
+    renderPanel(asRec(case26));
+    const panel = screen.getByRole("region", { name: NEEDS });
+    expect(within(panel).getByText("By insurer")).toBeInTheDocument();
+    const alpha = within(panel).getByLabelText("Outstanding for Alpha Insurance");
+    expect(within(alpha).getByText("A requested section has no applicable rule")).toBeInTheDocument();
+    expect(within(alpha).getByText(/Sections: Cyber\./)).toBeInTheDocument();
+    expect(within(alpha).getByText("Material")).toBeInTheDocument();
+    const beta = within(panel).getByLabelText("Outstanding for Beta Insurance");
+    expect(within(beta).getByText("Nonblocking")).toBeInTheDocument();
+    expect(within(panel).getByText(/Nothing outstanding for: Gamma Insurance\./)).toBeInTheDocument();
+  });
+
+  it("different insurers can be in different states side by side", () => {
+    renderPanel(asRec(case25));
+    const panel = screen.getByRole("region", { name: NEEDS });
+    expect(within(within(panel).getByLabelText("Outstanding for Beta Insurance")).getByText("Material information outstanding")).toBeInTheDocument();
+    expect(within(within(panel).getByLabelText("Outstanding for Gamma Insurance")).getByText("Information outstanding")).toBeInTheDocument();
+    expect(within(panel).getByText(/Nothing outstanding for: Alpha Insurance\./)).toBeInTheDocument();
+  });
+
+  it("undeclared sections are a whole-recommendation limitation; nothing is invented", () => {
+    renderPanel(asRec(case27));
+    const panel = screen.getByRole("region", { name: NEEDS });
+    const caseList = within(panel).getByRole("list", { name: "Outstanding across the recommendation" });
+    expect(within(caseList).getByText("No cover sections were declared")).toBeInTheDocument();
+    expect(within(panel).getByLabelText("Outstanding for Alpha Insurance")).toBeInTheDocument();
+  });
+
+  it("reported facts show the schema label when exact, otherwise position and priority only", async () => {
+    renderPanel(asRec(case23));
+    const panel = screen.getByRole("region", { name: NEEDS });
+    const list = within(panel).getByRole("list", { name: "Outstanding across the recommendation" });
+    expect(list.querySelectorAll("[data-completeness-item]")).toHaveLength(3);
+    expect(within(list).getByText("Registration or ID number")).toBeInTheDocument();
+    expect(within(list).getAllByText("Information reported as outstanding at extraction")).toHaveLength(3);
+    const text = panel.textContent ?? "";
+    for (const sentinel of ["REASON_SENTINEL_23A", "FREETEXT_SENTINEL_23B", "FREETEXT_SENTINEL_23C"]) expect(text).not.toContain(sentinel);
+    const user = userEvent.setup();
+    await user.click(within(list).getAllByText("Why Atlas says this is required")[0]);
+    expect(within(list).getByText("The extraction reported item 1 as outstanding (high priority)")).toBeInTheDocument();
+  });
+
+  it("explains what 'required' means, including that no universal requirement exists", async () => {
+    renderPanel(asRec(case24));
+    const user = userEvent.setup();
+    await user.click(within(screen.getByRole("region", { name: NEEDS })).getByText("What Atlas counts as required"));
+    expect(screen.getByText(/defines no universal insurance requirement/i)).toBeInTheDocument();
+  });
+});
+
+describe("Evidence Mode (v3) — Conflicts to review", () => {
+  it("shows the conflict neutrally: both values masked, both sources, matcher effect, unresolved", async () => {
+    renderPanel(asRec(case29));
+    const panel = screen.getByRole("region", { name: CONFLICTS });
+    expect(within(panel).getByText("1 conflict to review")).toBeInTheDocument();
+    expect(within(panel).getByText("Atlas found conflicting recorded values")).toBeInTheDocument();
+    const values = within(panel).getByRole("list", { name: "Recorded values for Broker email address" });
+    expect(within(values).getByText("a•••@•••.za")).toBeInTheDocument();
+    expect(within(values).getByText("b•••@•••.za")).toBeInTheDocument();
+    expect(within(values).getByText(/Recorded by: Submission intake — Submission intake record/)).toBeInTheDocument();
+    expect(within(values).getByText(/Recorded by: Reviewed extraction — Reviewed extraction · broker › email/)).toBeInTheDocument();
+    expect(within(panel).getByText(/did not affect the ranking, the scores or any flag/i)).toBeInTheDocument();
+    expect(within(panel).getByText(/Unresolved — no one has reviewed this disagreement/)).toBeInTheDocument();
+    expect(within(panel).getByText(/does not say which one is correct and applies no source precedence/i)).toBeInTheDocument();
+    // No raw address, no accusation.
+    const text = panel.textContent ?? "";
+    expect(text).not.toMatch(/[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]+/i);
+    expect(text).not.toMatch(/fraud|false information|misrepresent|lied|dishonest/i);
+    // The comparison method is available on request.
+    const user = userEvent.setup();
+    await user.click(within(panel).getByText("How Atlas compared them"));
+    expect(within(panel).getByText(/lower-case/)).toBeInTheDocument();
+  });
+
+  it("agreement produces no conflict and does not claim verification", () => {
+    renderPanel(asRec(case28));
+    const panel = screen.getByRole("region", { name: CONFLICTS });
+    expect(within(panel).getAllByText("No conflicting recorded values").length).toBeGreaterThan(0);
+    expect(within(panel).getByText(/found no conflicting values\. A fact recorded in only one place cannot be compared\./)).toBeInTheDocument();
+    expect(within(panel).queryByText("Atlas found conflicting recorded values")).toBeNull();
+  });
+
+  it("when nothing could be compared it says so rather than 'all consistent'", () => {
+    renderPanel(asRec(case22));
+    const panel = screen.getByRole("region", { name: CONFLICTS });
+    expect(within(panel).getByText(/Atlas could compare nothing here/)).toBeInTheDocument();
+  });
+
+  it("the privacy sentinel case renders no sentinel and no full address in either panel", () => {
+    renderPanel(asRec(case40), { canViewDiagnostics: true });
+    for (const name of [NEEDS, CONFLICTS]) {
+      const text = screen.getByRole("region", { name }).textContent ?? "";
+      expect(text.toLowerCase()).not.toContain("sentinel");
+      expect(text).not.toMatch(/[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]+/i);
+    }
+  });
+
+  it("ordinary users see no technical identifiers (item, contradiction or gap ids)", () => {
+    renderPanel(asRec(case29));
+    const text = document.body.textContent ?? "";
+    for (const forbidden of ["cmp:", "ctr:", "gap:", "item_id", "contradiction_id", "recommendation-contradictions-v1"]) {
+      expect(text).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("Evidence Mode (v3) — historical recommendations are never reconstructed", () => {
+  it("evidence v1 says the analysis was not captured, in the specified words", () => {
+    renderPanel(asRec(histComplete));
+    for (const name of [NEEDS, CONFLICTS]) {
+      const panel = screen.getByRole("region", { name });
+      expect(within(panel).getByText(/Completeness and contradiction analysis was not captured for this historical recommendation\./)).toBeInTheDocument();
+    }
+  });
+
+  it("evidence v2 says it predates the analysis, in the specified words — and shows no invented completeness", () => {
+    renderPanel(asRec(histV2Incomplete));
+    for (const name of [NEEDS, CONFLICTS]) {
+      const panel = screen.getByRole("region", { name });
+      expect(within(panel).getByText(/This recommendation predates deterministic completeness and contradiction analysis\./)).toBeInTheDocument();
+      expect(within(panel).queryByText("Nothing outstanding")).toBeNull();
+      expect(within(panel).queryByText("No conflicting recorded values")).toBeNull();
+      expect(panel.querySelectorAll("[data-completeness-item], [data-contradiction]")).toHaveLength(0);
+    }
+    expect(screen.getByRole("region", { name: "Intelligence quality" })).toBeInTheDocument();
+  });
+
+  it("a v2 'decision ready' recommendation is not shown as 'nothing outstanding'", () => {
+    renderPanel(asRec(histV2Ready));
+    expect(screen.getByRole("region", { name: NEEDS }).textContent).not.toMatch(/nothing outstanding/i);
+  });
+
+  it("evidence NULL keeps the existing historical notice and adds no new panels", () => {
+    renderPanel(asRec(histNull));
+    expect(screen.getByText(/Detailed evidence was not captured for this historical recommendation\./)).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: NEEDS })).toBeNull();
+    expect(screen.queryByRole("region", { name: CONFLICTS })).toBeNull();
+  });
+
+  it("unsupported and malformed packets add no new panels", () => {
+    renderPanel({ ...asRec(case01), evidence_json: { schema_version: "recommendation-evidence-v9" } } as unknown as Recommendation);
+    expect(screen.queryByRole("region", { name: NEEDS })).toBeNull();
+    expect(screen.queryByRole("region", { name: CONFLICTS })).toBeNull();
+  });
+});
+
+describe("Evidence Mode (v3) — accessibility", () => {
+  it("the completeness and conflict panels have no axe violations", async () => {
+    const { container } = renderPanel(asRec(case29));
+    expect(await axe(container)).toHaveNoViolations();
+    const second = renderPanel(asRec(case24));
     expect(await axe(second.container)).toHaveNoViolations();
   });
 });

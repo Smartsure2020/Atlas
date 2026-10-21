@@ -37,8 +37,13 @@ import type {
 import type { ReviewedRiskEvidence } from "./recommendation-evidence.js";
 import type { RequestedSection } from "./matcher.js";
 
-/** Version of the classification table below; stored on every assessment. */
-export const QUALITY_MODEL_VERSION = "recommendation-quality-v2" as const;
+/**
+ * Version of the classification table below; stored on every evidence-v2
+ * assessment. FROZEN: evidence-v2 rows are live in production, so this table and
+ * this version string never change. The current model (completeness /
+ * contradiction linkage) lives in recommendation-quality-v3.ts and wraps this one.
+ */
+export const QUALITY_MODEL_VERSION_V2 = "recommendation-quality-v2" as const;
 
 export interface QualityAssessmentInput {
   facts: ReviewedRiskEvidence[];
@@ -47,7 +52,7 @@ export interface QualityAssessmentInput {
   trustedDocumentCount: number;
 }
 
-const SEVERITY_ORDER: Record<QualitySeverity, number> = { blocker: 0, material: 1, advisory: 2 };
+export const SEVERITY_ORDER: Record<QualitySeverity, number> = { blocker: 0, material: 1, advisory: 2 };
 
 function compareCodeUnits(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -59,10 +64,29 @@ export function stateFor(counts: { blocker: number; material: number }): Intelli
   return "decision_ready";
 }
 
-function gap(
-  fields: Omit<QualityGapV2, "gap_id" | "insurer_id" | "rule_id" | "section_key" | "field_path" | "missing"> &
-    Partial<Pick<QualityGapV2, "insurer_id" | "rule_id" | "section_key" | "field_path" | "missing">>
-): QualityGapV2 {
+/** The canonical gap order (severity, code, insurer, rule, section, field, missing). */
+type SortableGap = Pick<QualityGapV2, "severity" | "insurer_id" | "rule_id" | "section_key" | "field_path" | "missing"> & {
+  code: string;
+};
+
+export function compareQualityGaps(a: SortableGap, b: SortableGap): number {
+  return (
+    SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] ||
+    compareCodeUnits(a.code, b.code) ||
+    compareCodeUnits(a.insurer_id ?? "", b.insurer_id ?? "") ||
+    compareCodeUnits(a.rule_id ?? "", b.rule_id ?? "") ||
+    compareCodeUnits(a.section_key ?? "", b.section_key ?? "") ||
+    compareCodeUnits(a.field_path ?? "", b.field_path ?? "") ||
+    compareCodeUnits(a.missing.join("+"), b.missing.join("+"))
+  );
+}
+
+/** Build a gap with its deterministic identity. Shared by the v2 table and the v3 wrapper. */
+export function buildQualityGap(
+  fields: Omit<QualityGapV2, "gap_id" | "insurer_id" | "rule_id" | "section_key" | "field_path" | "missing" | "code"> & {
+    code: string;
+  } & Partial<Pick<QualityGapV2, "insurer_id" | "rule_id" | "section_key" | "field_path" | "missing">>
+): Omit<QualityGapV2, "code"> & { code: string } {
   const full = {
     insurer_id: null,
     rule_id: null,
@@ -78,6 +102,13 @@ function gap(
     ].join(":"),
     ...full,
   };
+}
+
+function gap(
+  fields: Omit<QualityGapV2, "gap_id" | "insurer_id" | "rule_id" | "section_key" | "field_path" | "missing"> &
+    Partial<Pick<QualityGapV2, "insurer_id" | "rule_id" | "section_key" | "field_path" | "missing">>
+): QualityGapV2 {
+  return buildQualityGap(fields) as QualityGapV2;
 }
 
 interface RuleFacts {
@@ -373,16 +404,7 @@ export function assessQuality(input: QualityAssessmentInput): {
     }
   }
 
-  gaps.sort(
-    (a, b) =>
-      SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] ||
-      compareCodeUnits(a.code, b.code) ||
-      compareCodeUnits(a.insurer_id ?? "", b.insurer_id ?? "") ||
-      compareCodeUnits(a.rule_id ?? "", b.rule_id ?? "") ||
-      compareCodeUnits(a.section_key ?? "", b.section_key ?? "") ||
-      compareCodeUnits(a.field_path ?? "", b.field_path ?? "") ||
-      compareCodeUnits(a.missing.join("+"), b.missing.join("+"))
-  );
+  gaps.sort(compareQualityGaps);
 
   const count = (list: QualityGapV2[], severity: QualitySeverity) => list.filter((item) => item.severity === severity).length;
   const insurerQuality = new Map<string, InsurerQualityV2>();
@@ -400,7 +422,7 @@ export function assessQuality(input: QualityAssessmentInput): {
   const counts = { blocker: count(gaps, "blocker"), material: count(gaps, "material"), advisory: count(gaps, "advisory") };
   return {
     quality: {
-      model: QUALITY_MODEL_VERSION,
+      model: QUALITY_MODEL_VERSION_V2,
       state: stateFor(counts),
       blocker_count: counts.blocker,
       material_count: counts.material,

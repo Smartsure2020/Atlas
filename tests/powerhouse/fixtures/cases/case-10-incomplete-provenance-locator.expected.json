@@ -5,7 +5,7 @@
     "differing_insurers": []
   },
   "observation": {
-    "evidence_schema": "recommendation-evidence-v2",
+    "evidence_schema": "recommendation-evidence-v3",
     "matcher_version": "2026-10-section-evaluation-v2",
     "recommended": "Alpha Insurance",
     "insurer_order": [
@@ -48,7 +48,8 @@
         "quality": "decision_ready",
         "gaps": [
           "rule_source_locator_incomplete:advisory|rule=alpha-motor|missing=source_page+source_quote+source_section"
-        ]
+        ],
+        "completeness": "complete"
       },
       "insurer-beta": {
         "rank": 2,
@@ -84,7 +85,8 @@
         "quality": "caution",
         "gaps": [
           "rule_source_document_missing:material|rule=beta-motor|missing=source_document_id"
-        ]
+        ],
+        "completeness": "complete"
       }
     },
     "no_data": [],
@@ -101,6 +103,19 @@
     "privacy": {
       "sentinel_hits": [],
       "features_redacted": true
+    },
+    "completeness": {
+      "state": "complete",
+      "material": 0,
+      "nonblocking": 0,
+      "items": []
+    },
+    "contradictions": {
+      "count": 0,
+      "material": 0,
+      "advisory": 0,
+      "comparisons": [],
+      "items": []
     }
   }
 }

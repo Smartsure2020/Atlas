@@ -7,7 +7,7 @@
     ]
   },
   "observation": {
-    "evidence_schema": "recommendation-evidence-v2",
+    "evidence_schema": "recommendation-evidence-v3",
     "matcher_version": "2026-10-section-evaluation-v2",
     "recommended": "Gamma Mutual",
     "insurer_order": [
@@ -64,7 +64,8 @@
         "gaps": [
           "scored_rule_selection_tie:blocker|rule=r-gamma-motor|missing=unambiguous_rule_selection",
           "section_hard_decline_not_reflected:blocker|section=goods_in_transit|rule=r-gamma-git|missing=section_outcome_in_score"
-        ]
+        ],
+        "completeness": "complete"
       },
       "z-1": {
         "rank": 2,
@@ -107,7 +108,8 @@
         "quality": "caution",
         "gaps": [
           "requested_section_not_evaluated:material|section=goods_in_transit|missing=applicable_rule"
-        ]
+        ],
+        "completeness": "incomplete_material"
       },
       "a-9": {
         "rank": 3,
@@ -150,7 +152,8 @@
         "quality": "caution",
         "gaps": [
           "requested_section_not_evaluated:material|section=goods_in_transit|missing=applicable_rule"
-        ]
+        ],
+        "completeness": "incomplete_material"
       }
     },
     "no_data": [],
@@ -167,6 +170,22 @@
     "privacy": {
       "sentinel_hits": [],
       "features_redacted": true
+    },
+    "completeness": {
+      "state": "incomplete_material",
+      "material": 2,
+      "nonblocking": 0,
+      "items": [
+        "requested_section_not_evaluated:material|insurers=a-9|sections=goods_in_transit|by=declared_cover_section/a-9|gaps=1",
+        "requested_section_not_evaluated:material|insurers=z-1|sections=goods_in_transit|by=declared_cover_section/z-1|gaps=1"
+      ]
+    },
+    "contradictions": {
+      "count": 0,
+      "material": 0,
+      "advisory": 0,
+      "comparisons": [],
+      "items": []
     }
   }
 }

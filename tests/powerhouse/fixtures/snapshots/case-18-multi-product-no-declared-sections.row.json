@@ -274,7 +274,7 @@
   "extraction_id": "22222222-2222-2222-2222-222222222222",
   "created_at": "2026-10-16T10:00:00.000Z",
   "evidence_json": {
-    "schema_version": "recommendation-evidence-v2",
+    "schema_version": "recommendation-evidence-v3",
     "provenance": {
       "recommendation_id": "rec-case-18-multi-product-no-declared-sections",
       "submission_id": "11111111-1111-1111-1111-111111111111",
@@ -285,7 +285,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_0223b0d8"
+      "recommendation_input_fingerprint": "fp_43ade815"
     },
     "matcher_input": {
       "product_candidates": [
@@ -1014,7 +1014,7 @@
       }
     ],
     "quality": {
-      "model": "recommendation-quality-v2",
+      "model": "recommendation-quality-v3",
       "state": "incomplete",
       "blocker_count": 1,
       "material_count": 2,
@@ -1031,7 +1031,9 @@
           ],
           "scope": "section",
           "code": "implied_product_hard_decline_not_reflected",
-          "severity": "blocker"
+          "severity": "blocker",
+          "completeness_item_ids": [],
+          "contradiction_id": null
         },
         {
           "gap_id": "gap:multiple_products_without_declared_sections:insurer-alpha:-:-:-:requested_cover_sections",
@@ -1044,7 +1046,11 @@
           ],
           "code": "multiple_products_without_declared_sections",
           "severity": "material",
-          "scope": "insurer"
+          "scope": "insurer",
+          "completeness_item_ids": [
+            "cmp:multiple_products_without_declared_sections:insurer-alpha:-:-"
+          ],
+          "contradiction_id": null
         },
         {
           "gap_id": "gap:multiple_products_without_declared_sections:insurer-beta:-:-:-:requested_cover_sections",
@@ -1057,7 +1063,11 @@
           ],
           "code": "multiple_products_without_declared_sections",
           "severity": "material",
-          "scope": "insurer"
+          "scope": "insurer",
+          "completeness_item_ids": [
+            "cmp:multiple_products_without_declared_sections:insurer-beta:-:-"
+          ],
+          "contradiction_id": null
         },
         {
           "gap_id": "gap:requested_sections_not_declared:-:-:-:-:requested_cover_sections",
@@ -1070,9 +1080,177 @@
           ],
           "code": "requested_sections_not_declared",
           "severity": "advisory",
-          "scope": "recommendation"
+          "scope": "recommendation",
+          "completeness_item_ids": [
+            "cmp:requested_sections_not_declared:-:-:-"
+          ],
+          "contradiction_id": null
         }
       ]
+    },
+    "completeness": {
+      "model": "recommendation-completeness-v1",
+      "state": "incomplete_material",
+      "material_count": 2,
+      "nonblocking_count": 1,
+      "requirement_basis": {
+        "documents": "appetite_rule_required_documents",
+        "sections": "declared_cover_sections",
+        "facts": "extraction_reported_missing_information_only",
+        "universal_requirements": "none_defined"
+      },
+      "items": [
+        {
+          "item_id": "cmp:multiple_products_without_declared_sections:insurer-alpha:-:-",
+          "code": "multiple_products_without_declared_sections",
+          "scope": "insurer",
+          "status": "missing",
+          "materiality": "material",
+          "affects": "insurer",
+          "insurer_ids": [
+            "insurer-alpha"
+          ],
+          "section_keys": [
+            "commercial_motor",
+            "goods_in_transit"
+          ],
+          "rule_ids": [],
+          "field_path": null,
+          "label": null,
+          "document_type": null,
+          "document_key": null,
+          "trust_basis": null,
+          "required_by": [
+            {
+              "authority": "section_evaluation_model",
+              "insurer_id": "insurer-alpha",
+              "rule_id": null,
+              "rule_scope": null,
+              "section_key": null,
+              "reference": null,
+              "priority": null,
+              "present": null
+            }
+          ],
+          "source": "implied_product_evaluation",
+          "quality_gap_ids": [
+            "gap:multiple_products_without_declared_sections:insurer-alpha:-:-:-:requested_cover_sections"
+          ],
+          "resolution_state": "open"
+        },
+        {
+          "item_id": "cmp:multiple_products_without_declared_sections:insurer-beta:-:-",
+          "code": "multiple_products_without_declared_sections",
+          "scope": "insurer",
+          "status": "missing",
+          "materiality": "material",
+          "affects": "insurer",
+          "insurer_ids": [
+            "insurer-beta"
+          ],
+          "section_keys": [
+            "commercial_motor",
+            "goods_in_transit"
+          ],
+          "rule_ids": [],
+          "field_path": null,
+          "label": null,
+          "document_type": null,
+          "document_key": null,
+          "trust_basis": null,
+          "required_by": [
+            {
+              "authority": "section_evaluation_model",
+              "insurer_id": "insurer-beta",
+              "rule_id": null,
+              "rule_scope": null,
+              "section_key": null,
+              "reference": null,
+              "priority": null,
+              "present": null
+            }
+          ],
+          "source": "implied_product_evaluation",
+          "quality_gap_ids": [
+            "gap:multiple_products_without_declared_sections:insurer-beta:-:-:-:requested_cover_sections"
+          ],
+          "resolution_state": "open"
+        },
+        {
+          "item_id": "cmp:requested_sections_not_declared:-:-:-",
+          "code": "requested_sections_not_declared",
+          "scope": "submission",
+          "status": "missing",
+          "materiality": "nonblocking",
+          "affects": "recommendation",
+          "insurer_ids": [],
+          "section_keys": [],
+          "rule_ids": [],
+          "field_path": null,
+          "label": null,
+          "document_type": null,
+          "document_key": null,
+          "trust_basis": null,
+          "required_by": [
+            {
+              "authority": "section_evaluation_model",
+              "insurer_id": null,
+              "rule_id": null,
+              "rule_scope": null,
+              "section_key": null,
+              "reference": null,
+              "priority": null,
+              "present": null
+            }
+          ],
+          "source": "declared_sections",
+          "quality_gap_ids": [
+            "gap:requested_sections_not_declared:-:-:-:-:requested_cover_sections"
+          ],
+          "resolution_state": "open"
+        }
+      ],
+      "insurers": [
+        {
+          "insurer_id": "insurer-alpha",
+          "state": "incomplete_material",
+          "material_count": 1,
+          "nonblocking_count": 0,
+          "item_ids": [
+            "cmp:multiple_products_without_declared_sections:insurer-alpha:-:-"
+          ]
+        },
+        {
+          "insurer_id": "insurer-beta",
+          "state": "incomplete_material",
+          "material_count": 1,
+          "nonblocking_count": 0,
+          "item_ids": [
+            "cmp:multiple_products_without_declared_sections:insurer-beta:-:-"
+          ]
+        },
+        {
+          "insurer_id": "insurer-gamma",
+          "state": "complete",
+          "material_count": 0,
+          "nonblocking_count": 0,
+          "item_ids": []
+        }
+      ],
+      "case_item_ids": [
+        "cmp:requested_sections_not_declared:-:-:-"
+      ],
+      "extraction_reported_omitted": 0
+    },
+    "contradictions": {
+      "model": "recommendation-contradictions-v1",
+      "source_precedence": "none_applied",
+      "comparisons": [],
+      "contradictions": [],
+      "contradiction_count": 0,
+      "material_count": 0,
+      "advisory_count": 0,
+      "unavailable_count": 0
     }
   }
 }

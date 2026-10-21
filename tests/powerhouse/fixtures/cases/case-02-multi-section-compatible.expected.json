@@ -5,7 +5,7 @@
     "differing_insurers": []
   },
   "observation": {
-    "evidence_schema": "recommendation-evidence-v2",
+    "evidence_schema": "recommendation-evidence-v3",
     "matcher_version": "2026-10-section-evaluation-v2",
     "recommended": "Alpha Insurance",
     "insurer_order": [
@@ -56,7 +56,8 @@
         "quality": "decision_ready",
         "gaps": [
           "section_outcome_not_scored:advisory|section=goods_in_transit|rule=alpha-git|missing=section_outcome_in_score"
-        ]
+        ],
+        "completeness": "complete"
       },
       "insurer-beta": {
         "rank": 2,
@@ -100,7 +101,8 @@
         "quality": "decision_ready",
         "gaps": [
           "section_outcome_not_scored:advisory|section=goods_in_transit|rule=beta-git|missing=section_outcome_in_score"
-        ]
+        ],
+        "completeness": "complete"
       }
     },
     "no_data": [],
@@ -117,6 +119,19 @@
     "privacy": {
       "sentinel_hits": [],
       "features_redacted": true
+    },
+    "completeness": {
+      "state": "complete",
+      "material": 0,
+      "nonblocking": 0,
+      "items": []
+    },
+    "contradictions": {
+      "count": 0,
+      "material": 0,
+      "advisory": 0,
+      "comparisons": [],
+      "items": []
     }
   }
 }

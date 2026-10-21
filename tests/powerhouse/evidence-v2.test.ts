@@ -14,8 +14,8 @@ import {
   RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
   SCORING_SCOPE_V2,
   buildRecommendationEvidenceV2,
-  type RecommendationEvidenceV2,
 } from "../../worker/src/recommendation-evidence-v2.js";
+import type { RecommendationEvidenceV3 } from "../../worker/src/recommendation-evidence-v3.js";
 import { TAXONOMY_VERSION } from "../../worker/src/taxonomy.js";
 import { loadFixture, clone } from "./fixture-loader.js";
 import { getThroughHandler, reviewedField, runThroughHandler, type Row } from "./handler-harness.js";
@@ -148,7 +148,7 @@ test("7. PRIVACY: no feature text, reviewed value, storage path or URL appears i
   assert(v2.matcher_input.features.every((f) => f.value_retained === false), "features redacted");
 });
 
-test("8. HANDLER: the persisted evidence_json is v2, GET returns it unchanged, quality is derived server-side", async () => {
+test("8. HANDLER: the endpoint now persists v3 (a strict superset of v2); GET returns it unchanged; quality is derived server-side", async () => {
   const reviewed: Row = {
     schema_version: "t",
     extracted_client: { occupation_or_business_description: reviewedField("transport fleet") },
@@ -168,8 +168,8 @@ test("8. HANDLER: the persisted evidence_json is v2, GET returns it unchanged, q
   });
   eq(run.status, 200, "run ok");
   assert(run.row, "row");
-  const evidence = run.row.evidence_json as unknown as RecommendationEvidenceV2;
-  eq(evidence.schema_version, "recommendation-evidence-v2", "v2 persisted");
+  const evidence = run.row.evidence_json as unknown as RecommendationEvidenceV3;
+  eq(evidence.schema_version, "recommendation-evidence-v3", "v3 persisted (Batch B)");
   eq(evidence.provenance.recommendation_id, run.row.id, "identity link");
   assert(["decision_ready", "caution", "incomplete"].includes(evidence.quality.state), "quality state present");
   eq(evidence.quality.state, "incomplete", "alpha's hidden Goods in transit decline makes this incomplete");

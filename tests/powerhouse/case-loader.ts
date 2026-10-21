@@ -27,11 +27,13 @@ export interface CaseFile {
   insurers: { id: string; name: string; active: boolean }[];
   extraction_confidence?: number | null;
   rules: (Partial<AppetiteRow> & { updated_at?: string })[];
+  /** The submission's intake row, when the case compares it with the extraction (Batch B). */
+  intake?: { broker_email?: string | null };
   /** Synthetic sensitive strings that must appear in NO persisted column. */
   sentinels?: string[];
 }
 
-const FIELD_SECTIONS = new Set(["extracted_client", "current_cover", "risk_classification"]);
+const FIELD_SECTIONS = new Set(["extracted_client", "current_cover", "risk_classification", "broker"]);
 
 /** Expand compact values into reviewed-field objects (value, status, confidence). */
 export function expandReviewed(compact: Record<string, unknown>): Row {
@@ -73,6 +75,7 @@ export function loadCase(id: string): { file: CaseFile; input: HarnessInput; rul
       documents: file.documents,
       insurers: file.insurers,
       extractionConfidence: file.extraction_confidence,
+      submission: file.intake ? { ...file.intake } : null,
     },
   };
 }

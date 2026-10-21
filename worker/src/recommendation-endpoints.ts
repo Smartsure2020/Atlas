@@ -43,9 +43,16 @@ import { composeExplanation, verifyPolish } from "./explanation-composer";
 import { minimisedMatcherInputSnapshot } from "./recommendation-evidence";
 import {
   QUALITY_MODEL_VERSION,
-  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
-  buildRecommendationEvidenceV2,
-} from "./recommendation-evidence-v2";
+  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3,
+  buildRecommendationEvidenceV3,
+} from "./recommendation-evidence-v3";
+import { COMPLETENESS_MODEL_VERSION } from "./completeness";
+import {
+  CONTRADICTION_MODEL_VERSION,
+  collectObservations,
+  fingerprintObservations,
+  type IntakeInput,
+} from "./contradictions";
 import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
 import { logOperationError } from "./phase6-hardening";
@@ -64,11 +71,11 @@ const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 interface RecommendationEndpointDependencies {
-  buildEvidence: typeof buildRecommendationEvidenceV2;
+  buildEvidence: typeof buildRecommendationEvidenceV3;
 }
 
 const DEFAULT_RECOMMENDATION_DEPENDENCIES: RecommendationEndpointDependencies = {
-  buildEvidence: buildRecommendationEvidenceV2,
+  buildEvidence: buildRecommendationEvidenceV3,
 };
 
 // ----------------------------------------------------------------------------
@@ -400,6 +407,31 @@ export async function handleRunRecommendation(
     name: row.name,
   }));
 
+  // ---- Intake record: the second source for the contradiction analysis ----------
+  // Unlike the document-trust and insurer-inventory reads this is NOT fail-closed:
+  // it feeds a reliance signal only, never a score, so an unreadable intake record
+  // must not stop a recommendation. It is also not silently an "empty" record: the
+  // analysis states that the comparison was unavailable, and the fingerprint
+  // records the difference, so a later successful read recomputes.
+  const { data: intakeRow, error: intakeError } = await admin
+    .from("atlas_submissions")
+    .select("broker_email")
+    .eq("id", submissionId)
+    .maybeSingle();
+  let intake: IntakeInput;
+  if (intakeError) {
+    logOperationError({
+      endpoint: "recommend",
+      operation: "load_intake_record",
+      code: "intake_record_unavailable",
+      submissionId,
+    });
+    intake = { status: "unavailable" };
+  } else {
+    intake = intakeRow ? { status: "available", record: intakeRow as { broker_email?: unknown } } : { status: "not_found" };
+  }
+  const observations = collectObservations({ reviewed: reviewedJson, extractionId: extraction.id, intake });
+
   const inputFp = buildRecommendationFingerprint({
     submissionId,
     extractionId: extraction.id,
@@ -409,12 +441,15 @@ export async function handleRunRecommendation(
     ),
     availableDocuments: availableDocs,
     // Behaviour versions: a deploy that changes matching, taxonomy, the
-    // persisted evidence contract or the quality classification must not be
-    // answered from a stale cache.
+    // persisted evidence contract, the quality classification or the
+    // completeness / contradiction models must not be answered from a stale cache.
     matcherVersion: MATCHER_VERSION,
     taxonomyVersion: TAXONOMY_VERSION,
-    evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+    evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3,
     qualityModelVersion: QUALITY_MODEL_VERSION,
+    completenessModelVersion: COMPLETENESS_MODEL_VERSION,
+    contradictionModelVersion: CONTRADICTION_MODEL_VERSION,
+    contradictionInputsDigest: fingerprintObservations(observations),
     activeInsurers,
   });
   const job = await beginJob(
@@ -590,6 +625,7 @@ export async function handleRunRecommendation(
       matcherInput: risk,
       matcherResult: result,
       activeAppetite: appetite,
+      observations,
     });
   } catch {
     await failJob(admin, job.jobId, {

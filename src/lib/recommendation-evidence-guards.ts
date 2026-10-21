@@ -196,8 +196,15 @@ export function isReadableV1(value: unknown): boolean {
   });
 }
 
-/** True when the packet has everything the v2 display code reads. */
-export function isReadableV2(value: unknown): boolean {
+/**
+ * Everything the v2 display code reads. v3 is a superset of v2, so both go
+ * through this one check; v3 adds its own gap links and two top-level analyses.
+ */
+function readableV2Family(
+  value: unknown,
+  extraGapChecks: Record<string, (v: unknown) => boolean>,
+  extraTopLevel: Record<string, (v: unknown) => boolean>
+): boolean {
   return shape(value, {
     provenance: PROVENANCE,
     trusted_documents: TRUSTED,
@@ -219,8 +226,140 @@ export function isReadableV2(value: unknown): boolean {
               rule_id: strOrNull,
               section_key: strOrNull,
               missing: strArr,
+              ...extraGapChecks,
             })
           ),
       }),
+    ...extraTopLevel,
   });
+}
+
+/** True when the packet has everything the v2 display code reads. */
+export function isReadableV2(value: unknown): boolean {
+  return readableV2Family(value, {}, {});
+}
+
+const COMPLETENESS_STATE = (v: unknown) => oneOf(v, ["complete", "incomplete_nonblocking", "incomplete_material"]);
+
+const COMPLETENESS_REQUIREMENT = (v: unknown) =>
+  shape(v, {
+    authority: (x) =>
+      oneOf(x, [
+        "appetite_rule",
+        "declared_cover_section",
+        "section_evaluation_model",
+        "rule_selection_model",
+        "active_insurer_inventory",
+        "extraction_report",
+      ]),
+    insurer_id: strOrNull,
+    rule_id: strOrNull,
+    rule_scope: (x) => x === null || oneOf(x, ["product", "portfolio"]),
+    section_key: strOrNull,
+    reference: strOrNull,
+    priority: (x) => x === null || oneOf(x, ["high", "medium", "low"]),
+    present: (x) => x === null || isBool(x),
+  });
+
+const COMPLETENESS_ITEM = (v: unknown) =>
+  shape(v, {
+    item_id: isStr,
+    code: isStr,
+    scope: (x) => oneOf(x, ["submission", "insurer", "section", "document", "fact"]),
+    status: (x) => oneOf(x, ["missing", "not_evaluated", "ambiguous"]),
+    materiality: (x) => oneOf(x, ["material", "nonblocking"]),
+    affects: (x) => oneOf(x, ["recommendation", "insurer", "section", "rule", "not_determined"]),
+    insurer_ids: strArr,
+    section_keys: strArr,
+    rule_ids: strArr,
+    field_path: strOrNull,
+    label: strOrNull,
+    document_type: strOrNull,
+    document_key: strOrNull,
+    required_by: (x) => arrOf(x, COMPLETENESS_REQUIREMENT),
+    quality_gap_ids: strArr,
+  });
+
+const COMPLETENESS = (v: unknown) =>
+  shape(v, {
+    model: isStr,
+    state: COMPLETENESS_STATE,
+    material_count: isNum,
+    nonblocking_count: isNum,
+    items: (x) => arrOf(x, COMPLETENESS_ITEM),
+    insurers: (x) =>
+      arrOf(x, (i) =>
+        shape(i, { insurer_id: isStr, state: COMPLETENESS_STATE, material_count: isNum, nonblocking_count: isNum, item_ids: strArr })
+      ),
+    case_item_ids: strArr,
+    extraction_reported_omitted: isNum,
+  });
+
+const CONTRADICTION_SOURCE = (v: unknown) =>
+  shape(v, {
+    source_id: isStr,
+    source_label: isStr,
+    pointer: isRec,
+    field_status: strOrNull,
+    confidence: numOrNull,
+  });
+
+const CONTRADICTION_RECORD = (v: unknown) =>
+  shape(v, {
+    contradiction_id: isStr,
+    field_key: isStr,
+    field_path: strOrNull,
+    label: isStr,
+    status: (x) => oneOf(x, ["unresolved"]),
+    resolution_state: (x) => oneOf(x, ["unresolved"]),
+    severity: (x) => oneOf(x, ["material", "advisory"]),
+    comparison_basis: (x) => shape(x, { kind: isStr, normalization: isStr, normalization_steps: strArr }),
+    affects_matcher_input: isBool,
+    matcher_roles: strArr,
+    // A contradiction is two or more DISTINCT values; a single group is not one.
+    value_groups: (x) =>
+      Array.isArray(x) &&
+      x.length >= 2 &&
+      x.every((group) =>
+        shape(group, {
+          value_digest: isStr,
+          value_display: strOrNull,
+          source_count: isNum,
+          sources: (s) => arrOf(s, CONTRADICTION_SOURCE),
+        })
+      ),
+    quality_gap_id: strOrNull,
+  });
+
+const CONTRADICTIONS = (v: unknown) =>
+  shape(v, {
+    model: isStr,
+    source_precedence: (x) => oneOf(x, ["none_applied"]),
+    comparisons: (x) =>
+      arrOf(x, (c) =>
+        shape(c, {
+          field_key: isStr,
+          label: isStr,
+          outcome: (o) => oneOf(o, ["agree", "conflict", "single_source", "comparison_unavailable"]),
+          source_ids: strArr,
+          unparseable_source_ids: strArr,
+          unavailable_source_ids: strArr,
+          unavailable_reason: strOrNull,
+          contradiction_id: strOrNull,
+        })
+      ),
+    contradictions: (x) => arrOf(x, CONTRADICTION_RECORD),
+    contradiction_count: isNum,
+    material_count: isNum,
+    advisory_count: isNum,
+    unavailable_count: isNum,
+  });
+
+/** True when the packet has everything the v3 display code reads (v2 + completeness + contradictions). */
+export function isReadableV3(value: unknown): boolean {
+  return readableV2Family(
+    value,
+    { completeness_item_ids: strArr, contradiction_id: strOrNull },
+    { completeness: COMPLETENESS, contradictions: CONTRADICTIONS }
+  );
 }

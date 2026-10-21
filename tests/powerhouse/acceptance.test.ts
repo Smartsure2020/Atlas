@@ -25,7 +25,8 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { matchInsurers, type MatchResult } from "../../worker/src/matcher.js";
 import { deriveRisk, resolveConfidenceProvenance } from "../../worker/src/recommendation-endpoints.js";
-import type { RecommendationEvidenceV2 } from "../../worker/src/recommendation-evidence-v2.js";
+import type { RecommendationEvidenceV3 } from "../../worker/src/recommendation-evidence-v3.js";
+import type { CompletenessItem } from "../../worker/src/completeness.js";
 import { matchInsurers as matchInsurersV1 } from "./reference/matcher-v1.reference.js";
 import { caseIds, loadCase, loadExpected } from "./case-loader.js";
 import { fixturePath, readJson } from "./fixture-loader.js";
@@ -75,6 +76,8 @@ export interface InsurerObservation {
   documents: { type: string; present: boolean; adjustment: number }[];
   quality: string;
   gaps: string[];
+  /** Batch B: this insurer's own completeness state (case-level items are not attributed to it). */
+  completeness: string;
 }
 
 export interface Observation {
@@ -94,9 +97,27 @@ export interface Observation {
     recommendation_gaps: string[];
   };
   privacy: { sentinel_hits: string[]; features_redacted: boolean };
+  /** Batch B Phase 3 — what the case still needs. */
+  completeness: {
+    state: string;
+    material: number;
+    nonblocking: number;
+    /** code:materiality|insurers=…|sections=…|doc=…|field=…|by=… per item, in packet order */
+    items: string[];
+  };
+  /** Batch B Phase 4 — recorded values that disagree. */
+  contradictions: {
+    count: number;
+    material: number;
+    advisory: number;
+    /** field_key:outcome for every comparison Atlas made */
+    comparisons: string[];
+    /** field_key|severity|groups=N|matcher=bool|digests=… per contradiction */
+    items: string[];
+  };
 }
 
-function gapToken(g: RecommendationEvidenceV2["quality"]["gaps"][number]): string {
+function gapToken(g: RecommendationEvidenceV3["quality"]["gaps"][number]): string {
   return [
     `${g.code}:${g.severity}`,
     g.section_key ? `section=${g.section_key}` : "",
@@ -106,8 +127,22 @@ function gapToken(g: RecommendationEvidenceV2["quality"]["gaps"][number]): strin
   ].filter(Boolean).join("|");
 }
 
+function completenessToken(item: CompletenessItem): string {
+  return [
+    `${item.code}:${item.materiality}`,
+    item.insurer_ids.length ? `insurers=${item.insurer_ids.join("+")}` : "",
+    item.section_keys.length ? `sections=${item.section_keys.join("+")}` : "",
+    item.document_key ? `doc=${item.document_key}` : "",
+    item.field_path ? `field=${item.field_path}` : "",
+    `by=${item.required_by
+      .map((ref) => [ref.authority, ref.insurer_id, ref.rule_id, ref.rule_scope, ref.reference, ref.priority, ref.present === null ? null : ref.present ? "present" : "missing"].filter((x) => x !== null).join("/"))
+      .join("+")}`,
+    item.quality_gap_ids.length ? `gaps=${item.quality_gap_ids.length}` : "gaps=0",
+  ].filter(Boolean).join("|");
+}
+
 export function observe(row: Row, sentinels: string[] = []): Observation {
-  const evidence = row.evidence_json as RecommendationEvidenceV2;
+  const evidence = row.evidence_json as RecommendationEvidenceV3;
   const reasoning = row.reasoning_json as Row;
   const top = reasoning.top as Row | null;
   const secondary = (row.secondary_options_json as Row[]).map((item) => String(item.insurer_id));
@@ -159,6 +194,7 @@ export function observe(row: Row, sentinels: string[] = []): Observation {
       })),
       quality: outcome.quality.state,
       gaps: evidence.quality.gaps.filter((g) => g.insurer_id === outcome.insurer_id).map(gapToken),
+      completeness: evidence.completeness.insurers.find((item) => item.insurer_id === outcome.insurer_id)!.state,
     };
   }
   const serialised = JSON.stringify(row);
@@ -185,6 +221,23 @@ export function observe(row: Row, sentinels: string[] = []): Observation {
       features_redacted:
         evidence.matcher_input.features.every((f) => f.value_retained === false) &&
         snapshot.every((f) => f.value_retained === false && !("text" in f)),
+    },
+    completeness: {
+      state: evidence.completeness.state,
+      material: evidence.completeness.material_count,
+      nonblocking: evidence.completeness.nonblocking_count,
+      items: evidence.completeness.items.map(completenessToken),
+    },
+    contradictions: {
+      count: evidence.contradictions.contradiction_count,
+      material: evidence.contradictions.material_count,
+      advisory: evidence.contradictions.advisory_count,
+      comparisons: evidence.contradictions.comparisons.map((item) => `${item.field_key}:${item.outcome}`),
+      items: evidence.contradictions.contradictions.map(
+        (item) =>
+          `${item.field_key}|${item.severity}|groups=${item.value_groups.length}|matcher=${item.affects_matcher_input}|` +
+          `display=${item.value_groups.map((group) => group.value_display ?? "-").join("~")}`
+      ),
     },
   };
 }
@@ -252,7 +305,7 @@ async function runCase(id: string, rulesOrder?: (rules: Row[]) => Row[]): Promis
 // Hand-written intent assertions (independent of the golden)
 // ---------------------------------------------------------------------------
 
-type Intent = (obs: Observation, run: HarnessRun & { loaded: ReturnType<typeof loadCase> }) => void;
+type Intent = (obs: Observation, run: HarnessRun & { loaded: ReturnType<typeof loadCase> }) => void | Promise<void>;
 const effects = (o: InsurerObservation) => o.rule_effects.map((entry) => entry.split("|")[1]);
 const gapCodes = (o: InsurerObservation) => o.gaps.map((entry) => entry.split(":")[0]);
 
@@ -325,7 +378,7 @@ const INTENTS: Record<string, Intent> = {
     const alpha = o.insurers["insurer-alpha"];
     eq(alpha.documents.length, 1, "one canonical outcome");
     eq(alpha.confidence, 0.8, "one penalty, not two");
-    const evidence = run.row!.evidence_json as RecommendationEvidenceV2;
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
     const outcome = evidence.insurers.find((i) => i.insurer_id === "insurer-alpha")!;
     assert(outcome.status === "scored", "scored");
     eq(outcome.required_documents[0].rule_evidence_ids.length, 2, "linked to BOTH the product and portfolio rule");
@@ -336,7 +389,7 @@ const INTENTS: Record<string, Intent> = {
   },
   "case-09-no-appetite-data-insurer": (o, run) => {
     deepEq(o.no_data, ["insurer-epsilon", "insurer-foxtrot"], "explicit no-data outcomes, sorted by name");
-    const evidence = run.row!.evidence_json as RecommendationEvidenceV2;
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
     for (const outcome of evidence.insurers.filter((i) => i.status === "no_appetite_data")) {
       assert(outcome.status === "no_appetite_data", "no-data");
       eq(outcome.rank, null, "no rank");
@@ -351,7 +404,7 @@ const INTENTS: Record<string, Intent> = {
     assert(o.insurers["insurer-alpha"].gaps.includes("rule_source_locator_incomplete:advisory|rule=alpha-motor|missing=source_page+source_quote+source_section"), "alpha locator gap is advisory");
     assert(o.insurers["insurer-beta"].gaps.some((g) => g.startsWith("rule_source_document_missing:material|rule=beta-motor")), "beta: material");
     eq(o.quality.state, "caution", "caution");
-    const evidence = run.row!.evidence_json as RecommendationEvidenceV2;
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
     const alpha = evidence.insurers.find((i) => i.insurer_id === "insurer-alpha");
     assert(alpha && alpha.status === "scored", "alpha");
     const rule = alpha.rule_evidence.find((r) => r.rule_id === "alpha-motor")!;
@@ -408,7 +461,7 @@ const INTENTS: Record<string, Intent> = {
     eq(o.quality.state, "caution", "caution");
   },
   "case-18-multi-product-no-declared-sections": (o, run) => {
-    const evidence = run.row!.evidence_json as RecommendationEvidenceV2;
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
     deepEq(evidence.requested_sections, [], "NO requested section is invented");
     const alpha = o.insurers["insurer-alpha"];
     deepEq(alpha.sections, [], "no section evaluations");
@@ -441,7 +494,7 @@ const INTENTS: Record<string, Intent> = {
     deepEq(alpha.sections.map((s) => [s.outcome, s.reflected]), [["preferred", true]], "the section's own rule is preferred and reflected in section scoring");
     assert(alpha.rule_effects.some((e) => e.startsWith("portfolio_declined|hard_decline|alpha-portfolio")), "the decline is the PORTFOLIO rule's");
     eq(o.insurers["insurer-beta"].ruled_out, false, "beta unaffected");
-    const evidence = run.row!.evidence_json as RecommendationEvidenceV2;
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
     const outcome = evidence.insurers.find((i) => i.insurer_id === "insurer-alpha")!;
     assert(outcome.status === "scored" && outcome.scored_against_rule_id === "alpha-portfolio", "ruled out against the portfolio rule");
   },
@@ -456,7 +509,154 @@ const INTENTS: Record<string, Intent> = {
     eq(o.insurers["insurer-beta"].quality, "decision_ready", "beta requires nothing");
     eq(o.quality.state, "caution", "NOT decision_ready");
   },
+
+  // ---- Batch B: Phase 3 (completeness) and Phase 4 (contradictions) -------------
+  "case-22-complete-single-section": (o) => {
+    eq(o.completeness.state, "complete", "nothing is missing");
+    deepEq(o.completeness.items, [], "no completeness item at all");
+    for (const insurer of Object.values(o.insurers)) eq(insurer.completeness, "complete", "every insurer complete");
+    deepEq(o.contradictions.comparisons, [], "no second source: nothing was compared");
+    eq(o.contradictions.count, 0, "no contradiction");
+    eq(o.quality.state, "decision_ready", "quality unchanged by the new layers");
+    assert(!o.quality.recommendation_gaps.some((g) => g.startsWith("extraction_reported") || g.startsWith("conflicting")), "no new gap");
+  },
+  "case-23-required-fact-missing": (o, run) => {
+    const items = o.completeness.items;
+    eq(items.length, 3, "three records name a field (the blank one is not an item)");
+    assert(items.every((i) => i.startsWith("extraction_reported_information_missing:nonblocking")), "all nonblocking");
+    const resolved = items.filter((i) => i.includes("|field="));
+    eq(resolved.length, 1, "exactly one record names a schema field exactly");
+    assert(resolved[0].includes("field=extracted_client.registration_or_id_number"), "resolved to the schema path");
+    assert(resolved[0].includes("missing_information[0]/high"), "keeps its position and priority");
+    assert(items.some((i) => i.includes("missing_information[1]/medium")) && items.some((i) => i.includes("missing_information[3]/low")), "free text and the ambiguous bare key keep position + priority only");
+    assert(!items.some((i) => i.includes("missing_information[2]")), "a record with no field is not an item");
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
+    assert(evidence.completeness.items.every((item) => item.affects === "not_determined" && item.scope === "fact"), "effect is not claimed");
+    assert(evidence.completeness.items.filter((item) => item.label === null).length === 2, "unresolved labels stay null — no free text");
+    eq(o.completeness.state, "incomplete_nonblocking", "state");
+    assert(o.quality.recommendation_gaps.filter((g) => g.startsWith("extraction_reported_information_missing:advisory")).length === 3, "one advisory gap per item");
+    eq(o.quality.state, "decision_ready", "advisory only: reliance unchanged");
+    deepEq(o.privacy.sentinel_hits, [], "model free text is not persisted");
+    eq(o.insurers["insurer-alpha"].completeness, "complete", "case-level facts are not attributed to an insurer");
+  },
+  "case-24-required-document-missing-rule-provenance": (o) => {
+    const docs = o.completeness.items.filter((i) => i.startsWith("required_document_missing:"));
+    eq(docs.length, 1, "three spellings, two insurers, three rules => ONE canonical requirement");
+    assert(docs[0].startsWith("required_document_missing:material"), "material: Beta has none of its required documents evidenced");
+    assert(docs[0].includes("insurers=insurer-alpha+insurer-beta") && docs[0].includes("doc=risk survey"), "insurer scope and canonical key retained");
+    for (const ref of [
+      "appetite_rule/insurer-alpha/alpha-motor/product/missing",
+      "appetite_rule/insurer-alpha/alpha-portfolio/portfolio/missing",
+      "appetite_rule/insurer-beta/beta-motor/product/missing",
+    ]) assert(docs[0].includes(ref), `required_by retains ${ref}`);
+    assert(!docs[0].includes("Claims"), "the document Alpha DOES have is not a gap");
+    eq(o.insurers["insurer-alpha"].completeness, "incomplete_nonblocking", "Alpha: partly evidenced");
+    eq(o.insurers["insurer-beta"].completeness, "incomplete_material", "Beta: nothing it requires is evidenced");
+    eq(o.insurers["insurer-alpha"].documents.length, 2, "Alpha's matcher outcomes are unchanged: two canonical documents");
+    assert(docs[0].endsWith("gaps=3") || /gaps=[3-9]/.test(docs[0]), "linked to the existing quality gaps rather than creating new ones");
+  },
+  "case-25-one-insurer-complete-another-incomplete": (o) => {
+    eq(o.insurers["insurer-alpha"].completeness, "complete", "Alpha complete");
+    eq(o.insurers["insurer-beta"].completeness, "incomplete_material", "Beta material");
+    eq(o.insurers["insurer-gamma"].completeness, "incomplete_nonblocking", "Gamma nonblocking");
+    eq(o.completeness.state, "incomplete_material", "the case is as incomplete as its worst insurer");
+    const doc = o.completeness.items.find((i) => i.startsWith("required_document_missing:"))!;
+    assert(doc.includes("insurers=insurer-beta+insurer-gamma") && doc.includes("doc=financial statements"), "one document, two insurers");
+    eq(o.completeness.items.length, 1, "no double counting");
+    assert(Object.values(o.insurers).every((i) => i.score >= 0), "scores intact");
+  },
+  "case-26-section-without-applicable-rule": (o) => {
+    const git = o.completeness.items.filter((i) => i.startsWith("requested_section_not_evaluated:"));
+    eq(git.length, 2, "one item per (insurer, section)");
+    assert(git.some((i) => i.startsWith("requested_section_not_evaluated:material|insurers=insurer-alpha|sections=cyber|")), "viable insurer: material");
+    assert(git.some((i) => i.startsWith("requested_section_not_evaluated:nonblocking|insurers=insurer-beta|sections=cyber|")), "ruled-out insurer: nonblocking");
+    eq(o.insurers["insurer-beta"].ruled_out, true, "Beta is ruled out by its declined motor rule");
+    eq(o.insurers["insurer-gamma"].completeness, "complete", "Gamma evaluates both sections");
+    eq(o.insurers["insurer-alpha"].completeness, "incomplete_material", "Alpha");
+    assert(o.insurers["insurer-alpha"].gaps.some((g) => g.startsWith("requested_section_not_evaluated:material")), "the existing quality gap is the one linked");
+  },
+  "case-27-multiple-products-no-declared-sections-completeness": (o, run) => {
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
+    deepEq(evidence.requested_sections, [], "no section is invented");
+    assert(o.completeness.items.some((i) => i.startsWith("requested_sections_not_declared:nonblocking")), "the missing declaration is reported at case level");
+    assert(o.completeness.items.some((i) => i.startsWith("multiple_products_without_declared_sections:material|insurers=insurer-alpha")), "Alpha: material");
+    assert(o.completeness.items.some((i) => i.startsWith("multiple_products_without_declared_sections:nonblocking|insurers=insurer-beta")), "Beta (ruled out): nonblocking");
+    eq(o.insurers["insurer-gamma"].completeness, "complete", "a single product raises nothing");
+    eq(o.insurers["insurer-alpha"].ruled_out, false, "Alpha is NOT declined merely because sections were not declared");
+    eq(o.insurers["insurer-beta"].ruled_out, true, "Beta is ruled out by its own declined rule");
+  },
+  "case-28-sources-agree": (o) => {
+    deepEq(o.contradictions.comparisons, ["broker.email:agree"], "compared, agreed");
+    eq(o.contradictions.count, 0, "agreement is not a contradiction");
+    eq(o.completeness.state, "complete", "agreement adds nothing to completeness");
+    eq(o.quality.state, "decision_ready", "agreement is not scored");
+  },
+  "case-29-sources-disagree": async (o, run) => {
+    deepEq(o.contradictions.comparisons, ["broker.email:conflict"], "compared, conflict");
+    eq(o.contradictions.count, 1, "one cluster");
+    eq(o.contradictions.advisory, 1, "advisory: not a matcher input");
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
+    const [c] = evidence.contradictions.contradictions;
+    eq(c.value_groups.length, 2, "two value groups");
+    deepEq(c.value_groups.map((g) => g.value_display).sort(), ["a•••@•••.za", "b•••@•••.za"], "masked, never the raw address");
+    eq(c.resolution_state, "unresolved", "unresolved");
+    eq(c.affects_matcher_input, false, "not a matcher input");
+    eq(evidence.contradictions.source_precedence, "none_applied", "no source is declared correct");
+    assert(o.quality.recommendation_gaps.some((g) => g.startsWith("conflicting_recorded_values:advisory")), "advisory quality gap");
+    eq(o.quality.state, "decision_ready", "advisory only");
+    // Differential: the agreeing twin has identical authoritative output.
+    const twin = observe((await runThroughHandler({ ...run.loaded.input, submission: { broker_email: "bob@otherbrokers.co.za" } })).row!);
+    assertSameAuthoritative(o, twin, "case 29 vs its agreeing twin");
+  },
+  "case-32-identifier-formatting-normalises-equal": (o) => {
+    deepEq(o.contradictions.comparisons, ["broker.email:agree"], "formatting is not disagreement");
+    eq(o.contradictions.count, 0, "no contradiction");
+  },
+  "case-33-identifier-genuine-mismatch": (o, run) => {
+    eq(o.contradictions.count, 1, "a one-letter difference is a contradiction: no tolerance, no fuzzy matching");
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
+    const digests = evidence.contradictions.contradictions[0].value_groups.map((g) => g.value_digest);
+    eq(new Set(digests).size, 2, "the two values are told apart by digest even when the masked display coincides");
+  },
+  "case-35-contradiction-on-non-matcher-field": async (o, run) => {
+    eq(o.contradictions.count, 1, "conflict present");
+    eq(o.contradictions.items[0].split("|")[3], "matcher=false", "not a matcher input");
+    const twin = observe((await runThroughHandler({ ...run.loaded.input, submission: { broker_email: "document@brokerage.co.za" } })).row!);
+    eq(twin.contradictions.count, 0, "the twin has none");
+    assertSameAuthoritative(o, twin, "case 35 vs its agreeing twin");
+    eq(o.quality.state, twin.quality.state, "quality state is unchanged by an advisory contradiction");
+  },
+  "case-40-privacy-sentinels-completeness-contradictions": (o, run) => {
+    deepEq(o.privacy.sentinel_hits, [], "no sentinel — raw or normalised — in the persisted row");
+    eq(o.contradictions.count, 1, "the conflict is still detected");
+    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
+    deepEq(evidence.contradictions.contradictions[0].value_groups.map((g) => g.value_display).sort(), ["a•••@•••.test", "b•••@•••.test"], "masked only");
+    const completenessText = JSON.stringify([evidence.completeness, evidence.contradictions]);
+    for (const needle of ["MISSING_TEXT_SENTINEL_40", "REASON_TEXT_SENTINEL_40", "CONFLICT_TEXT_SENTINEL_40", "@", "sentinel"]) {
+      if (needle === "@") {
+        assert(!/[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]+/i.test(completenessText), "no full email address is persisted anywhere in the new structures");
+      } else {
+        assert(!completenessText.toLowerCase().includes(needle.toLowerCase()), `${needle} must not appear in completeness / contradictions`);
+      }
+    }
+    eq(evidence.completeness.items.filter((i) => i.code === "extraction_reported_information_missing").length, 1, "the free-text record is an item by position only");
+  },
 };
+
+/** Everything the matcher decides — and nothing a reliance layer adds — must be identical. */
+function assertSameAuthoritative(a: Observation, b: Observation, label: string) {
+  deepEq(a.insurer_order, b.insurer_order, `${label}: insurer order`);
+  for (const id of Object.keys(a.insurers)) {
+    const x = a.insurers[id];
+    const y = b.insurers[id];
+    for (const key of ["rank", "score", "band", "rule_status", "confidence", "ruled_out", "referral_required", "manual_review_required", "senior_review_required", "scored_rule", "selection_basis"] as const) {
+      deepEq(x[key], y[key], `${label}: ${id}.${key}`);
+    }
+    deepEq(x.rule_effects, y.rule_effects, `${label}: ${id} rule effects`);
+    deepEq(x.sections, y.sections, `${label}: ${id} sections`);
+    deepEq(x.documents, y.documents, `${label}: ${id} required-document outcomes`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Runner
@@ -497,7 +697,7 @@ for (const id of caseIds()) {
     // 3: intent assertions that do not come from the golden.
     const intent = INTENTS[id];
     assert(intent, `no intent assertions registered for ${id}`);
-    intent(obs, run);
+    await intent(obs, run);
 
     // Persisted order and evidence ranks must agree.
     const ranked = Object.entries(obs.insurers).sort((a, b) => a[1].rank - b[1].rank).map(([key]) => key);
@@ -536,9 +736,41 @@ test("case-13-historical-evidence-v1 (stored v1 rows read back unchanged; v1 voc
   eq((await getThroughHandler(nullRow)).evidence_json, null, "historical evidence_json = null stays null");
 });
 
+// CASES 37-39 — historical rows carry no Phase 3 / Phase 4 analysis and none is ever fabricated for them.
+const BATCH_B_KEYS = ["completeness", "contradictions"] as const;
+
+test("case-37-historical-evidence-v2 (stored v2 rows read back unchanged; no completeness, no contradictions, no links, v2 quality model)", async () => {
+  for (const name of ["snapshots/historical-v2-decision-ready.row.json", "snapshots/historical-v2-incomplete.row.json"]) {
+    const stored = readJson<Row>(name);
+    const evidence = stored.evidence_json as Row;
+    eq(evidence.schema_version, "recommendation-evidence-v2", `${name}: still v2`);
+    eq((evidence.quality as Row).model, "recommendation-quality-v2", `${name}: the v2 quality model, not v3`);
+    for (const key of BATCH_B_KEYS) assert(!(key in evidence), `${name}: a v2 packet has no ${key}`);
+    for (const gap of (evidence.quality as { gaps: Row[] }).gaps) {
+      assert(!("completeness_item_ids" in gap) && !("contradiction_id" in gap), `${name}: no fabricated v3 links on ${String(gap.gap_id)}`);
+    }
+    deepEq((await getThroughHandler(stored)).evidence_json, stored.evidence_json, `${name}: GET returns the stored packet verbatim`);
+  }
+});
+
+test("case-38-historical-evidence-v1 (stored v1 rows have no Batch B analysis either)", async () => {
+  for (const name of ["snapshots/historical-v1-complete.row.json", "snapshots/historical-v1-gaps.row.json"]) {
+    const evidence = readJson<Row>(name).evidence_json as Row;
+    eq(evidence.schema_version, "recommendation-evidence-v1", `${name}: still v1`);
+    for (const key of BATCH_B_KEYS) assert(!(key in evidence), `${name}: no ${key}`);
+    assert(!("scoring_scope" in evidence) && !("requested_sections" in evidence), `${name}: no v2 fields either`);
+  }
+});
+
+test("case-39-historical-null-evidence (evidence_json NULL stays NULL through the real GET)", async () => {
+  const nullRow = readJson<Row>("snapshots/historical-null.row.json");
+  eq(nullRow.evidence_json, null, "fixture is a null row");
+  eq((await getThroughHandler(nullRow)).evidence_json, null, "still null: nothing is reconstructed from current appetite or reviewed data");
+});
+
 test("every case file has an expected file and an intent registered (no silent gaps in the benchmark)", () => {
   const ids = caseIds();
-  eq(ids.length, 20, "14 original handler cases + 6 remediation cases (+ case 13, historical, which has no handler run)");
+  eq(ids.length, 32, "14 original handler cases + 6 remediation cases + 12 Batch B cases (22-29, 32, 33, 35, 40); case 13 and cases 37-39 are historical rows without a handler run; 30, 31, 34 and 36 are engine-level (contradictions.test.ts)");
   for (const id of ids) {
     assert(existsSync(fixturePath(`cases/${id}.expected.json`)), `${id}: expected file`);
     assert(INTENTS[id], `${id}: intent`);

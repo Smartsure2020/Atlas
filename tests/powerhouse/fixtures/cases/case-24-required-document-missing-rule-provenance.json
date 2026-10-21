@@ -1,0 +1,113 @@
+{
+  "fixture_schema": "powerhouse-case-v1",
+  "id": "case-24-required-document-missing-rule-provenance",
+  "title": "Required document missing — one canonical requirement, every rule retained",
+  "description": "Alpha's product rule and portfolio rule and Beta's rule all require the same logical document under three spellings (`Risk survey`, `RISK SURVEY`, `risk-survey`). It is missing for both insurers. Alpha also has a trusted document it needs; Beta has nothing it requires.",
+  "intent": [
+    "ONE canonical document item (not three), keyed `risk survey`",
+    "required_by retains every rule — Alpha's product rule, Alpha's portfolio rule and Beta's rule — with its scope and insurer",
+    "materiality follows the existing quality classification: material because Beta has NONE of its required documents evidenced",
+    "Alpha (partly evidenced) is nonblocking, Beta is material; the unrelated trusted document satisfies nothing for Beta"
+  ],
+  "rule_defaults": {
+    "notes": null,
+    "rating_notes": null,
+    "line_of_business": "commercial",
+    "source": "manual",
+    "source_document_id": "doc-guide",
+    "source_file_name": "guide.pdf",
+    "source_page": 4,
+    "source_section": "Section 4",
+    "source_quote": "Synthetic guideline excerpt.",
+    "ingestion_confidence": 0.95,
+    "is_active": true,
+    "updated_at": "2026-10-15T00:00:00.000Z",
+    "preferred_risks": [],
+    "caution_risks": [],
+    "declined_risks": [],
+    "required_documents": [],
+    "referral_triggers": []
+  },
+  "reviewed_compact": {
+    "schema_version": "case-v1",
+    "extracted_client": {
+      "occupation_or_business_description": "transport fleet",
+      "risk_address": "1 Synthetic Road",
+      "entity_type": "Company"
+    },
+    "current_cover": {
+      "cover_sections": [
+        "Commercial motor"
+      ],
+      "endorsements": [],
+      "exclusions": []
+    },
+    "risk_classification": {
+      "product_line": "commercial motor",
+      "risk_type": "transport",
+      "primary_risk_type": "transport fleet",
+      "secondary_risk_types": [],
+      "business_sector": "transport",
+      "complexity_level": "medium"
+    },
+    "red_flags": []
+  },
+  "documents": [
+    {
+      "document_type": "Claims history",
+      "status": "active",
+      "scan_status": "clean"
+    }
+  ],
+  "insurers": [
+    {
+      "id": "insurer-alpha",
+      "name": "Alpha Insurance",
+      "active": true
+    },
+    {
+      "id": "insurer-beta",
+      "name": "Beta Insurance",
+      "active": true
+    }
+  ],
+  "rules": [
+    {
+      "id": "alpha-motor",
+      "insurer_id": "insurer-alpha",
+      "insurer_name": "Alpha Insurance",
+      "product_line": "commercial_motor",
+      "risk_type": "transport",
+      "appetite_level": "preferred",
+      "preferred_risks": [
+        "transport fleet"
+      ],
+      "required_documents": [
+        "Claims history",
+        "Risk survey"
+      ]
+    },
+    {
+      "id": "alpha-portfolio",
+      "insurer_id": "insurer-alpha",
+      "insurer_name": "Alpha Insurance",
+      "product_line": "*",
+      "risk_type": "*",
+      "appetite_level": "standard",
+      "required_documents": [
+        "RISK SURVEY"
+      ]
+    },
+    {
+      "id": "beta-motor",
+      "insurer_id": "insurer-beta",
+      "insurer_name": "Beta Insurance",
+      "product_line": "commercial_motor",
+      "risk_type": "transport",
+      "appetite_level": "standard",
+      "required_documents": [
+        "risk-survey"
+      ]
+    }
+  ]
+}

@@ -110,6 +110,12 @@ export interface HarnessInput {
   insurers?: { id: string; name: string; active: boolean }[];
   extractionConfidence?: number | null;
   reviewedAt?: string;
+  /**
+   * The submission's intake row (the contradiction analysis' second source).
+   * Omitted: no `atlas_submissions` row is seeded, so the endpoint reports
+   * `not_found` and nothing is compared.
+   */
+  submission?: Row | null;
   /** Extra seeded rows, e.g. a previously completed job for cache tests. */
   extraTables?: Record<string, Row[]>;
 }
@@ -128,6 +134,7 @@ export function buildTables(input: HarnessInput): Record<string, Row[]> {
     atlas_documents: (input.documents ?? []).map((doc) => ({ submission_id: SUB, ...doc })),
     atlas_insurer_appetite: input.rules,
     atlas_insurers: input.insurers ?? [],
+    ...(input.submission ? { atlas_submissions: [{ id: SUB, ...input.submission }] } : {}),
     atlas_jobs: [{
       id: JOB, status: "running", cancellation_requested: false, retry_count: 0,
       max_retries: 2, job_type: "recommendation", submission_id: SUB,
@@ -158,9 +165,9 @@ export interface HarnessRun {
 
 export async function runThroughHandler(
   input: HarnessInput,
-  options: { request?: Request } = {}
+  options: { request?: Request; failTables?: string[] } = {}
 ): Promise<HarnessRun> {
-  const stub = installRestStub(buildTables(input));
+  const stub = installRestStub(buildTables(input), { failTables: options.failTables });
   try {
     const res = await handleRunRecommendation(SUB, options.request ?? forcedRequest(), env(), MANAGER);
     const body = (await res.json()) as Row;
