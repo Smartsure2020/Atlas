@@ -99,7 +99,7 @@ insurer_ids[] section_keys[] rule_ids[] field_path? label? document_type? docume
 trust_basis        active_exact_clean | null           (documents)
 required_by[]      { authority, insurer_id?, rule_id?, rule_scope?, section_key?,
                      reference?, priority?, present? }  WHO / WHAT requires it
-source             required_document_outcome | section_evaluation | … 
+source             required_document_outcome | section_evaluation | …
 quality_gap_ids[]  the quality gaps that describe the same problem (filled by v3)
 resolution_state   "open" — a packet never claims later handling
 ```
@@ -439,9 +439,25 @@ proposal for review — **not created or applied**:
 
 ## 16. Verification record
 
-Filled from the final run (see the final report). Mutation probes are reproducible with
-`npm run test:powerhouse-mutations` (26 probes, including the 14 named in the brief; a
-surviving probe fails the command). Performance with `npm run benchmark:powerhouse-batch-b`.
+Run on the final head (nothing pushed, migrated or deployed).
+
+| Check | Result |
+| --- | --- |
+| Backend, every script in `npm test` (45; compiled once, same node commands) | all 45 exit 0, 0 failures |
+| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, persistence, remediation, differential, Phase 1A differential) | pass; 264 assertions counted |
+| Matcher differential vs the frozen production v1 matcher (3,000 fixtures per corpus) | **0 unexpected authoritative differences**; 0 category violations; 0 order-invariance failures |
+| Phase 1A 500-fixture differential | unchanged pinned hash `b14d9927…a36` |
+| Phase 1A evidence (32) / handler (3) / Phase 24 clean-only trust (47) | pass |
+| Existing expected files (cases 1-21) vs `HEAD` | only the evidence-schema value and the new fields changed — 0 non-additive differences |
+| Mutation probes (`npm run test:powerhouse-mutations`) | **28/28 killed** (the 14 named in the brief plus 14 more) |
+| Frontend vitest | 894 tests in 40 files, 0 failures (was 783) |
+| Frontend `tsc -b` + production build | pass |
+| Worker `tsc --noEmit` | pass |
+| `wrangler deploy --dry-run --env production` (local bundle; nothing uploaded) | pass; bindings unchanged, pipeline `legacy`, no Graph variables |
+| `git diff --check` | clean |
+
+Reproduce the probes with `npm run test:powerhouse-mutations` (a surviving probe fails the
+command) and the cost table with `npm run benchmark:powerhouse-batch-b`.
 
 ### Performance (synthetic, Node, median of 5)
 
