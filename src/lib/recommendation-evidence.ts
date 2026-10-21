@@ -1131,6 +1131,52 @@ export interface TrackingTemplate {
   type: "document" | "underwriting_info" | "other";
   description: string;
   sectionKey: string | null;
+  /**
+   * True only for something a BROKER can supply (a document, the cover sections,
+   * a named schema fact). Tracked items are visible to the submission's broker and
+   * can appear in request drafts, so internal limitations — a section no rule
+   * covers, a rule tie, an insurer without data — are never offered for tracking.
+   */
+  trackable: boolean;
+  owner: "broker" | "consultant";
+}
+
+/** The matcher's own document normalisation: case, separators and spacing ignored. */
+export function documentKey(label: string): string {
+  return label.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** The part of a Missing Information item the join needs. */
+export interface TrackedLike {
+  item_type: string;
+  title: string;
+  status: string;
+}
+
+export type TrackedState =
+  | { state: "untracked" }
+  | { state: "tracked_open" | "tracked_closed"; status: string; count: number };
+
+const CLOSED_STATUSES = new Set(["received", "waived", "not_required"]);
+
+/**
+ * Is this detected item already in the Missing Information workspace? Documents
+ * match on the matcher's canonical document key (so "Risk survey", "risk-survey"
+ * and a derived "RISK SURVEY" are one item); other items match on type + the exact
+ * deterministic title above. Nothing is created, merged or inferred by this.
+ */
+export function trackedStateFor(line: CompletenessLine, items: readonly TrackedLike[]): TrackedState {
+  if (!line.tracking.trackable) return { state: "untracked" };
+  const matches = items.filter((item) =>
+    line.documentKey !== null
+      ? item.item_type === "document" && documentKey(item.title) === line.documentKey
+      : item.item_type === line.tracking.type && item.title === line.tracking.title
+  );
+  if (matches.length === 0) return { state: "untracked" };
+  const open = matches.find((item) => !CLOSED_STATUSES.has(item.status));
+  return open
+    ? { state: "tracked_open", status: open.status, count: matches.length }
+    : { state: "tracked_closed", status: matches[matches.length - 1].status, count: matches.length };
 }
 
 export type CompletenessView =
@@ -1192,6 +1238,46 @@ function requirementSentence(
       return `The extraction reported ${item} as outstanding${ref.priority ? ` (${ref.priority} priority)` : ""}`;
     }
   }
+}
+
+/**
+ * What the Missing Information workspace would record if a person tracked this
+ * item. Titles are written to be read by a broker. Only requests a broker can act
+ * on are trackable; free-text facts are not (the existing "Derive from analysis"
+ * flow already carries those, with their text, under existing access control).
+ */
+function trackingFor(item: CompletenessItemV3, subject: string, copy: GapCopy, fieldLabel: string | null): TrackingTemplate {
+  if (item.code === "required_document_missing") {
+    return {
+      title: item.document_type ?? subject,
+      type: "document",
+      description: "Required by an insurer's guideline and not among the trusted documents.",
+      sectionKey: null,
+      trackable: true,
+      owner: "broker",
+    };
+  }
+  if (item.code === "requested_sections_not_declared") {
+    return {
+      title: "Cover sections required",
+      type: "underwriting_info",
+      description: "The submission does not say which cover sections are required.",
+      sectionKey: null,
+      trackable: true,
+      owner: "broker",
+    };
+  }
+  if (item.code === "extraction_reported_information_missing" && fieldLabel) {
+    return {
+      title: fieldLabel,
+      type: "underwriting_info",
+      description: "Reported as outstanding when the submission was read.",
+      sectionKey: null,
+      trackable: true,
+      owner: "broker",
+    };
+  }
+  return { title: subject, type: "other", description: copy.title, sectionKey: null, trackable: false, owner: "consultant" };
 }
 
 function completenessBasis(basis: RecommendationEvidenceV3["completeness"]["requirement_basis"]): string[] {
@@ -1271,12 +1357,7 @@ export function completenessView(view: EvidenceView): CompletenessView | null {
           ? "Reported by the reviewed extraction."
           : "Derived from the recorded section and rule evaluation.",
       qualityGapIds: item.quality_gap_ids,
-      tracking: {
-        title: subject,
-        type: item.scope === "document" ? "document" : item.scope === "fact" ? "underwriting_info" : "other",
-        description: copy.title,
-        sectionKey: item.section_keys.length === 1 ? item.section_keys[0] : null,
-      },
+      tracking: trackingFor(item, subject, copy, fieldLabel),
     };
   };
 
@@ -1340,7 +1421,6 @@ export interface ContradictionLine {
   basis: { kind: string; normalization: string; steps: string[] };
   resolution: { state: "unresolved"; label: string };
   qualityGapId: string | null;
-  tracking: TrackingTemplate;
 }
 
 export type ContradictionsView =
@@ -1411,14 +1491,12 @@ export function contradictionsView(view: EvidenceView): ContradictionsView | nul
         normalization: record.comparison_basis.normalization,
         steps: record.comparison_basis.normalization_steps,
       },
-      resolution: { state: record.resolution_state, label: "Unresolved — no one has reviewed this disagreement" },
-      qualityGapId: record.quality_gap_id,
-      tracking: {
-        title: `Confirm ${record.label.toLowerCase()} (recorded values differ)`,
-        type: "underwriting_info",
-        description: "Two recorded sources hold different values for this fact. Confirm which is correct and correct the record if needed.",
-        sectionKey: null,
+      resolution: {
+        state: record.resolution_state,
+        label:
+          "Unresolved — Atlas has no record that anyone has reviewed this disagreement. It clears when a later recommendation no longer finds the values in conflict, for example after the record is corrected",
       },
+      qualityGapId: record.quality_gap_id,
     })),
     agreedLabels: analysis.comparisons.filter((item) => item.outcome === "agree").map((item) => item.label),
     unavailable: analysis.comparisons

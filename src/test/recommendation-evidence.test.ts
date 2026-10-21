@@ -8,17 +8,20 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { documentKey as workerDocumentKey } from "../../worker/src/matcher";
 import {
   COMPLETENESS_NOT_CAPTURED_V1,
   COMPLETENESS_NOT_CAPTURED_V2,
   completenessView,
   contradictionsView,
+  documentKey,
   insurerView,
   noDataInsurers,
   provenanceOf,
   recommendationQuality,
   resolveEvidence,
   scoreTies,
+  trackedStateFor,
   type InsurerEvidenceView,
 } from "../lib/recommendation-evidence";
 import type { Recommendation } from "../lib/recommendations";
@@ -721,5 +724,69 @@ describe("Batch B — historical packets are never promoted or reconstructed", (
     const quality = recommendationQuality(evidenceOf(histV2Incomplete))!;
     expect(quality.gaps.length).toBeGreaterThan(0);
     expect(quality.gaps.every((g) => g.completenessItemIds.length === 0 && g.contradictionId === null)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch B — joining detected items to the Missing Information workspace
+// ---------------------------------------------------------------------------
+
+describe("Batch B — document key parity and the tracked-state join", () => {
+  it("the frontend document key is the matcher's document key (same corpus, same answer)", () => {
+    const corpus = ["Risk survey", "risk-survey", "RISK_SURVEY", "  Risk   Survey ", "Claims history", "claims_history ", "Policy-schedule (2026)", "", "   ", "A  -  B"];
+    for (const label of corpus) expect(documentKey(label)).toBe(workerDocumentKey(label));
+  });
+
+  const viewOf = (source: unknown) => captured(completenessView(evidenceOf(source)));
+  const lineOf = (source: unknown, predicate: (l: { code: string; documentType: string | null }) => boolean) => {
+    const view = viewOf(source);
+    const all = [...view.caseLines, ...view.documentLines, ...view.insurerGroups.flatMap((g) => g.lines)];
+    const line = all.find(predicate);
+    if (!line) throw new Error("line not found");
+    return line;
+  };
+
+  it("a document matches an existing item on the canonical key, however it was spelled or derived", () => {
+    const line = lineOf(case24, (l) => l.code === "required_document_missing");
+    expect(trackedStateFor(line, [])).toEqual({ state: "untracked" });
+    for (const title of ["Risk survey", "risk-survey", "RISK_SURVEY", "  risk   survey "]) {
+      expect(trackedStateFor(line, [{ item_type: "document", title, status: "requested" }])).toMatchObject({ state: "tracked_open", status: "requested" });
+    }
+    // Same name but a different kind of item is a different thing.
+    expect(trackedStateFor(line, [{ item_type: "quote_term", title: "Risk survey", status: "open" }])).toEqual({ state: "untracked" });
+    // A different document never matches.
+    expect(trackedStateFor(line, [{ item_type: "document", title: "Claims history", status: "open" }])).toEqual({ state: "untracked" });
+  });
+
+  it("open beats closed; all-closed reads as closed; the status is the item's own", () => {
+    const line = lineOf(case24, (l) => l.code === "required_document_missing");
+    expect(trackedStateFor(line, [
+      { item_type: "document", title: "Risk survey", status: "received" },
+      { item_type: "document", title: "risk survey", status: "open" },
+    ])).toMatchObject({ state: "tracked_open", status: "open", count: 2 });
+    expect(trackedStateFor(line, [{ item_type: "document", title: "Risk survey", status: "waived" }])).toMatchObject({ state: "tracked_closed", status: "waived" });
+  });
+
+  it("only requests a broker can act on are trackable; internal limitations never are", () => {
+    expect(lineOf(case24, (l) => l.code === "required_document_missing").tracking).toMatchObject({ trackable: true, owner: "broker", type: "document" });
+    expect(lineOf(case27, (l) => l.code === "requested_sections_not_declared").tracking).toMatchObject({ trackable: true, title: "Cover sections required", owner: "broker" });
+    const labelled = lineOf(case23, (l) => l.code === "extraction_reported_information_missing" && l.documentType === null);
+    const all = captured(completenessView(evidenceOf(case23))).caseLines;
+    expect(all.filter((l) => l.tracking.trackable).map((l) => l.tracking.title)).toEqual(["Registration or ID number"]);
+    expect(labelled.tracking.trackable).toBeDefined();
+    for (const l of captured(completenessView(evidenceOf(case26))).insurerGroups.flatMap((g) => g.lines)) expect(l.tracking.trackable).toBe(false);
+    for (const l of captured(completenessView(evidenceOf(case27))).insurerGroups.flatMap((g) => g.lines)) expect(l.tracking.trackable).toBe(false);
+  });
+
+  it("a non-trackable line is never reported as tracked", () => {
+    const line = captured(completenessView(evidenceOf(case26))).insurerGroups[0].lines[0];
+    expect(trackedStateFor(line, [{ item_type: "other", title: line.tracking.title, status: "open" }])).toEqual({ state: "untracked" });
+  });
+
+  it("tracking titles are free of values and identifiers", () => {
+    const view = captured(completenessView(evidenceOf(case40)));
+    const text = JSON.stringify([...view.caseLines, ...view.documentLines].map((l) => l.tracking));
+    expect(text.toLowerCase()).not.toContain("sentinel");
+    expect(text).not.toMatch(/cmp:|gap:|ctr:/);
   });
 });

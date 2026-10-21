@@ -708,7 +708,7 @@ describe("Evidence Mode (v3) — Conflicts to review", () => {
     expect(within(values).getByText(/Recorded by: Submission intake — Submission intake record/)).toBeInTheDocument();
     expect(within(values).getByText(/Recorded by: Reviewed extraction — Reviewed extraction · broker › email/)).toBeInTheDocument();
     expect(within(panel).getByText(/did not affect the ranking, the scores or any flag/i)).toBeInTheDocument();
-    expect(within(panel).getByText(/Unresolved — no one has reviewed this disagreement/)).toBeInTheDocument();
+    expect(within(panel).getByText(/Unresolved — Atlas has no record that anyone has reviewed this disagreement/)).toBeInTheDocument();
     expect(within(panel).getByText(/does not say which one is correct and applies no source precedence/i)).toBeInTheDocument();
     // No raw address, no accusation.
     const text = panel.textContent ?? "";

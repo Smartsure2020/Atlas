@@ -25,6 +25,7 @@ import {
 import {
   Button,
   Card,
+  Disclosure,
   Drawer,
   EmptyState,
   MetaTag,
@@ -36,6 +37,14 @@ import {
   TextField,
   useToast,
 } from "../components/ui";
+import {
+  completenessView,
+  contradictionsView,
+  resolveEvidence,
+  trackedStateFor,
+  type CompletenessLine,
+  type EvidenceView,
+} from "../lib/recommendation-evidence";
 import { Icon } from "../components/Icon";
 import {
   MISSING_INFO_OWNER_OPTIONS,
@@ -68,6 +77,7 @@ export default function MissingInfoPanel({
   canWrite,
   onRefresh,
   onGoToTab,
+  recommendationEvidence,
 }: {
   submissionId: string;
   items: MissingInfoItem[];
@@ -75,7 +85,17 @@ export default function MissingInfoPanel({
   canWrite: boolean;
   onRefresh: () => Promise<void> | void;
   onGoToTab: (tab: SubmissionTab) => void;
+  /**
+   * The latest recommendation's persisted `evidence_json`, exactly as stored.
+   * Passed only to staff who may see underwriting intelligence; omitted for
+   * brokers, who then see exactly the workspace they always did.
+   */
+  recommendationEvidence?: unknown;
 }) {
+  const evidence = useMemo<EvidenceView | null>(
+    () => (recommendationEvidence === undefined ? null : resolveEvidence(recommendationEvidence)),
+    [recommendationEvidence]
+  );
   const toast = useToast();
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
@@ -157,6 +177,18 @@ export default function MissingInfoPanel({
         <ActionSummary
           summary={summary}
           canWrite={canWrite}
+          onGoToTab={onGoToTab}
+        />
+      )}
+
+      {evidence && evidence.kind === "ready" && (
+        <DetectedByAtlas
+          evidence={evidence}
+          items={items}
+          canWrite={canWrite}
+          submissionId={submissionId}
+          quoteReviewId={quoteReviewId}
+          onRefresh={onRefresh}
           onGoToTab={onGoToTab}
         />
       )}
@@ -377,6 +409,167 @@ export default function MissingInfoPanel({
         }}
       />
     </div>
+  );
+}
+
+/* ===========================================================================
+   What Atlas detected (evidence v3 completeness)
+   ---------------------------------------------------------------------------
+   Detection lives in the recommendation's evidence; THIS tab remains the one
+   place a person acts on it. Nothing is duplicated into a second workflow: a
+   detected item is matched against the items already tracked (documents by the
+   matcher's canonical document key, others by type + deterministic title), and
+   "Track" creates an ordinary item through the existing endpoint.
+   =========================================================================== */
+
+export const DETECTED_HEADING = "What Atlas detected";
+
+function DetectedByAtlas({
+  evidence,
+  items,
+  canWrite,
+  submissionId,
+  quoteReviewId,
+  onRefresh,
+  onGoToTab,
+}: {
+  evidence: EvidenceView;
+  items: MissingInfoItem[];
+  canWrite: boolean;
+  submissionId: string;
+  quoteReviewId: string | null;
+  onRefresh: () => Promise<void> | void;
+  onGoToTab: (tab: SubmissionTab) => void;
+}) {
+  const toast = useToast();
+  const completeness = completenessView(evidence);
+  const conflicts = contradictionsView(evidence);
+  const [working, setWorking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (!completeness) return null;
+
+  async function track(line: CompletenessLine) {
+    setWorking(line.itemId);
+    setError(null);
+    try {
+      await addMissingInfo(submissionId, {
+        quote_review_id: quoteReviewId,
+        section_key: line.tracking.sectionKey,
+        item_type: line.tracking.type,
+        title: line.tracking.title,
+        description: line.tracking.description,
+        owner: line.tracking.owner,
+      });
+      await onRefresh();
+      toast.notify(`Tracking "${line.tracking.title}".`, "success");
+    } catch {
+      setError("That item could not be tracked. Try again.");
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  const all =
+    completeness.mode === "captured"
+      ? [...completeness.caseLines, ...completeness.documentLines, ...completeness.insurerGroups.flatMap((group) => group.lines)]
+      : [];
+  const trackable = all.filter((line) => line.tracking.trackable);
+  const limitations = all.filter((line) => !line.tracking.trackable);
+  const conflictCount = conflicts && conflicts.mode === "captured" ? conflicts.conflicts.length : 0;
+
+  return (
+    <Card
+      title={DETECTED_HEADING}
+      description="From the latest recommendation's evidence. Track an item to follow it up here. Atlas never sends anything itself."
+    >
+      <div className="atlas-stack">
+        {error && <Notice tone="danger" title="That action did not complete">{error}</Notice>}
+        {completeness.mode === "not_captured" ? (
+          <Notice tone="info" title="Not captured for this recommendation">
+            {completeness.message} Run the recommendation again to see what Atlas detects. Atlas does not rebuild it from current data.
+          </Notice>
+        ) : (
+          <>
+            <p className="atlas-text-dense">
+              <strong>{completeness.stateMeta.label}.</strong> {completeness.stateMeta.meaning}
+            </p>
+            {trackable.length > 0 && (
+              <ul className="atlas-list atlas-list--stack-sm" aria-label="Detected items you can track">
+                {trackable.map((line) => {
+                  const tracked = trackedStateFor(line, items);
+                  return (
+                    <li className="atlas-list__item" key={line.itemId} data-detected-item={line.itemId}>
+                      <div className="atlas-list__main">
+                        <p className="atlas-list__title">{line.tracking.title}</p>
+                        <p className="atlas-list__meta">
+                          {line.copy.title}
+                          {line.insurers.length > 0 && <> · Insurers: {line.insurers.map((i) => i.insurerName).join(", ")}</>}
+                          {" · "}
+                          {line.materialityMeta.label}
+                        </p>
+                      </div>
+                      <div className="atlas-list__side">
+                        {tracked.state === "untracked" ? (
+                          canWrite ? (
+                            <Button size="sm" icon="plus" disabled={working === line.itemId} onClick={() => track(line)}>
+                              Track this
+                            </Button>
+                          ) : (
+                            <StatusBadge status={{ label: "Not tracked", tone: "neutral" }} quiet />
+                          )
+                        ) : tracked.state === "tracked_open" ? (
+                          <StatusBadge status={missingInfoStatus(tracked.status as MissingInfoStatus)} />
+                        ) : (
+                          <StatusBadge
+                            status={{
+                              label: `Closed — ${missingInfoStatus(tracked.status as MissingInfoStatus).label.toLowerCase()}`,
+                              tone: "success",
+                            }}
+                          />
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {limitations.length > 0 && (
+              <Disclosure summary={`Atlas limitations — nothing to chase (${limitations.length})`}>
+                <p className="atlas-text-dense atlas-text-muted">
+                  These describe what Atlas could not evaluate. No broker can supply them, so they are not tracked here.
+                </p>
+                <ul className="atlas-list">
+                  {limitations.map((line) => (
+                    <li className="atlas-list__item" key={line.itemId}>
+                      <div className="atlas-list__main">
+                        <p className="atlas-list__title">{line.copy.title}</p>
+                        <p className="atlas-list__meta">
+                          {line.insurers.length > 0 && <>Insurers: {line.insurers.map((i) => i.insurerName).join(", ")}. </>}
+                          {line.sections.length > 0 && <>Sections: {line.sections.join(", ")}.</>}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </Disclosure>
+            )}
+            {trackable.length === 0 && limitations.length === 0 && (
+              <p className="atlas-text-dense atlas-text-muted">Nothing outstanding was recorded for this recommendation.</p>
+            )}
+          </>
+        )}
+        {conflictCount > 0 && (
+          <Notice tone="warning" title="Conflicting recorded values were found">
+            {conflictCount} recorded fact{conflictCount === 1 ? " has" : "s have"} conflicting values. Atlas does not say which is correct.
+            <div style={{ marginTop: 8 }}>
+              <Button size="sm" onClick={() => onGoToTab("recommendation")}>
+                Review the conflicts on the recommendation
+              </Button>
+            </div>
+          </Notice>
+        )}
+      </div>
+    </Card>
   );
 }
 

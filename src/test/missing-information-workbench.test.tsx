@@ -31,6 +31,17 @@ import MissingInfoPanel from "../pages/MissingInfoPanel";
 import { ToastProvider } from "../components/ui";
 import type { MissingInfoItem } from "../lib/phase4";
 
+import case22 from "../../tests/powerhouse/fixtures/snapshots/case-22-complete-single-section.row.json";
+import case23 from "../../tests/powerhouse/fixtures/snapshots/case-23-required-fact-missing.row.json";
+import case24 from "../../tests/powerhouse/fixtures/snapshots/case-24-required-document-missing-rule-provenance.row.json";
+import case26 from "../../tests/powerhouse/fixtures/snapshots/case-26-section-without-applicable-rule.row.json";
+import case27 from "../../tests/powerhouse/fixtures/snapshots/case-27-multiple-products-no-declared-sections-completeness.row.json";
+import case29 from "../../tests/powerhouse/fixtures/snapshots/case-29-sources-disagree.row.json";
+import histV1 from "../../tests/powerhouse/fixtures/snapshots/historical-v1-complete.row.json";
+import histV2 from "../../tests/powerhouse/fixtures/snapshots/historical-v2-incomplete.row.json";
+
+const evidenceOf = (row: unknown) => (row as { evidence_json: unknown }).evidence_json;
+
 function item(over: Partial<MissingInfoItem> = {}): MissingInfoItem {
   return {
     id: over.id ?? `mi_${Math.random().toString(36).slice(2, 8)}`,
@@ -346,5 +357,146 @@ describe("MissingInfoPanel — axe", () => {
     });
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch B — "What Atlas detected": the evidence's completeness joined to THIS workspace
+// ---------------------------------------------------------------------------
+
+const DETECTED = "What Atlas detected";
+
+describe("MissingInfoPanel — what Atlas detected (evidence v3)", () => {
+  it("is absent for a broker (no evidence is passed) and for a recommendation with no evidence", () => {
+    renderPanel();
+    expect(screen.queryByRole("region", { name: DETECTED })).toBeNull();
+    renderPanel({ recommendationEvidence: null });
+    expect(screen.queryByRole("region", { name: DETECTED })).toBeNull();
+  });
+
+  it("lists a required document once, with its tracking state, and offers to track it", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(case24) });
+    const region = screen.getByRole("region", { name: DETECTED });
+    const list = within(region).getByRole("list", { name: "Detected items you can track" });
+    const rows = list.querySelectorAll("[data-detected-item]");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0] as HTMLElement).getByText("Risk survey")).toBeInTheDocument();
+    expect(within(rows[0] as HTMLElement).getByText(/Insurers: Alpha Insurance, Beta Insurance/)).toBeInTheDocument();
+    expect(within(rows[0] as HTMLElement).getByRole("button", { name: "Track this" })).toBeInTheDocument();
+    expect(within(region).getByText(/Atlas never sends anything itself/)).toBeInTheDocument();
+  });
+
+  it("'Track this' creates an ORDINARY item through the existing endpoint — no new workflow, no values", async () => {
+    addMissingInfoMock.mockResolvedValue({ ok: true, id: "mi_new" });
+    const { onRefresh } = renderPanel({ recommendationEvidence: evidenceOf(case24), quoteReviewId: "qr_9" });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Track this" }));
+    await waitFor(() => expect(addMissingInfoMock).toHaveBeenCalledTimes(1));
+    expect(addMissingInfoMock).toHaveBeenCalledWith("sub_1", {
+      quote_review_id: "qr_9",
+      section_key: null,
+      item_type: "document",
+      title: "Risk survey",
+      description: "Required by an insurer's guideline and not among the trusted documents.",
+      owner: "broker",
+    });
+    await waitFor(() => expect(onRefresh).toHaveBeenCalled());
+  });
+
+  it("a failed track shows an error and does not pretend it worked", async () => {
+    addMissingInfoMock.mockRejectedValue(new Error("boom"));
+    renderPanel({ recommendationEvidence: evidenceOf(case24) });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Track this" }));
+    expect(await screen.findByText("That item could not be tracked. Try again.")).toBeInTheDocument();
+  });
+
+  it("an item already tracked (under any spelling) shows its own status instead of a button — one source of truth", () => {
+    renderPanel({
+      recommendationEvidence: evidenceOf(case24),
+      items: [item({ item_type: "document", title: "risk-survey", status: "requested", source: "quote_review" })],
+    });
+    const row = screen.getByRole("region", { name: DETECTED }).querySelector("[data-detected-item]") as HTMLElement;
+    expect(within(row).queryByRole("button", { name: "Track this" })).toBeNull();
+    expect(within(row).getByText("Requested")).toBeInTheDocument();
+  });
+
+  it("a closed item reads as closed with its reason, not as outstanding", () => {
+    renderPanel({
+      recommendationEvidence: evidenceOf(case24),
+      items: [item({ item_type: "document", title: "Risk survey", status: "waived", notes: "Insurer waived it." })],
+    });
+    const row = screen.getByRole("region", { name: DETECTED }).querySelector("[data-detected-item]") as HTMLElement;
+    expect(within(row).getByText(/Closed — /)).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: "Track this" })).toBeNull();
+  });
+
+  it("internal limitations (a section no rule covers, rule ties) are shown but are never trackable", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(case26) });
+    const region = screen.getByRole("region", { name: DETECTED });
+    expect(within(region).queryByRole("button", { name: "Track this" })).toBeNull();
+    expect(within(region).getByText(/Atlas limitations — nothing to chase \(2\)/)).toBeInTheDocument();
+  });
+
+  it("undeclared cover sections and a schema-named fact are trackable; free-text facts are not (the existing derive flow carries those)", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(case27) });
+    expect(within(screen.getByRole("region", { name: DETECTED })).getByText("Cover sections required")).toBeInTheDocument();
+  });
+
+  it("a schema-named fact is offered under its schema label; the two free-text records are not trackable and no text is shown", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(case23) });
+    const region = screen.getByRole("region", { name: DETECTED });
+    expect(within(region).getByText("Registration or ID number")).toBeInTheDocument();
+    expect(within(region).getAllByRole("button", { name: "Track this" })).toHaveLength(1);
+    expect(within(region).getByText(/Atlas limitations — nothing to chase \(2\)/)).toBeInTheDocument();
+    for (const sentinel of ["REASON_SENTINEL_23A", "FREETEXT_SENTINEL_23B", "FREETEXT_SENTINEL_23C"]) expect(region.textContent).not.toContain(sentinel);
+  });
+
+  it("a read-only user sees what was detected but cannot track it", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(case24), canWrite: false });
+    const region = screen.getByRole("region", { name: DETECTED });
+    expect(within(region).queryByRole("button", { name: "Track this" })).toBeNull();
+    expect(within(region).getByText("Not tracked")).toBeInTheDocument();
+  });
+
+  it("a complete recommendation says nothing is outstanding", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(case22) });
+    const region = screen.getByRole("region", { name: DETECTED });
+    expect(within(region).getByText(/Nothing outstanding was recorded for this recommendation\./)).toBeInTheDocument();
+  });
+
+  it("conflicting values are pointed at, never listed here: no values, no tracking, no draft text", () => {
+    const { onGoToTab } = renderPanel({ recommendationEvidence: evidenceOf(case29) });
+    const region = screen.getByRole("region", { name: DETECTED });
+    expect(within(region).getByText("Conflicting recorded values were found")).toBeInTheDocument();
+    expect(region.textContent).not.toMatch(/[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]+|a•••|b•••/);
+    expect(within(region).queryByRole("button", { name: "Track this" })).toBeNull();
+    return userEvent.setup().click(within(region).getByRole("button", { name: /Review the conflicts/ })).then(() => {
+      expect(onGoToTab).toHaveBeenCalledWith("recommendation");
+    });
+  });
+
+  it("historical v1 / v2 evidence says it was not captured and reconstructs nothing", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(histV1) });
+    expect(within(screen.getByRole("region", { name: DETECTED })).getByText(/Completeness and contradiction analysis was not captured for this historical recommendation\./)).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: DETECTED })).queryByRole("button", { name: "Track this" })).toBeNull();
+  });
+
+  it("historical v2 evidence says it predates the analysis", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(histV2) });
+    const region = screen.getByRole("region", { name: DETECTED });
+    expect(within(region).getByText(/This recommendation predates deterministic completeness and contradiction analysis\./)).toBeInTheDocument();
+    expect(region.textContent).not.toMatch(/nothing outstanding/i);
+  });
+
+  it("tracked items do not change the lifecycle summary or the ordinary item list", () => {
+    renderPanel({ recommendationEvidence: evidenceOf(case24), items: [item({ status: "open", title: "A" })] });
+    const summary = screen.getByRole("region", { name: /Missing information summary/i });
+    expect(within(summary.querySelector(".atlas-workflow-summary__cell") as HTMLElement).getByText("1")).toBeInTheDocument();
+  });
+
+  it("has no axe violations", async () => {
+    const { container } = renderPanel({ recommendationEvidence: evidenceOf(case24), items: [item({ title: "Existing" })] });
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
