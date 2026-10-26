@@ -18,7 +18,8 @@ import {
   type CommunicationStatus,
   type CommunicationType,
 } from "./phase4-workflow";
-import { roleCanViewManagerDashboard } from "./phase6-hardening";
+import { roleCanViewManagerDashboard, roleCanViewUnderwritingIntelligence, roleCanWrite } from "./phase6-hardening";
+import { detectedMissingInfoId, findTrackableCompletenessItem } from "./detected-missing-info";
 
 async function latestReview(admin: ReturnType<typeof adminClient>, submissionId: string) {
   const { data } = await admin
@@ -126,6 +127,88 @@ export async function handleAddMissingInfo(submissionId: string, request: Reques
     },
   });
   return json({ ok: true, id: data.id }, 201);
+}
+
+export async function handleTrackDetectedMissingInfo(submissionId: string, request: Request, env: Env, user: AtlasUser) {
+  if (!roleCanViewUnderwritingIntelligence(user.role) || !roleCanWrite(user.role)) {
+    return json({ error: "permission_denied" }, 403);
+  }
+  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  if (
+    !body ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    Object.keys(body).length !== 1 ||
+    typeof body.detected_item_id !== "string" ||
+    body.detected_item_id.trim() === ""
+  ) return json({ error: "bad_request", detail: "detected_item_id_required" }, 400);
+
+  const admin = adminClient(env);
+  const { data: recommendation, error: recommendationError } = await admin
+    .from("atlas_recommendations")
+    .select("id, evidence_json")
+    .eq("submission_id", submissionId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (recommendationError) return json({ error: "fetch_failed" }, 500);
+  if (!recommendation) return json({ error: "no_recommendation", detail: "run_recommendation_first" }, 400);
+
+  const evidence = recommendation.evidence_json as unknown;
+  if (!evidence || typeof evidence !== "object" || (evidence as { schema_version?: unknown }).schema_version !== "recommendation-evidence-v3") {
+    return json({ error: "unsupported_evidence", detail: "latest_recommendation_must_be_v3" }, 409);
+  }
+  const detected = findTrackableCompletenessItem(evidence, body.detected_item_id);
+  if (!detected) return json({ error: "detected_item_not_trackable" }, 422);
+
+  const id = detectedMissingInfoId(submissionId, String(recommendation.id), body.detected_item_id);
+  const { data: existing } = await admin
+    .from("atlas_missing_info_items")
+    .select("id")
+    .eq("id", id)
+    .eq("submission_id", submissionId)
+    .maybeSingle();
+  if (existing?.id) return json({ ok: true, id: String(existing.id), duplicate: true });
+
+  const { data, error } = await admin
+    .from("atlas_missing_info_items")
+    .insert({
+      id,
+      submission_id: submissionId,
+      quote_review_id: null,
+      ...detected.row,
+      status: "open",
+      required_by_rule_id: null,
+      due_date: null,
+      notes: null,
+      created_by: user.id,
+    })
+    .select("id")
+    .single();
+
+  if (error || !data) {
+    // A concurrent request may have won the deterministic primary-key insert.
+    const { data: raced } = await admin
+      .from("atlas_missing_info_items")
+      .select("id")
+      .eq("id", id)
+      .eq("submission_id", submissionId)
+      .maybeSingle();
+    if (raced?.id) return json({ ok: true, id: String(raced.id), duplicate: true });
+    return json({ error: "store_failed" }, 500);
+  }
+
+  await audit(env, {
+    submissionId,
+    action: "detected_missing_info_tracked",
+    actorId: user.id,
+    metadata: {
+      item_id: id,
+      recommendation_id: recommendation.id,
+      detected_item_id: body.detected_item_id,
+    },
+  });
+  return json({ ok: true, id, duplicate: false }, 201);
 }
 
 export async function handleUpdateMissingInfo(itemId: string, request: Request, env: Env, user: AtlasUser) {

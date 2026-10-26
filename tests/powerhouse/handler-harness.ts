@@ -92,6 +92,13 @@ export function installRestStub(
     if (wantsRepresentation) {
       const inserted = Array.isArray(body) ? body[0] : body;
       const row = { id: `stub-${table}`, ...(inserted as Row) };
+      if (method === "POST") {
+        const rows = seed[table] ?? (seed[table] = []);
+        if (rows.some((existing) => existing.id === row.id)) {
+          return response({ code: "23505", message: "duplicate key" }, 409);
+        }
+        rows.push(row);
+      }
       return wantsObject ? response(row, 201) : response([row], 201);
     }
     return new Response(null, { status: 204 });

@@ -18,12 +18,14 @@ import { axe } from "vitest-axe";
 const addMissingInfoMock = vi.fn();
 const updateMissingInfoMock = vi.fn();
 const generateMissingInfoMock = vi.fn();
+const trackDetectedMissingInfoMock = vi.fn();
 
 vi.mock("../lib/phase4", async () => {
   return {
     addMissingInfo: (...args: unknown[]) => addMissingInfoMock(...args),
     updateMissingInfo: (...args: unknown[]) => updateMissingInfoMock(...args),
     generateMissingInfo: (...args: unknown[]) => generateMissingInfoMock(...args),
+    trackDetectedMissingInfo: (...args: unknown[]) => trackDetectedMissingInfoMock(...args),
   };
 });
 
@@ -36,9 +38,9 @@ import case23 from "../../tests/powerhouse/fixtures/snapshots/case-23-required-f
 import case24 from "../../tests/powerhouse/fixtures/snapshots/case-24-required-document-missing-rule-provenance.row.json";
 import case26 from "../../tests/powerhouse/fixtures/snapshots/case-26-section-without-applicable-rule.row.json";
 import case27 from "../../tests/powerhouse/fixtures/snapshots/case-27-multiple-products-no-declared-sections-completeness.row.json";
-import case29 from "../../tests/powerhouse/fixtures/snapshots/case-29-sources-disagree.row.json";
 import histV1 from "../../tests/powerhouse/fixtures/snapshots/historical-v1-complete.row.json";
 import histV2 from "../../tests/powerhouse/fixtures/snapshots/historical-v2-incomplete.row.json";
+import { withInjectedProductComparison } from "../../tests/powerhouse/injected-comparison-fixture";
 
 const evidenceOf = (row: unknown) => (row as { evidence_json: unknown }).evidence_json;
 
@@ -88,6 +90,7 @@ beforeEach(() => {
   addMissingInfoMock.mockReset();
   updateMissingInfoMock.mockReset();
   generateMissingInfoMock.mockReset();
+  trackDetectedMissingInfoMock.mockReset();
 });
 
 describe("MissingInfoPanel — empty state", () => {
@@ -386,25 +389,19 @@ describe("MissingInfoPanel — what Atlas detected (evidence v3)", () => {
     expect(within(region).getByText(/Atlas never sends anything itself/)).toBeInTheDocument();
   });
 
-  it("'Track this' creates an ORDINARY item through the existing endpoint — no new workflow, no values", async () => {
-    addMissingInfoMock.mockResolvedValue({ ok: true, id: "mi_new" });
+  it("'Track this' sends only the detected identity to the dedicated endpoint", async () => {
+    trackDetectedMissingInfoMock.mockResolvedValue({ ok: true, id: "mi_new", duplicate: false });
     const { onRefresh } = renderPanel({ recommendationEvidence: evidenceOf(case24), quoteReviewId: "qr_9" });
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Track this" }));
-    await waitFor(() => expect(addMissingInfoMock).toHaveBeenCalledTimes(1));
-    expect(addMissingInfoMock).toHaveBeenCalledWith("sub_1", {
-      quote_review_id: "qr_9",
-      section_key: null,
-      item_type: "document",
-      title: "Risk survey",
-      description: "Required by an insurer's guideline and not among the trusted documents.",
-      owner: "broker",
-    });
+    await waitFor(() => expect(trackDetectedMissingInfoMock).toHaveBeenCalledTimes(1));
+    expect(trackDetectedMissingInfoMock).toHaveBeenCalledWith("sub_1", "cmp:required_document_missing:-:-:risk survey");
+    expect(addMissingInfoMock).not.toHaveBeenCalled();
     await waitFor(() => expect(onRefresh).toHaveBeenCalled());
   });
 
   it("a failed track shows an error and does not pretend it worked", async () => {
-    addMissingInfoMock.mockRejectedValue(new Error("boom"));
+    trackDetectedMissingInfoMock.mockRejectedValue(new Error("boom"));
     renderPanel({ recommendationEvidence: evidenceOf(case24) });
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Track this" }));
@@ -466,7 +463,7 @@ describe("MissingInfoPanel — what Atlas detected (evidence v3)", () => {
   });
 
   it("conflicting values are pointed at, never listed here: no values, no tracking, no draft text", () => {
-    const { onGoToTab } = renderPanel({ recommendationEvidence: evidenceOf(case29) });
+    const { onGoToTab } = renderPanel({ recommendationEvidence: evidenceOf(withInjectedProductComparison(case22)) });
     const region = screen.getByRole("region", { name: DETECTED });
     expect(within(region).getByText("Conflicting recorded values were found")).toBeInTheDocument();
     expect(region.textContent).not.toMatch(/[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]+|a•••|b•••/);

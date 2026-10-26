@@ -109,6 +109,13 @@ export function addMissingInfo(submissionId: string, input: {
   });
 }
 
+export function trackDetectedMissingInfo(submissionId: string, detectedItemId: string) {
+  return api<{ ok: true; id: string; duplicate: boolean }>(`/api/submissions/${submissionId}/missing-info/detected`, {
+    method: "POST",
+    body: JSON.stringify({ detected_item_id: detectedItemId }),
+  });
+}
+
 export function updateMissingInfo(itemId: string, input: {
   status?: MissingInfoStatus;
   notes?: string | null;

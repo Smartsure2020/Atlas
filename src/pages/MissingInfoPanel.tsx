@@ -17,6 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addMissingInfo,
   generateMissingInfo,
+  trackDetectedMissingInfo,
   updateMissingInfo,
   type MissingInfoItem,
   type MissingInfoOwner,
@@ -187,7 +188,6 @@ export default function MissingInfoPanel({
           items={items}
           canWrite={canWrite}
           submissionId={submissionId}
-          quoteReviewId={quoteReviewId}
           onRefresh={onRefresh}
           onGoToTab={onGoToTab}
         />
@@ -419,7 +419,7 @@ export default function MissingInfoPanel({
    place a person acts on it. Nothing is duplicated into a second workflow: a
    detected item is matched against the items already tracked (documents by the
    matcher's canonical document key, others by type + deterministic title), and
-   "Track" creates an ordinary item through the existing endpoint.
+   "Track" sends only the detected id to the dedicated server-side boundary.
    =========================================================================== */
 
 export const DETECTED_HEADING = "What Atlas detected";
@@ -429,7 +429,6 @@ function DetectedByAtlas({
   items,
   canWrite,
   submissionId,
-  quoteReviewId,
   onRefresh,
   onGoToTab,
 }: {
@@ -437,7 +436,6 @@ function DetectedByAtlas({
   items: MissingInfoItem[];
   canWrite: boolean;
   submissionId: string;
-  quoteReviewId: string | null;
   onRefresh: () => Promise<void> | void;
   onGoToTab: (tab: SubmissionTab) => void;
 }) {
@@ -452,14 +450,7 @@ function DetectedByAtlas({
     setWorking(line.itemId);
     setError(null);
     try {
-      await addMissingInfo(submissionId, {
-        quote_review_id: quoteReviewId,
-        section_key: line.tracking.sectionKey,
-        item_type: line.tracking.type,
-        title: line.tracking.title,
-        description: line.tracking.description,
-        owner: line.tracking.owner,
-      });
+      await trackDetectedMissingInfo(submissionId, line.itemId);
       await onRefresh();
       toast.notify(`Tracking "${line.tracking.title}".`, "success");
     } catch {

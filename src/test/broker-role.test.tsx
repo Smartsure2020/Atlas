@@ -292,7 +292,7 @@ describe("SubmissionDetail — Atlas-detected completeness is underwriting intel
     expect(getRecommendationMock).not.toHaveBeenCalled();
     expect(screen.queryByRole("region", { name: "What Atlas detected" })).toBeNull();
     const text = document.body.textContent ?? "";
-    for (const forbidden of ["What Atlas detected", "Conflicting recorded values", "Track this", "Atlas limitations"]) {
+    for (const forbidden of ["Evidence Mode", "What Atlas detected", "Conflicting recorded values", "Track this", "Atlas limitations"]) {
       expect(text).not.toContain(forbidden);
     }
   });
