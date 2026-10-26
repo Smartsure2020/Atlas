@@ -2,10 +2,10 @@
   "fixture_schema": "powerhouse-case-v1",
   "id": "case-32-identifier-formatting-normalises-equal",
   "title": "Identifier formatting differs but normalises equal",
-  "description": "The intake address has surrounding whitespace and mixed case; the extracted one is lower case. Under the documented email normalisation (trim, lower-case) they are the same identifier.",
+  "description": "Real endpoint case confirming the former broker-email pair is no longer compared. Email normalisation equivalence is retained in the injected engine suite.",
   "intent": [
-    "NO contradiction: formatting is not disagreement",
-    "the comparison outcome is `agree`"
+    "NO contradiction and NO comparison attempt in production",
+    "injected engine tests retain formatting-equivalence coverage"
   ],
   "rule_defaults": {
     "notes": null,

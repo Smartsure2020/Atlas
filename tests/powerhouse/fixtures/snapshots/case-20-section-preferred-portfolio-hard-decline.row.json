@@ -274,7 +274,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_d76769da"
+      "recommendation_input_fingerprint": "fp_fdda12be"
     },
     "matcher_input": {
       "product_candidates": [

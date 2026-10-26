@@ -20,10 +20,10 @@
  *   - Agreement is not reported as evidence and is never scored.
  *   - One logical contradiction CLUSTER per field (value groups), never one
  *     record per pair of sources.
- *   - Raw values are TRANSIENT. They are normalised, digested and discarded: the
- *     persisted analysis carries a typed canonical value only for non-sensitive
- *     kinds, a masked rendition for personal identifiers, and always a
- *     domain-separated SHA-256 prefix. Never a URL, storage path or free text.
+ *   - Raw values are TRANSIENT. They are normalised and discarded: the persisted
+ *     analysis carries a typed canonical value only for non-sensitive kinds, a
+ *     masked rendition for personal identifiers, and a deterministic ordinal.
+ *     No value-derived digest is persisted. Never a URL, storage path or free text.
  *   - Contradictions never score, rank, decline or refer. They feed the quality
  *     gate (presentation / reliance) and nothing else. A contradiction is NOT
  *     evidence of fraud or misrepresentation; severity is never `blocker`
@@ -190,13 +190,21 @@ export const NORMALIZERS: Record<NormalizerId, NormalizerSpec> = {
     kind: "email",
     steps: [
       "require text",
+      "normalise Unicode to NFC",
+      "remove zero-width format characters U+200B/U+200C/U+200D/U+2060/U+FEFF",
       "trim surrounding whitespace",
+      "remove trailing sentence punctuation that cannot terminate an email address",
       "lower-case (the repository already compares email identifiers this way)",
       "require one at-sign separating a local part from a dotted domain, with no spaces, angle brackets, commas or semicolons",
     ],
     normalize(raw) {
       if (typeof raw !== "string") return { ok: false, reason: "unsupported_value_shape" };
-      const value = raw.trim().toLowerCase();
+      const value = raw
+        .normalize("NFC")
+        .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, "")
+        .trim()
+        .replace(/[.,;:!?]+$/g, "")
+        .toLowerCase();
       if (value.length > 254) return { ok: false, reason: "value_too_long" };
       if (!/^[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+\.[^\s@<>()[\]\\,;:"]+$/.test(value)) {
         return { ok: false, reason: "not_an_email_address" };
@@ -350,23 +358,12 @@ export function intakeColumnSource(column: keyof IntakeRecord & string): Observa
 export const SOURCE_INTAKE_FORM = "intake_form";
 export const SOURCE_REVIEWED_EXTRACTION = "reviewed_extraction";
 
-export const COMPARABLE_FIELDS: readonly ComparableFieldSpec[] = [
-  {
-    field_key: "broker.email",
-    label: "Broker email address",
-    normalizer: "email_trim_lowercase",
-    sensitivity: "personal_identifier",
-    field_path: "broker.email",
-    sources: [
-      { source_id: SOURCE_INTAKE_FORM, label: "Submission intake", read: intakeColumnSource("broker_email") },
-      {
-        source_id: SOURCE_REVIEWED_EXTRACTION,
-        label: "Reviewed extraction",
-        read: reviewedFieldSource("broker", "email"),
-      },
-    ],
-  },
-];
+/**
+ * Production registry. Deliberately empty: Atlas does not currently retain two
+ * independently comparable structured values for the same semantic fact.
+ * Engine tests inject legitimate synthetic registries.
+ */
+export const COMPARABLE_FIELDS: readonly ComparableFieldSpec[] = [];
 
 export function matcherRolesFor(fieldPath: string | null): MatcherRole[] {
   if (!fieldPath) return [];
@@ -387,8 +384,8 @@ export interface ContradictionSourceRef {
 }
 
 export interface ContradictionValueGroup {
-  /** First 16 hex chars of SHA-256 over a domain-separated normalised value. */
-  value_digest: string;
+  /** Deterministic ordinal assigned after transient normalised-value sorting. */
+  value_label: string;
   /**
    * Typed canonical value for non-sensitive kinds (boolean / date / number /
    * closed enum). A masked rendition for personal identifiers. `null` when the
@@ -434,6 +431,8 @@ export interface FieldComparison {
   unavailable_source_ids: string[];
   unavailable_reason: "unparseable_value" | "source_unavailable" | null;
   contradiction_id: string | null;
+  /** Filled in by quality integration when this comparison was unavailable. */
+  quality_gap_id: string | null;
 }
 
 export interface ContradictionAnalysis {
@@ -452,12 +451,6 @@ export interface ContradictionAnalysis {
 // ---------------------------------------------------------------------------
 // Value representation
 // ---------------------------------------------------------------------------
-
-const DIGEST_DOMAIN = "atlas-contradiction-value-v1";
-
-function valueDigest(fieldKey: string, normalized: string): string {
-  return sha256Hex(`${DIGEST_DOMAIN}\u0000${fieldKey}\u0000${normalized}`).slice(0, 16);
-}
 
 export function maskIdentifier(kind: ComparisonKind, normalized: string): string {
   if (kind === "email") {
@@ -482,6 +475,17 @@ function compareCodeUnits(a: string, b: string): number {
 
 function pointerKey(pointer: SourcePointer): string {
   return JSON.stringify(pointer);
+}
+
+function ordinalLabel(index: number): string {
+  let value = index + 1;
+  let label = "";
+  while (value > 0) {
+    value--;
+    label = String.fromCharCode(65 + (value % 26)) + label;
+    value = Math.floor(value / 26);
+  }
+  return label;
 }
 
 // ---------------------------------------------------------------------------
@@ -589,8 +593,9 @@ export function analyseContradictions(input: {
 
     if (groups.size >= 2) {
       outcome = "conflict";
-      const valueGroups: ContradictionValueGroup[] = [...groups.entries()]
-        .map(([normalized, refs]) => {
+      const sortedGroups = [...groups.entries()].sort(([a], [b]) => compareCodeUnits(a, b));
+      const valueGroups: ContradictionValueGroup[] = sortedGroups
+        .map(([normalized, refs], index) => {
           const sources = [...refs.values()]
             .map<ContradictionSourceRef>((observation) => ({
               source_id: observation.source_id,
@@ -604,16 +609,19 @@ export function analyseContradictions(input: {
                 compareCodeUnits(a.source_id, b.source_id) || compareCodeUnits(pointerKey(a.pointer), pointerKey(b.pointer))
             );
           return {
-            value_digest: valueDigest(spec.field_key, normalized),
+            value_label: ordinalLabel(index),
             value_display: displayFor(spec, normalizer.kind, normalized),
             source_count: sources.length,
             sources,
           };
-        })
-        .sort((a, b) => compareCodeUnits(a.value_digest, b.value_digest));
+        });
       const roles = matcherRolesFor(spec.field_path);
       const consumed = roles.length > 0;
-      contradictionId = `ctr:${spec.field_key}:${sha256Hex(valueGroups.map((g) => g.value_digest).join("+")).slice(0, 12)}`;
+      const sourceIdentity = valueGroups
+        .flatMap((group) => group.sources.map((source) => `${source.source_id}\u0000${pointerKey(source.pointer)}`))
+        .sort(compareCodeUnits)
+        .join("\u0001");
+      contradictionId = `ctr:${spec.field_key}:${sha256Hex(`${CONTRADICTION_MODEL_VERSION}\u0000${spec.field_key}\u0000${sourceIdentity}`).slice(0, 12)}`;
       contradictions.push({
         contradiction_id: contradictionId,
         code: "conflicting_recorded_values",
@@ -657,6 +665,7 @@ export function analyseContradictions(input: {
       unavailable_source_ids: unavailableForField,
       unavailable_reason: unavailableReason,
       contradiction_id: contradictionId,
+      quality_gap_id: null,
     });
   }
 

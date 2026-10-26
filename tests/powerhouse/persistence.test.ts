@@ -12,7 +12,7 @@ import { MATCHER_VERSION, MATCHER_VERSION_V1 } from "../../worker/src/matcher.js
 import { MATCHER_INPUT_SNAPSHOT_MINIMISED } from "../../worker/src/recommendation-evidence.js";
 import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3 } from "../../worker/src/recommendation-evidence-v3.js";
 import { COMPLETENESS_MODEL_VERSION } from "../../worker/src/completeness.js";
-import { CONTRADICTION_MODEL_VERSION, collectObservations, fingerprintObservations } from "../../worker/src/contradictions.js";
+import { CONTRADICTION_MODEL_VERSION } from "../../worker/src/contradictions.js";
 import { TAXONOMY_VERSION } from "../../worker/src/taxonomy.js";
 import {
   EXT,
@@ -130,8 +130,6 @@ const fpBase: Parameters<typeof buildRecommendationFingerprint>[0] = {
   qualityModelVersion: QUALITY_MODEL_VERSION,
   completenessModelVersion: COMPLETENESS_MODEL_VERSION,
   contradictionModelVersion: CONTRADICTION_MODEL_VERSION,
-  // The default harness input seeds no intake row and records no broker email.
-  contradictionInputsDigest: fingerprintObservations({ observations: [], unavailable_sources: [] }),
   activeInsurers: [{ id: "insurer-a", name: "A Insurance" }],
 };
 
@@ -175,19 +173,16 @@ test("5. every version component is required by the type system (compile-time gu
   void (() => buildRecommendationFingerprint({ ...fpBase, completenessModelVersion: undefined }));
   // @ts-expect-error contradictionModelVersion is required
   void (() => buildRecommendationFingerprint({ ...fpBase, contradictionModelVersion: undefined }));
-  // @ts-expect-error contradictionInputsDigest is required
-  void (() => buildRecommendationFingerprint({ ...fpBase, contradictionInputsDigest: undefined }));
 });
 
 test("5b. fingerprint changes when the quality model version changes", () => {
   assert(buildRecommendationFingerprint(fpBase) !== buildRecommendationFingerprint({ ...fpBase, qualityModelVersion: "recommendation-quality-v0" }), "quality model version is part of the key");
 });
 
-test("5b-1. fingerprint changes when the completeness or contradiction model version, or the compared inputs, change", () => {
+test("5b-1. fingerprint changes when the completeness or contradiction model version changes", () => {
   const base = buildRecommendationFingerprint(fpBase);
   assert(base !== buildRecommendationFingerprint({ ...fpBase, completenessModelVersion: "recommendation-completeness-v0" }), "completeness model version is part of the key");
   assert(base !== buildRecommendationFingerprint({ ...fpBase, contradictionModelVersion: "recommendation-contradictions-v0" }), "contradiction model version is part of the key");
-  assert(base !== buildRecommendationFingerprint({ ...fpBase, contradictionInputsDigest: "0".repeat(64) }), "the compared recorded values are part of the key");
 });
 
 test("5c. the recorded quality model version is the one the fingerprint uses", async () => {
@@ -478,7 +473,7 @@ test("16. historical raw matcher_input rows are not touched by this change (shap
 });
 
 // ---------------------------------------------------------------------------
-// Batch B — the intake record (second source of the contradiction analysis)
+// Batch B remediation — production has no valid independently comparable pair
 // ---------------------------------------------------------------------------
 
 function reviewedWithBrokerEmail(email: string): Row {
@@ -487,34 +482,30 @@ function reviewedWithBrokerEmail(email: string): Row {
   return reviewed;
 }
 
-/** The digest the endpoint computes for a reviewed record + intake status. */
-function inputsDigest(reviewed: Row, intake: Parameters<typeof collectObservations>[0]["intake"]): string {
-  return fingerprintObservations(collectObservations({ reviewed, extractionId: EXT, intake }));
-}
-
-test("B1. the intake read selects ONLY broker_email — never the pasted broker email body — and happens once", async () => {
+test("B1. recommendation performs no intake read when the production comparison registry is empty", async () => {
   const run = await runThroughHandler(input({ reviewed: reviewedWithBrokerEmail("doc@brokers.co.za"), submission: { broker_email: "intake@brokers.co.za", broker_email_body: "PASTED_EMAIL_BODY_SENTINEL" } }));
   assert(run.row, "row persisted");
   const reads = run.requests.filter((item) => item.table === "atlas_submissions" && item.method === "GET");
-  eq(reads.length, 1, "one intake query");
-  eq(reads[0].url.searchParams.get("select"), "broker_email", "only the column the comparison needs");
+  eq(reads.length, 0, "no intake query");
   assert(!JSON.stringify(run.row).includes("PASTED_EMAIL_BODY_SENTINEL"), "the email body is never read, so it can never be persisted");
 });
 
-test("B2. PRIVACY — the intake address and the extracted address appear in NO persisted column, audit write or job write", async () => {
+test("B2. PRIVACY — broker addresses and value digests appear in no persisted evidence/audit/job write", async () => {
   const intakeAddress = "ALICE.INTAKE.SENTINEL@intakebrokers.example";
   const documentAddress = "bob.document.sentinel@documentbrokers.example";
   const run = await runThroughHandler(input({ reviewed: reviewedWithBrokerEmail(documentAddress), submission: { broker_email: intakeAddress } }));
   assert(run.row, "row persisted");
   const evidence = run.row.evidence_json as Row;
-  eq(((evidence.contradictions as Row).contradiction_count as number), 1, "the disagreement is found");
+  eq(((evidence.contradictions as Row).contradiction_count as number), 0, "the invalid pair is not compared");
+  eq(((evidence.contradictions as Row).comparisons as unknown[]).length, 0, "no comparison attempt");
   const everything = [run.row, ...["atlas_audit_logs", "atlas_jobs", "atlas_submissions"].flatMap((table) => run.writes(table).map((w) => w.body))];
   for (const needle of [intakeAddress, intakeAddress.toLowerCase(), documentAddress, "alice.intake", "bob.document", "intakebrokers", "documentbrokers"]) {
     deepEq(pathsContaining(everything, needle).concat(pathsContaining(everything, needle.toLowerCase())), [], `${needle} must be persisted nowhere`);
   }
+  assert(!JSON.stringify(everything).includes("value_digest"), "no persisted contradiction value digest");
 });
 
-test("B3. an UNREADABLE intake record does not fail the recommendation: the comparison is reported unavailable and the failure is logged without values", async () => {
+test("B3. an unreadable submissions table does not affect recommendation because no intake read occurs", async () => {
   const errors: unknown[][] = [];
   const original = console.error;
   console.error = (...args: unknown[]) => { errors.push(args); };
@@ -527,47 +518,35 @@ test("B3. an UNREADABLE intake record does not fail the recommendation: the comp
     assert(run.row, "row persisted");
     const contradictions = (run.row.evidence_json as Row).contradictions as { comparisons: Row[]; contradiction_count: number };
     eq(contradictions.contradiction_count, 0, "no contradiction is invented");
-    deepEq(contradictions.comparisons.map((c) => [c.field_key, c.outcome, c.unavailable_reason, c.unavailable_source_ids]), [["broker.email", "comparison_unavailable", "source_unavailable", ["intake_form"]]], "unavailable, with the reason");
+    deepEq(contradictions.comparisons, [], "no unavailable comparison without a registered pair");
     const logged = JSON.stringify(errors.filter((args) => args[0] === "atlas_operation_error"));
-    assert(logged.includes("intake_record_unavailable"), "the failure is logged by code");
+    assert(!logged.includes("intake_record_unavailable"), "the obsolete read/failure path is gone");
     for (const needle of ["doc@brokers", "intake@brokers"]) assert(!logged.includes(needle), "no value in the log");
   } finally {
     console.error = original;
   }
 });
 
-test("B4. an unreadable intake record is NOT the same input as 'no intake row' or an available one (fingerprint)", () => {
+test("B4/B5. CACHE — intake broker-email changes are not production fingerprint inputs", async () => {
   const reviewed = reviewedWithBrokerEmail("doc@brokers.co.za");
-  const available = inputsDigest(reviewed, { status: "available", record: { broker_email: "intake@brokers.co.za" } });
-  const missing = inputsDigest(reviewed, { status: "not_found" });
-  const unreadable = inputsDigest(reviewed, { status: "unavailable" });
-  eq(new Set([available, missing, unreadable]).size, 3, "three different inputs, three different digests");
-});
-
-function liveFingerprintWithIntake(reviewed: Row, intake: Parameters<typeof collectObservations>[0]["intake"]): string {
-  return liveFingerprint({ contradictionInputsDigest: inputsDigest(reviewed, intake) });
-}
-
-test("B5. CACHE — editing the intake address recomputes; a cosmetic edit (case / whitespace) does not; an identical record is still a hit", async () => {
-  const reviewed = reviewedWithBrokerEmail("doc@brokers.co.za");
-  const cached = liveFingerprintWithIntake(reviewed, { status: "available", record: { broker_email: "intake@brokers.co.za" } });
+  const cached = liveFingerprint();
   const hit = await unforcedRunWithCompletedJob(cached, { reviewed, submission: { broker_email: "intake@brokers.co.za" } });
   eq(hit.skipped, true, "identical input => cache hit");
   const cosmetic = await unforcedRunWithCompletedJob(cached, { reviewed, submission: { broker_email: "  INTAKE@Brokers.co.za " } });
   eq(cosmetic.skipped, true, "a cosmetic edit produces the same analysis, so the cache is still valid");
   const edited = await unforcedRunWithCompletedJob(cached, { reviewed, submission: { broker_email: "someone.else@brokers.co.za" } });
-  assert(edited.skipped !== true, "a real change to the intake address must recompute: reviewed_at does not cover it");
+  eq(edited.skipped, true, "a real intake address change is irrelevant with no registered production pair");
   const removed = await unforcedRunWithCompletedJob(cached, { reviewed });
-  assert(removed.skipped !== true, "the intake row disappearing must recompute");
+  eq(removed.skipped, true, "the intake row disappearing is irrelevant");
 });
 
 test("B6. CACHE — a job completed under the PREVIOUS completeness / contradiction model version is not served from cache", async () => {
   const reviewed = reviewedWithBrokerEmail("doc@brokers.co.za");
-  const stale1 = await unforcedRunWithCompletedJob(liveFingerprint({ completenessModelVersion: "recommendation-completeness-v0", contradictionInputsDigest: inputsDigest(reviewed, { status: "not_found" }) }), { reviewed });
+  const stale1 = await unforcedRunWithCompletedJob(liveFingerprint({ completenessModelVersion: "recommendation-completeness-v0" }), { reviewed });
   assert(stale1.skipped !== true, "stale completeness model");
-  const stale2 = await unforcedRunWithCompletedJob(liveFingerprint({ contradictionModelVersion: "recommendation-contradictions-v0", contradictionInputsDigest: inputsDigest(reviewed, { status: "not_found" }) }), { reviewed });
+  const stale2 = await unforcedRunWithCompletedJob(liveFingerprint({ contradictionModelVersion: "recommendation-contradictions-v0" }), { reviewed });
   assert(stale2.skipped !== true, "stale contradiction model");
-  const fresh = await unforcedRunWithCompletedJob(liveFingerprint({ contradictionInputsDigest: inputsDigest(reviewed, { status: "not_found" }) }), { reviewed });
+  const fresh = await unforcedRunWithCompletedJob(liveFingerprint(), { reviewed });
   eq(fresh.skipped, true, "control: same versions and inputs => hit");
 });
 
@@ -579,7 +558,7 @@ test("B7. the persisted evidence records the model versions and the fingerprint 
   eq(evidence.schema_version, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3, "v3");
   eq((evidence.completeness as Row).model, COMPLETENESS_MODEL_VERSION, "completeness model");
   eq((evidence.contradictions as Row).model, CONTRADICTION_MODEL_VERSION, "contradiction model");
-  eq(((evidence.provenance as Row).recommendation_input_fingerprint), liveFingerprintWithIntake(reviewed, { status: "available", record: { broker_email: "intake@brokers.co.za" } }), "fingerprint = live fingerprint");
+  eq(((evidence.provenance as Row).recommendation_input_fingerprint), liveFingerprint(), "fingerprint = live fingerprint without intake input");
 });
 
 void JOB;

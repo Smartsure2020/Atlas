@@ -252,7 +252,7 @@ test("13. fact requirements come ONLY from the extraction's own missing_informat
   deepEq([reported.items[0].scope, reported.items[0].affects, reported.items[0].materiality], ["fact", "not_determined", "nonblocking"], "no claim about the outcome");
 });
 
-test("14. readExtractionReportedMissing: schema paths only when exact; free text and ambiguous keys keep position and priority", () => {
+test("14. resolved schema facts are canonical, de-duplicated and stable; unresolved text stays positional", () => {
   const { records, omitted } = readExtractionReportedMissing({
     missing_information: [
       { field: "extracted_client.registration_or_id_number", priority: "high" },
@@ -268,15 +268,49 @@ test("14. readExtractionReportedMissing: schema paths only when exact; free text
     ],
   });
   deepEq(records, [
-    { index: 0, priority: "high", field_path: "extracted_client.registration_or_id_number" },
-    { index: 1, priority: "medium", field_path: "extracted_client.registration_or_id_number" },
+    { index: null, priority: "high", field_path: "extracted_client.registration_or_id_number" },
     { index: 2, priority: "low", field_path: null },
     { index: 3, priority: "low", field_path: null },
     { index: 4, priority: null, field_path: null },
-    { index: 9, priority: null, field_path: "current_cover.cover_sections" },
-  ], "exact paths resolve; ambiguous bare keys (name, risk_address) and free text do not");
+    { index: null, priority: null, field_path: "current_cover.cover_sections" },
+  ], "exact paths resolve once; ambiguous bare keys and free text do not");
   eq(omitted, 0, "none omitted");
   eq(schemaFieldLabel("extracted_client.registration_or_id_number"), "Registration or ID number", "label from the schema key only");
+});
+
+test("14b. stale extraction reports disappear once the reviewed schema value is meaningfully present", () => {
+  const missing = readExtractionReportedMissing({
+    extracted_client: { registration_or_id_number: { value: null } },
+    missing_information: [{ field: "extracted_client.registration_or_id_number", priority: "high" }],
+  });
+  eq(missing.records.length, 1, "absent reviewed value remains missing");
+  const supplied = readExtractionReportedMissing({
+    extracted_client: { registration_or_id_number: { value: "REG-123" } },
+    missing_information: [{ field: "extracted_client.registration_or_id_number", priority: "high" }],
+  });
+  eq(supplied.records.length, 0, "present reviewed value suppresses stale extraction report");
+});
+
+test("14c. duplicate/reordered structured reports produce one identical item; unknown prose is never promoted", () => {
+  const a = completeness(risk(), [rule({})], [], {
+    missing_information: [
+      { field: "extracted_client.registration_or_id_number", priority: "high" },
+      { field: "REGISTRATION_OR_ID_NUMBER", priority: "low" },
+    ],
+  });
+  const b = completeness(risk(), [rule({})], [], {
+    missing_information: [
+      { field: "REGISTRATION_OR_ID_NUMBER", priority: "high" },
+      { field: "extracted_client.registration_or_id_number", priority: "low" },
+    ],
+  });
+  eq(a.items.length, 1, "duplicates collapse");
+  eq(b.items.length, 1, "duplicates collapse after reorder");
+  eq(a.items[0].item_id, b.items[0].item_id, "canonical path identity is position-independent");
+  eq(a.items[0].required_by[0].reference, "extracted_client.registration_or_id_number", "canonical reference");
+  const unknown = completeness(risk(), [rule({})], [], { missing_information: [{ field: "Please explain unusual circumstances", reason_required: "PRIVATE" }] });
+  deepEq([unknown.items[0].field_path, unknown.items[0].label], [null, null], "unknown prose is not a structured requirement");
+  assert(!JSON.stringify(unknown).includes("Please explain") && !JSON.stringify(unknown).includes("PRIVATE"), "unknown prose and reason are not persisted");
 });
 
 test("15. reported items are bounded; the overflow is a count, never text", () => {
@@ -409,7 +443,7 @@ test("24. v3 is a strict SUPERSET of v2: every shared field is identical, and v3
   eq(two.quality.model, "recommendation-quality-v2", "and v2 is untouched");
 });
 
-test("25. scores, ranks and flags are NOT inputs: completeness and contradictions change nothing the matcher decided", () => {
+test("25. scores, ranks and flags are NOT inputs: completeness and an empty production registry change nothing", () => {
   const rules = [rule({ id: "a", insurer_id: "insurer-a", insurer_name: "A", required_documents: ["Risk survey"] }), rule({ id: "b", insurer_id: "insurer-b", insurer_name: "B" })];
   const plain = buildRecommendationEvidenceV2(input(risk(), rules));
   const loaded = buildRecommendationEvidenceV3({
@@ -422,7 +456,8 @@ test("25. scores, ranks and flags are NOT inputs: completeness and contradiction
       unavailable_sources: [],
     },
   });
-  eq(loaded.contradictions.contradiction_count, 1, "a contradiction exists");
+  eq(loaded.contradictions.contradiction_count, 0, "unregistered observations cannot create a production contradiction");
+  deepEq(loaded.contradictions.comparisons, [], "no production comparison attempt");
   const authoritative = (e: { insurers: unknown[] }) =>
     JSON.stringify((e.insurers as { insurer_id: string; rank: number | null; score: number | null; band: string; rule_status: string; confidence: number | null; referral_required?: boolean; manual_review_required?: boolean; senior_review_required?: boolean; ruled_out?: boolean; required_documents: unknown[]; rule_evidence: unknown[] }[]).map((i) => [
       i.insurer_id, i.rank, i.score, i.band, i.rule_status, i.confidence, i.referral_required, i.manual_review_required, i.senior_review_required, i.ruled_out, i.required_documents, i.rule_evidence,

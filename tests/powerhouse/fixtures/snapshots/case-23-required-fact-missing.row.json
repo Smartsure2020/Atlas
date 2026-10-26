@@ -238,7 +238,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_be06fb2a"
+      "recommendation_input_fingerprint": "fp_15e2dc0e"
     },
     "matcher_input": {
       "product_candidates": [
@@ -839,19 +839,19 @@
           "contradiction_id": null
         },
         {
-          "gap_id": "gap:extraction_reported_information_missing:-:-:-:extracted_client.registration_or_id_number:missing_information[0]",
+          "gap_id": "gap:extraction_reported_information_missing:-:-:-:extracted_client.registration_or_id_number:extracted_client.registration_or_id_number",
           "insurer_id": null,
           "rule_id": null,
           "section_key": null,
           "field_path": "extracted_client.registration_or_id_number",
           "missing": [
-            "missing_information[0]"
+            "extracted_client.registration_or_id_number"
           ],
           "code": "extraction_reported_information_missing",
           "severity": "advisory",
           "scope": "reviewed_fact",
           "completeness_item_ids": [
-            "cmp:extraction_reported_information_missing:-:-:missing_information[0]"
+            "cmp:extraction_reported_information_missing:-:-:field:extracted_client.registration_or_id_number"
           ],
           "contradiction_id": null
         }
@@ -870,7 +870,7 @@
       },
       "items": [
         {
-          "item_id": "cmp:extraction_reported_information_missing:-:-:missing_information[0]",
+          "item_id": "cmp:extraction_reported_information_missing:-:-:field:extracted_client.registration_or_id_number",
           "code": "extraction_reported_information_missing",
           "scope": "fact",
           "status": "missing",
@@ -891,14 +891,14 @@
               "rule_id": null,
               "rule_scope": null,
               "section_key": null,
-              "reference": "missing_information[0]",
+              "reference": "extracted_client.registration_or_id_number",
               "priority": "high",
               "present": null
             }
           ],
           "source": "reviewed_extraction",
           "quality_gap_ids": [
-            "gap:extraction_reported_information_missing:-:-:-:extracted_client.registration_or_id_number:missing_information[0]"
+            "gap:extraction_reported_information_missing:-:-:-:extracted_client.registration_or_id_number:extracted_client.registration_or_id_number"
           ],
           "resolution_state": "open"
         },
@@ -986,7 +986,7 @@
         }
       ],
       "case_item_ids": [
-        "cmp:extraction_reported_information_missing:-:-:missing_information[0]",
+        "cmp:extraction_reported_information_missing:-:-:field:extracted_client.registration_or_id_number",
         "cmp:extraction_reported_information_missing:-:-:missing_information[1]",
         "cmp:extraction_reported_information_missing:-:-:missing_information[3]"
       ],

@@ -97,7 +97,7 @@
       "recommendation_gaps": [
         "extraction_reported_information_missing:advisory|missing=missing_information[1]",
         "extraction_reported_information_missing:advisory|missing=missing_information[3]",
-        "extraction_reported_information_missing:advisory|field=extracted_client.registration_or_id_number|missing=missing_information[0]"
+        "extraction_reported_information_missing:advisory|field=extracted_client.registration_or_id_number|missing=extracted_client.registration_or_id_number"
       ]
     },
     "privacy": {
@@ -109,7 +109,7 @@
       "material": 0,
       "nonblocking": 3,
       "items": [
-        "extraction_reported_information_missing:nonblocking|field=extracted_client.registration_or_id_number|by=extraction_report/missing_information[0]/high|gaps=1",
+        "extraction_reported_information_missing:nonblocking|field=extracted_client.registration_or_id_number|by=extraction_report/extracted_client.registration_or_id_number/high|gaps=1",
         "extraction_reported_information_missing:nonblocking|by=extraction_report/missing_information[1]/medium|gaps=1",
         "extraction_reported_information_missing:nonblocking|by=extraction_report/missing_information[3]/low|gaps=1"
       ]

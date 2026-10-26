@@ -10,11 +10,13 @@
  *      references its quality gap(s) — not three separate quality gaps plus a
  *      completeness item plus a duplicate. Nothing is double counted: a gap is
  *      created here only for a problem the v2 table did not already classify.
- *   2. TWO NEW GAP CODES, for problems that previously had no gap at all:
+ *   2. NEW GAP CODES for problems that previously had no gap at all:
  *        extraction_reported_information_missing  advisory
  *        conflicting_recorded_values              material when the field is
  *                                                 consumed by the matcher, else
  *                                                 advisory — never a blocker
+ *        comparison_unavailable                    advisory when a registered
+ *                                                 comparison cannot run
  *      Both are recommendation-level (no insurer), so they colour the overall
  *      state but never an individual insurer's state.
  *
@@ -47,7 +49,8 @@ export const QUALITY_MODEL_VERSION = "recommendation-quality-v3" as const;
 export type QualityGapCodeV3 =
   | QualityGapCodeV2
   | "extraction_reported_information_missing"
-  | "conflicting_recorded_values";
+  | "conflicting_recorded_values"
+  | "comparison_unavailable";
 
 export interface QualityGapV3 extends Omit<QualityGapV2, "code"> {
   code: QualityGapCodeV3;
@@ -190,6 +193,27 @@ export function assessQualityV3(input: QualityAssessmentInputV3): {
     return { ...contradiction, quality_gap_id: built.gap_id };
   });
 
+  // ---- New gap: a registered comparison genuinely could not run -----------------
+  const linkedComparisons = input.contradictions.comparisons.map((comparison) => {
+    if (comparison.outcome !== "comparison_unavailable" || !comparison.unavailable_reason) return comparison;
+    const built = buildQualityGap({
+      code: "comparison_unavailable",
+      severity: "advisory" as QualitySeverity,
+      scope: "reviewed_fact",
+      field_path: comparison.field_key,
+      missing: [comparison.unavailable_reason],
+    });
+    if (!gaps.some((gap) => gap.gap_id === built.gap_id)) {
+      gaps.push({
+        ...(built as QualityGapV2),
+        code: "comparison_unavailable",
+        completeness_item_ids: [],
+        contradiction_id: null,
+      });
+    }
+    return { ...comparison, quality_gap_id: built.gap_id };
+  });
+
   gaps.sort(compareQualityGaps);
   const count = (severity: QualitySeverity) => gaps.filter((item) => item.severity === severity).length;
   const counts = { blocker: count("blocker"), material: count("material"), advisory: count("advisory") };
@@ -206,6 +230,6 @@ export function assessQualityV3(input: QualityAssessmentInputV3): {
     // Per-insurer quality is exactly v2's: both new codes are recommendation-level.
     insurerQuality,
     completeness: { ...input.completeness, items: linkedItems },
-    contradictions: { ...input.contradictions, contradictions: linkedContradictions },
+    contradictions: { ...input.contradictions, comparisons: linkedComparisons, contradictions: linkedContradictions },
   };
 }

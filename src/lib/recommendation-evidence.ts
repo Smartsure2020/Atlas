@@ -1482,7 +1482,7 @@ export function contradictionsView(view: EvidenceView): ContradictionsView | nul
         ? "The matcher uses this field, so the disagreement could have affected the recommendation. Atlas did not change any score because of it."
         : "The matcher does not use this field, so this did not affect the ranking, the scores or any flag.",
       groups: record.value_groups.map((group) => ({
-        reference: group.value_digest.slice(0, 6),
+        reference: group.value_label,
         display: group.value_display,
         sources: group.sources.map((source) => ({ label: source.source_label, where: pointerWhere(source) })),
       })),

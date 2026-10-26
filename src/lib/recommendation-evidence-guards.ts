@@ -322,7 +322,7 @@ const CONTRADICTION_RECORD = (v: unknown) =>
       x.length >= 2 &&
       x.every((group) =>
         shape(group, {
-          value_digest: isStr,
+          value_label: isStr,
           value_display: strOrNull,
           source_count: isNum,
           sources: (s) => arrOf(s, CONTRADICTION_SOURCE),
@@ -346,6 +346,7 @@ const CONTRADICTIONS = (v: unknown) =>
           unavailable_source_ids: strArr,
           unavailable_reason: strOrNull,
           contradiction_id: strOrNull,
+          quality_gap_id: strOrNull,
         })
       ),
     contradictions: (x) => arrOf(x, CONTRADICTION_RECORD),

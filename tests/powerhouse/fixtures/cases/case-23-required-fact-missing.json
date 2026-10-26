@@ -5,7 +5,7 @@
   "description": "The reviewed extraction itself reports outstanding information (the only fact-level requirement Atlas has). One item names a schema field exactly; one is free text; one has no field; one bare key is ambiguous across sections. The free text must never be persisted.",
   "intent": [
     "an extraction record naming `extracted_client.registration_or_id_number` becomes a fact item with its schema path and label",
-    "free-text labels are NOT persisted: the item keeps only its position and priority",
+    "resolved schema facts use canonical path identity; free-text labels are NOT persisted and keep only position and priority",
     "a record with no `field` is not an item, and an ambiguous bare key (`name`) does not resolve to a path",
     "items are nonblocking, `affects` is not_determined, and each gets an advisory quality gap — nothing is declined or scored differently"
   ],

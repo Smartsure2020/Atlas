@@ -253,7 +253,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_be06fb2a"
+      "recommendation_input_fingerprint": "fp_15e2dc0e"
     },
     "matcher_input": {
       "product_candidates": [

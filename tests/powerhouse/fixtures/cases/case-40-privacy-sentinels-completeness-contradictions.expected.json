@@ -93,9 +93,8 @@
       "state": "decision_ready",
       "blockers": 0,
       "material": 0,
-      "advisory": 2,
+      "advisory": 1,
       "recommendation_gaps": [
-        "conflicting_recorded_values:advisory|field=broker.email|missing=consistent_recorded_value",
         "extraction_reported_information_missing:advisory|missing=missing_information[0]"
       ]
     },
@@ -112,15 +111,11 @@
       ]
     },
     "contradictions": {
-      "count": 1,
+      "count": 0,
       "material": 0,
-      "advisory": 1,
-      "comparisons": [
-        "broker.email:conflict"
-      ],
-      "items": [
-        "broker.email|advisory|groups=2|matcher=false|display=a•••@•••.test~b•••@•••.test"
-      ]
+      "advisory": 0,
+      "comparisons": [],
+      "items": []
     }
   }
 }

@@ -56,11 +56,11 @@ import case24 from "../../tests/powerhouse/fixtures/snapshots/case-24-required-d
 import case25 from "../../tests/powerhouse/fixtures/snapshots/case-25-one-insurer-complete-another-incomplete.row.json";
 import case26 from "../../tests/powerhouse/fixtures/snapshots/case-26-section-without-applicable-rule.row.json";
 import case27 from "../../tests/powerhouse/fixtures/snapshots/case-27-multiple-products-no-declared-sections-completeness.row.json";
-import case28 from "../../tests/powerhouse/fixtures/snapshots/case-28-sources-agree.row.json";
 import case29 from "../../tests/powerhouse/fixtures/snapshots/case-29-sources-disagree.row.json";
 import case40 from "../../tests/powerhouse/fixtures/snapshots/case-40-privacy-sentinels-completeness-contradictions.row.json";
 import histV2Ready from "../../tests/powerhouse/fixtures/snapshots/historical-v2-decision-ready.row.json";
 import histV2Incomplete from "../../tests/powerhouse/fixtures/snapshots/historical-v2-incomplete.row.json";
+import { withInjectedProductComparison } from "../../tests/powerhouse/injected-comparison-fixture";
 
 const AVAILABLE: ExtractionConfidenceState = { state: "available", value: 0.9, source: "provider", available: true };
 const asRec = (value: unknown) => value as unknown as Recommendation;
@@ -685,7 +685,7 @@ describe("Evidence Mode (v3) — What Atlas still needs", () => {
     for (const sentinel of ["REASON_SENTINEL_23A", "FREETEXT_SENTINEL_23B", "FREETEXT_SENTINEL_23C"]) expect(text).not.toContain(sentinel);
     const user = userEvent.setup();
     await user.click(within(list).getAllByText("Why Atlas says this is required")[0]);
-    expect(within(list).getByText("The extraction reported item 1 as outstanding (high priority)")).toBeInTheDocument();
+    expect(within(list).getByText("The extraction reported an item as outstanding (high priority)")).toBeInTheDocument();
   });
 
   it("explains what 'required' means, including that no universal requirement exists", async () => {
@@ -697,23 +697,31 @@ describe("Evidence Mode (v3) — What Atlas still needs", () => {
 });
 
 describe("Evidence Mode (v3) — Conflicts to review", () => {
-  it("shows the conflict neutrally: both values masked, both sources, matcher effect, unresolved", async () => {
-    renderPanel(asRec(case29));
+  it("renders an injected MATERIAL conflict as disagreement, potentially matcher-relevant, never decline/fraud, with scores unchanged", async () => {
+    const injected = withInjectedProductComparison(case22);
+    for (const key of ["recommended_insurer", "secondary_options_json", "confidence_score", "referral_required", "senior_review_required"] as const) {
+      expect(injected[key]).toEqual((case22 as unknown as Record<string, unknown>)[key]);
+    }
+    const authoritative = (row: Record<string, unknown>) => ((row.evidence_json as { insurers: Record<string, unknown>[] }).insurers)
+      .map((insurer) => [insurer.insurer_id, insurer.rank, insurer.score, insurer.band, insurer.ruled_out, insurer.referral_required, insurer.manual_review_required, insurer.senior_review_required]);
+    expect(authoritative(injected)).toEqual(authoritative(case22 as unknown as Record<string, unknown>));
+    renderPanel(asRec(injected));
     const panel = screen.getByRole("region", { name: CONFLICTS });
     expect(within(panel).getByText("1 conflict to review")).toBeInTheDocument();
     expect(within(panel).getByText("Atlas found conflicting recorded values")).toBeInTheDocument();
-    const values = within(panel).getByRole("list", { name: "Recorded values for Broker email address" });
-    expect(within(values).getByText("a•••@•••.za")).toBeInTheDocument();
-    expect(within(values).getByText("b•••@•••.za")).toBeInTheDocument();
-    expect(within(values).getByText(/Recorded by: Submission intake — Submission intake record/)).toBeInTheDocument();
-    expect(within(values).getByText(/Recorded by: Reviewed extraction — Reviewed extraction · broker › email/)).toBeInTheDocument();
-    expect(within(panel).getByText(/did not affect the ranking, the scores or any flag/i)).toBeInTheDocument();
+    const values = within(panel).getByRole("list", { name: "Recorded values for Product line" });
+    expect(within(values).getByText("motor")).toBeInTheDocument();
+    expect(within(values).getByText("property")).toBeInTheDocument();
+    expect(within(values).getByText(/Recorded by: Synthetic source A/)).toBeInTheDocument();
+    expect(within(values).getByText(/Recorded by: Synthetic source B/)).toBeInTheDocument();
+    expect(within(panel).getByText(/could have affected the recommendation\. Atlas did not change any score because of it/i)).toBeInTheDocument();
     expect(within(panel).getByText(/Unresolved — Atlas has no record that anyone has reviewed this disagreement/)).toBeInTheDocument();
     expect(within(panel).getByText(/does not say which one is correct and applies no source precedence/i)).toBeInTheDocument();
     // No raw address, no accusation.
     const text = panel.textContent ?? "";
     expect(text).not.toMatch(/[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]+/i);
-    expect(text).not.toMatch(/fraud|false information|misrepresent|lied|dishonest/i);
+    expect(text).not.toMatch(/fraud|false information|misrepresent|lied|dishonest|declined by atlas/i);
+    expect(text).not.toMatch(/\bref\b/i);
     // The comparison method is available on request.
     const user = userEvent.setup();
     await user.click(within(panel).getByText("How Atlas compared them"));
@@ -721,7 +729,7 @@ describe("Evidence Mode (v3) — Conflicts to review", () => {
   });
 
   it("agreement produces no conflict and does not claim verification", () => {
-    renderPanel(asRec(case28));
+    renderPanel(asRec(withInjectedProductComparison(case22, "motor")));
     const panel = screen.getByRole("region", { name: CONFLICTS });
     expect(within(panel).getAllByText("No conflicting recorded values").length).toBeGreaterThan(0);
     expect(within(panel).getByText(/found no conflicting values\. A fact recorded in only one place cannot be compared\./)).toBeInTheDocument();
@@ -744,7 +752,7 @@ describe("Evidence Mode (v3) — Conflicts to review", () => {
   });
 
   it("ordinary users see no technical identifiers (item, contradiction or gap ids)", () => {
-    renderPanel(asRec(case29));
+    renderPanel(asRec(withInjectedProductComparison(case22)));
     const text = document.body.textContent ?? "";
     for (const forbidden of ["cmp:", "ctr:", "gap:", "item_id", "contradiction_id", "recommendation-contradictions-v1"]) {
       expect(text).not.toContain(forbidden);

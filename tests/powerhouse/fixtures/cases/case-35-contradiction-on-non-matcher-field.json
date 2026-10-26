@@ -2,10 +2,10 @@
   "fixture_schema": "powerhouse-case-v1",
   "id": "case-35-contradiction-on-non-matcher-field",
   "title": "Contradiction on a field the matcher does not consume",
-  "description": "Same submission as case 22 but the intake and extracted broker emails disagree. The twin run with agreeing emails must produce byte-identical authoritative output.",
+  "description": "Real endpoint case confirming the semantically invalid broker-email pair is absent from production. Advisory non-matcher conflict behaviour is covered by an injected engine registry.",
   "intent": [
-    "the contradiction is advisory and does not move any score, rank, flag, band, confidence or required-document outcome",
-    "quality state stays decision_ready (an advisory gap) — proven against the agreeing twin"
+    "production emits no contradiction or quality gap",
+    "injected engine tests prove advisory non-matcher conflicts do not move authoritative output"
   ],
   "rule_defaults": {
     "notes": null,

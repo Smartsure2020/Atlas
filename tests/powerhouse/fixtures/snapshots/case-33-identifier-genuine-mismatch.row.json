@@ -250,7 +250,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_95e8c961"
+      "recommendation_input_fingerprint": "fp_15e2dc0e"
     },
     "matcher_input": {
       "product_candidates": [
@@ -851,24 +851,8 @@
       "state": "decision_ready",
       "blocker_count": 0,
       "material_count": 0,
-      "advisory_count": 1,
-      "gaps": [
-        {
-          "gap_id": "gap:conflicting_recorded_values:-:-:-:broker.email:consistent_recorded_value",
-          "insurer_id": null,
-          "rule_id": null,
-          "section_key": null,
-          "field_path": "broker.email",
-          "missing": [
-            "consistent_recorded_value"
-          ],
-          "code": "conflicting_recorded_values",
-          "severity": "advisory",
-          "scope": "reviewed_fact",
-          "completeness_item_ids": [],
-          "contradiction_id": "ctr:broker.email:9b997621eeab"
-        }
-      ]
+      "advisory_count": 0,
+      "gaps": []
     },
     "completeness": {
       "model": "recommendation-completeness-v1",
@@ -904,92 +888,11 @@
     "contradictions": {
       "model": "recommendation-contradictions-v1",
       "source_precedence": "none_applied",
-      "comparisons": [
-        {
-          "field_key": "broker.email",
-          "label": "Broker email address",
-          "kind": "email",
-          "normalization": "email_trim_lowercase",
-          "outcome": "conflict",
-          "source_ids": [
-            "intake_form",
-            "reviewed_extraction"
-          ],
-          "unparseable_source_ids": [],
-          "unavailable_source_ids": [],
-          "unavailable_reason": null,
-          "contradiction_id": "ctr:broker.email:9b997621eeab"
-        }
-      ],
-      "contradictions": [
-        {
-          "contradiction_id": "ctr:broker.email:9b997621eeab",
-          "code": "conflicting_recorded_values",
-          "field_key": "broker.email",
-          "field_path": "broker.email",
-          "label": "Broker email address",
-          "scope": "submission",
-          "status": "unresolved",
-          "resolution_state": "unresolved",
-          "severity": "advisory",
-          "severity_basis": "field_not_consumed_by_matcher",
-          "comparison_basis": {
-            "kind": "email",
-            "normalization": "email_trim_lowercase",
-            "normalization_steps": [
-              "require text",
-              "trim surrounding whitespace",
-              "lower-case (the repository already compares email identifiers this way)",
-              "require one at-sign separating a local part from a dotted domain, with no spaces, angle brackets, commas or semicolons"
-            ]
-          },
-          "affects_matcher_input": false,
-          "matcher_roles": [],
-          "value_groups": [
-            {
-              "value_digest": "5128b1928afd1743",
-              "value_display": "j•••@•••.za",
-              "source_count": 1,
-              "sources": [
-                {
-                  "source_id": "reviewed_extraction",
-                  "source_label": "Reviewed extraction",
-                  "pointer": {
-                    "record": "atlas_extractions",
-                    "record_id": "22222222-2222-2222-2222-222222222222",
-                    "field_path": "broker.email",
-                    "document_id": null,
-                    "page": null
-                  },
-                  "field_status": "extracted",
-                  "confidence": 0.9
-                }
-              ]
-            },
-            {
-              "value_digest": "75b64320d8a26670",
-              "value_display": "j•••@•••.za",
-              "source_count": 1,
-              "sources": [
-                {
-                  "source_id": "intake_form",
-                  "source_label": "Submission intake",
-                  "pointer": {
-                    "record": "atlas_submissions",
-                    "column": "broker_email"
-                  },
-                  "field_status": null,
-                  "confidence": null
-                }
-              ]
-            }
-          ],
-          "quality_gap_id": "gap:conflicting_recorded_values:-:-:-:broker.email:consistent_recorded_value"
-        }
-      ],
-      "contradiction_count": 1,
+      "comparisons": [],
+      "contradictions": [],
+      "contradiction_count": 0,
       "material_count": 0,
-      "advisory_count": 1,
+      "advisory_count": 0,
       "unavailable_count": 0
     }
   }

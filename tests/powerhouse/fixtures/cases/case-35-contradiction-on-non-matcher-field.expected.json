@@ -99,10 +99,8 @@
       "state": "decision_ready",
       "blockers": 0,
       "material": 0,
-      "advisory": 1,
-      "recommendation_gaps": [
-        "conflicting_recorded_values:advisory|field=broker.email|missing=consistent_recorded_value"
-      ]
+      "advisory": 0,
+      "recommendation_gaps": []
     },
     "privacy": {
       "sentinel_hits": [],
@@ -115,15 +113,11 @@
       "items": []
     },
     "contradictions": {
-      "count": 1,
+      "count": 0,
       "material": 0,
-      "advisory": 1,
-      "comparisons": [
-        "broker.email:conflict"
-      ],
-      "items": [
-        "broker.email|advisory|groups=2|matcher=false|display=d•••@•••.za~i•••@•••.za"
-      ]
+      "advisory": 0,
+      "comparisons": [],
+      "items": []
     }
   }
 }

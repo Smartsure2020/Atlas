@@ -49,9 +49,7 @@ import {
 import { COMPLETENESS_MODEL_VERSION } from "./completeness";
 import {
   CONTRADICTION_MODEL_VERSION,
-  collectObservations,
-  fingerprintObservations,
-  type IntakeInput,
+  type ObservationSet,
 } from "./contradictions";
 import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
@@ -407,30 +405,9 @@ export async function handleRunRecommendation(
     name: row.name,
   }));
 
-  // ---- Intake record: the second source for the contradiction analysis ----------
-  // Unlike the document-trust and insurer-inventory reads this is NOT fail-closed:
-  // it feeds a reliance signal only, never a score, so an unreadable intake record
-  // must not stop a recommendation. It is also not silently an "empty" record: the
-  // analysis states that the comparison was unavailable, and the fingerprint
-  // records the difference, so a later successful read recomputes.
-  const { data: intakeRow, error: intakeError } = await admin
-    .from("atlas_submissions")
-    .select("broker_email")
-    .eq("id", submissionId)
-    .maybeSingle();
-  let intake: IntakeInput;
-  if (intakeError) {
-    logOperationError({
-      endpoint: "recommend",
-      operation: "load_intake_record",
-      code: "intake_record_unavailable",
-      submissionId,
-    });
-    intake = { status: "unavailable" };
-  } else {
-    intake = intakeRow ? { status: "available", record: intakeRow as { broker_email?: unknown } } : { status: "not_found" };
-  }
-  const observations = collectObservations({ reviewed: reviewedJson, extractionId: extraction.id, intake });
+  // Production currently has no independently comparable source pair. Keep the
+  // registry-driven engine active, but make no comparison and perform no intake read.
+  const observations: ObservationSet = { observations: [], unavailable_sources: [] };
 
   const inputFp = buildRecommendationFingerprint({
     submissionId,
@@ -449,7 +426,6 @@ export async function handleRunRecommendation(
     qualityModelVersion: QUALITY_MODEL_VERSION,
     completenessModelVersion: COMPLETENESS_MODEL_VERSION,
     contradictionModelVersion: CONTRADICTION_MODEL_VERSION,
-    contradictionInputsDigest: fingerprintObservations(observations),
     activeInsurers,
   });
   const job = await beginJob(

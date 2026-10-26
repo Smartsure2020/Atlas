@@ -29,6 +29,8 @@
  *   - Free text from the extraction (the model's label of what is missing) is NOT
  *     persisted. A schema path is kept only when the text names a known
  *     extraction field exactly; otherwise only the record's index and priority.
+ *     Resolved fields are suppressed when the current reviewed value is present,
+ *     de-duplicated by canonical schema path, and never identified by array index.
  *
  * Cost is linear in (insurers × required documents + section evaluations): keyed
  * indexes, no scan of every document against every field.
@@ -157,7 +159,8 @@ const MAX_REPORTED_ITEMS = 50;
 // ---------------------------------------------------------------------------
 
 export interface ReportedMissingRecord {
-  index: number;
+  /** Present only for unresolved/free-text records, whose conservative identity remains positional. */
+  index: number | null;
   priority: "high" | "medium" | "low" | null;
   /** Set only when the model's label names a known extraction field exactly. */
   field_path: string | null;
@@ -174,9 +177,22 @@ for (const [section, fields] of Object.entries(SECTION_FIELDS)) {
   }
 }
 
-function resolveSchemaPath(text: string): string | null {
+export function resolveSchemaPath(text: string): string | null {
   const key = text.trim().toLowerCase();
   return SCHEMA_PATHS.get(key) ?? SCHEMA_KEY_PATHS.get(key) ?? null;
+}
+
+function reviewedFieldIsPresent(reviewed: Record<string, unknown>, path: string): boolean {
+  const [section, key] = path.split(".");
+  const bag = reviewed[section];
+  if (!bag || typeof bag !== "object" || Array.isArray(bag)) return false;
+  const field = (bag as Record<string, unknown>)[key];
+  if (!field || typeof field !== "object" || Array.isArray(field) || !("value" in field)) return false;
+  const value = (field as { value: unknown }).value;
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim() !== "";
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
 }
 
 /** "registration_or_id_number" -> "Registration or ID number". Derived from the schema key only. */
@@ -194,6 +210,7 @@ export function readExtractionReportedMissing(reviewed: Record<string, unknown>)
   const raw = reviewed.missing_information;
   if (!Array.isArray(raw)) return { records: [], omitted: 0 };
   const records: ReportedMissingRecord[] = [];
+  const resolved = new Set<string>();
   let omitted = 0;
   raw.forEach((entry, index) => {
     // Same filter the existing consumers use: a record without a `field` is not an item.
@@ -205,10 +222,15 @@ export function readExtractionReportedMissing(reviewed: Record<string, unknown>)
       return;
     }
     const priority = (entry as { priority?: unknown }).priority;
+    const fieldPath = resolveSchemaPath(field);
+    if (fieldPath) {
+      if (reviewedFieldIsPresent(reviewed, fieldPath) || resolved.has(fieldPath)) return;
+      resolved.add(fieldPath);
+    }
     records.push({
-      index,
+      index: fieldPath ? null : index,
       priority: priority === "high" || priority === "medium" || priority === "low" ? priority : null,
-      field_path: resolveSchemaPath(field),
+      field_path: fieldPath,
     });
   });
   return { records, omitted };
@@ -329,10 +351,10 @@ export function assessCompleteness(input: CompletenessInput): CompletenessAnalys
   }
 
   for (const record of input.reported.records) {
-    const reference = `missing_information[${record.index}]`;
+    const reference = record.field_path ?? `missing_information[${record.index}]`;
     put(
       baseItem({
-        item_id: `cmp:extraction_reported_information_missing:-:-:${reference}`,
+        item_id: `cmp:extraction_reported_information_missing:-:-:${record.field_path ? `field:${record.field_path}` : reference}`,
         code: "extraction_reported_information_missing",
         scope: "fact",
         status: "missing",

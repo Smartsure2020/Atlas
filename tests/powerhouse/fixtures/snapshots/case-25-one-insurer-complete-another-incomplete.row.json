@@ -345,7 +345,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_3c5b35a3"
+      "recommendation_input_fingerprint": "fp_f1560707"
     },
     "matcher_input": {
       "product_candidates": [

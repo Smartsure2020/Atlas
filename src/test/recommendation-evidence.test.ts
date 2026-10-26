@@ -56,9 +56,11 @@ import case33 from "../../tests/powerhouse/fixtures/snapshots/case-33-identifier
 import case40 from "../../tests/powerhouse/fixtures/snapshots/case-40-privacy-sentinels-completeness-contradictions.row.json";
 import histV2Ready from "../../tests/powerhouse/fixtures/snapshots/historical-v2-decision-ready.row.json";
 import histV2Incomplete from "../../tests/powerhouse/fixtures/snapshots/historical-v2-incomplete.row.json";
+import { withInjectedProductComparison } from "../../tests/powerhouse/injected-comparison-fixture";
 
 const row = (value: unknown) => value as unknown as Recommendation;
 const evidenceOf = (value: unknown) => resolveEvidence(row(value).evidence_json);
+const injectedContradiction = withInjectedProductComparison(case22);
 
 function scored(value: unknown, insurerId: string): InsurerEvidenceView {
   const view = insurerView(evidenceOf(value), insurerId);
@@ -326,8 +328,8 @@ const HOLLOW_V2: [string, Mutator][] = [
   ["scoring_scope missing", (p) => { delete p.scoring_scope; }],
 ];
 
-// Everything v3 adds on top of v2. Applied to the contradiction snapshot (case 29)
-// so the contradiction structure itself exists to be damaged.
+// Everything v3 adds on top of v2. Applied to an injected engine contradiction
+// because the production registry is intentionally empty.
 const HOLLOW_V3_ONLY: [string, Mutator][] = [
   ["completeness missing", (p) => { delete p.completeness; }],
   ["completeness not an object", (p) => { p.completeness = "none"; }],
@@ -381,7 +383,7 @@ describe.each(HOLLOW_CASES)("R6 — hollow $label packets are 'malformed', never
 
 describe("R6 (Batch B) — hollow v3 analyses are 'malformed' and a v2 packet is never held to v3 rules", () => {
   it.each(HOLLOW_V3_ONLY)("%s", (_label, mutate) => {
-    const packet = mutated(case29, mutate);
+    const packet = mutated(injectedContradiction, mutate);
     let view: ReturnType<typeof resolveEvidence> | undefined;
     expect(() => { view = resolveEvidence(packet); }).not.toThrow();
     expect(view).toEqual({ kind: "malformed", schemaVersion: "recommendation-evidence-v3" });
@@ -390,7 +392,7 @@ describe("R6 (Batch B) — hollow v3 analyses are 'malformed' and a v2 packet is
   });
 
   it("the unmutated contradiction packet is accepted", () => {
-    expect(evidenceOf(case29)).toMatchObject({ kind: "ready", version: "v3" });
+    expect(evidenceOf(injectedContradiction)).toMatchObject({ kind: "ready", version: "v3" });
   });
 
   it("a v2 packet does not need completeness or contradictions to be readable", () => {
@@ -422,7 +424,7 @@ describe("R6 — unmutated packets and the other hollow-packet nets", () => {
   });
 
   it.each([
-    ["v3 with a contradiction", case29],
+    ["v3 with an injected contradiction", injectedContradiction],
     ["v3 with completeness items", case18],
     ["historical v2", histV2Incomplete],
   ])("randomised damage (500 single-field deletions anywhere in the packet) never throws — %s", (_label, source) => {
@@ -623,7 +625,7 @@ describe("Batch B — completeness view", () => {
     expect(view.caseLines.every((l) => l.affects === "Atlas cannot tell whether this changes the outcome.")).toBe(true);
     expect(view.caseLines.map((l) => l.requiredBy[0])).toEqual(
       expect.arrayContaining([
-        "The extraction reported item 1 as outstanding (high priority)",
+        "The extraction reported an item as outstanding (high priority)",
         "The extraction reported item 2 as outstanding (medium priority)",
         "The extraction reported item 4 as outstanding (low priority)",
       ])
@@ -648,37 +650,38 @@ describe("Batch B — completeness view", () => {
 });
 
 describe("Batch B — contradictions view", () => {
-  it("one cluster, two value groups, masked values, unresolved, no source declared correct", () => {
-    const view = captured(contradictionsView(evidenceOf(case29)));
+  it("an injected engine registry produces one unresolved material cluster without source precedence", () => {
+    const view = captured(contradictionsView(evidenceOf(withInjectedProductComparison(case22))));
     expect(view.conflicts).toHaveLength(1);
     const [conflict] = view.conflicts;
     expect(conflict.title).toBe("Atlas found conflicting recorded values");
     expect(conflict.groups).toHaveLength(2);
-    expect(conflict.groups.map((g) => g.display).sort()).toEqual(["a•••@•••.za", "b•••@•••.za"]);
-    expect(conflict.groups.flatMap((g) => g.sources.map((s) => s.label)).sort()).toEqual(["Reviewed extraction", "Submission intake"]);
-    expect(conflict.severity).toBe("advisory");
-    expect(conflict.affectsMatcher).toBe(false);
-    expect(conflict.matcherNote).toMatch(/did not affect the ranking/i);
+    expect(conflict.groups.map((g) => g.display).sort()).toEqual(["motor", "property"]);
+    expect(conflict.groups.map((g) => g.reference)).toEqual(["A", "B"]);
+    expect(conflict.groups.flatMap((g) => g.sources.map((s) => s.label)).sort()).toEqual(["Synthetic source A", "Synthetic source B"]);
+    expect(conflict.severity).toBe("material");
+    expect(conflict.affectsMatcher).toBe(true);
+    expect(conflict.matcherNote).toMatch(/could have affected the recommendation/i);
     expect(conflict.resolution.state).toBe("unresolved");
     expect(view.precedenceStatement).toMatch(/does not say which one is correct/i);
   });
 
   it("never uses accusatory wording", () => {
-    const text = JSON.stringify([contradictionsView(evidenceOf(case29)), contradictionsView(evidenceOf(case40))]);
+    const text = JSON.stringify([contradictionsView(evidenceOf(withInjectedProductComparison(case22))), contradictionsView(evidenceOf(case40))]);
     expect(text).not.toMatch(/fraud|false information|misrepresent|lied|dishonest|untruth/i);
   });
 
-  it("agreement is reported as agreement, not as a conflict", () => {
-    const view = captured(contradictionsView(evidenceOf(case28)));
+  it("injected agreement is reported as agreement, not as a conflict", () => {
+    const view = captured(contradictionsView(evidenceOf(withInjectedProductComparison(case22, "motor"))));
     expect(view.conflicts).toEqual([]);
-    expect(view.agreedLabels).toEqual(["Broker email address"]);
+    expect(view.agreedLabels).toEqual(["Product line"]);
     expect(view.comparedCount).toBe(1);
   });
 
-  it("a one-letter difference is still a conflict, told apart by reference even when the masked display coincides", () => {
-    const [conflict] = captured(contradictionsView(evidenceOf(case33))).conflicts;
-    expect(conflict.groups.map((g) => g.display)).toEqual(["j•••@•••.za", "j•••@•••.za"]);
-    expect(new Set(conflict.groups.map((g) => g.reference)).size).toBe(2);
+  it("ordinal references distinguish groups without a value-derived digest", () => {
+    const [conflict] = captured(contradictionsView(evidenceOf(withInjectedProductComparison(case22)))).conflicts;
+    expect(conflict.groups.map((g) => g.reference)).toEqual(["A", "B"]);
+    expect(JSON.stringify(conflict)).not.toContain("value_digest");
   });
 
   it("when nothing could be compared the view says so instead of claiming consistency", () => {
@@ -688,12 +691,12 @@ describe("Batch B — contradictions view", () => {
   });
 
   it("the quality gap and the contradiction reference each other", () => {
-    const evidence = evidenceOf(case29);
+    const evidence = evidenceOf(withInjectedProductComparison(case22));
     const [conflict] = captured(contradictionsView(evidence)).conflicts;
     const gap = recommendationQuality(evidence)!.gaps.find((g) => g.code === "conflicting_recorded_values")!;
     expect(gap.contradictionId).toBe(conflict.id);
     expect(gap.gapId).toBe(conflict.qualityGapId);
-    expect(gap.severity).toBe("advisory");
+    expect(gap.severity).toBe("material");
   });
 
   it("privacy: no sentinel, raw address or free text survives into either view", () => {

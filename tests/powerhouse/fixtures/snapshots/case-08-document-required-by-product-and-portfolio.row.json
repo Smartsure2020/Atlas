@@ -164,7 +164,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_42e6ee52"
+      "recommendation_input_fingerprint": "fp_10037d56"
     },
     "matcher_input": {
       "product_candidates": [

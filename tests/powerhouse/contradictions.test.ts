@@ -1,12 +1,9 @@
 /**
  * Powerhouse Phase 4 — the deterministic contradiction engine.
  *
- * Two kinds of proof live here. The pipeline benchmark (acceptance.test.ts) proves
- * the engine on the ONE comparison Atlas's data model can support today (intake
- * broker email vs reviewed broker email). Cases 30, 31, 34 and 36 need a boolean,
- * a date, a matcher-consumed field or a third source — none of which Atlas records
- * twice — so they are proven HERE against an explicitly injected registry. Nothing
- * in this file adds a comparable field to production.
+ * Production intentionally has no registered source pair. All comparison cases
+ * are therefore proven HERE against explicitly injected registries. Nothing in
+ * this file adds a comparable field to production.
  */
 
 import {
@@ -18,6 +15,8 @@ import {
   isAbsentValue,
   maskIdentifier,
   matcherRolesFor,
+  intakeColumnSource,
+  reviewedFieldSource,
   type ComparableFieldSpec,
   type ContradictionAnalysis,
   type NormalizerId,
@@ -73,6 +72,17 @@ const REGISTRY: ComparableFieldSpec[] = [
   spec("risk.sector", "enum_trim_collapse_casefold", { field_path: "risk_classification.business_sector" }),
   spec("risk.product", "enum_trim_collapse_casefold", { field_path: "risk_classification.product_line" }),
   spec("broker.email", "email_trim_lowercase", { sensitivity: "personal_identifier", field_path: "broker.email" }),
+];
+
+const EMAIL_REGISTRY: ComparableFieldSpec[] = [
+  spec("broker.email", "email_trim_lowercase", {
+    sensitivity: "personal_identifier",
+    field_path: "broker.email",
+    sources: [
+      { source_id: "intake_form", label: "Synthetic source A", read: intakeColumnSource("broker_email") },
+      { source_id: "reviewed_extraction", label: "Synthetic source B", read: reviewedFieldSource("broker", "email") },
+    ],
+  }),
 ];
 
 const analyse = (observations: Observation[], unavailable: ObservationSet["unavailable_sources"] = []): ContradictionAnalysis =>
@@ -131,6 +141,10 @@ test("2. normalisers: valid equivalents agree, real differences differ, unreadab
 
   // email
   eq(ok("email_trim_lowercase", "  Broker@EXAMPLE.co.za "), "broker@example.co.za", "email");
+  eq(ok("email_trim_lowercase", "broker@example.co.za."), "broker@example.co.za", "trailing sentence punctuation");
+  eq(ok("email_trim_lowercase", "bro\u200Bker@example.co.za"), "broker@example.co.za", "zero-width characters");
+  eq(ok("email_trim_lowercase", "cafe\u0301@example.co.za"), ok("email_trim_lowercase", "caf\u00e9@example.co.za"), "NFD and NFC agree");
+  assert(ok("email_trim_lowercase", "broker@example.co.za") !== ok("email_trim_lowercase", "broker2@example.co.za"), "genuine email mismatch remains");
   bad("email_trim_lowercase", "Broker <broker@example.co.za>");
   bad("email_trim_lowercase", "a@b");
   bad("email_trim_lowercase", "two@one.co, other@two.co");
@@ -316,9 +330,9 @@ test("15. nothing recorded is not a disagreement: null, undefined, blank and whi
     reviewed: { broker: { email: { value: null, status: "not_found" } } },
     extractionId: "e",
     intake: { status: "available", record: { broker_email: "a@x.co" } },
-  });
+  }, EMAIL_REGISTRY);
   deepEq(set1.observations.map((o) => o.source_id), ["intake_form"], "only the intake value exists");
-  const result = analyseContradictions({ observations: set1 });
+  const result = analyseContradictions({ observations: set1, registry: EMAIL_REGISTRY });
   eq(result.contradiction_count, 0, "null vs value: no contradiction");
   eq(result.comparisons[0].outcome, "single_source", "a single source cannot disagree with itself");
   // A genuinely absent intake row behaves the same.
@@ -326,8 +340,8 @@ test("15. nothing recorded is not a disagreement: null, undefined, blank and whi
     reviewed: { broker: { email: { value: "a@x.co", status: "extracted", confidence: 0.9 } } },
     extractionId: "e",
     intake: { status: "not_found" },
-  });
-  eq(analyseContradictions({ observations: set2 }).comparisons[0].outcome, "single_source", "no intake row: nothing to compare");
+  }, EMAIL_REGISTRY);
+  eq(analyseContradictions({ observations: set2, registry: EMAIL_REGISTRY }).comparisons[0].outcome, "single_source", "no intake row: nothing to compare");
 });
 
 test("16. malformed values are 'comparison unavailable', never a contradiction", () => {
@@ -345,18 +359,28 @@ test("16. malformed values are 'comparison unavailable', never a contradiction",
 });
 
 test("17. an unreadable SOURCE is 'comparison unavailable'; it never invents agreement or conflict", () => {
-  // The injected registry declares no sources, so this one runs on the production registry.
   const real = analyseContradictions({
     observations: collectObservations({
       reviewed: { broker: { email: { value: "b@x.co", status: "extracted", confidence: 0.9 } } },
       extractionId: "e",
       intake: { status: "unavailable" },
-    }),
+    }, EMAIL_REGISTRY),
+    registry: EMAIL_REGISTRY,
   });
   eq(real.contradiction_count, 0, "no contradiction");
   eq(real.comparisons[0].outcome, "comparison_unavailable", "unavailable");
   eq(real.comparisons[0].unavailable_reason, "source_unavailable", "reason");
   deepEq(real.comparisons[0].unavailable_source_ids, ["intake_form"], "which source");
+  const assessed = assessQualityV3({
+    facts: [], insurers: [], requestedSections: [], trustedDocumentCount: 1,
+    completeness: assessCompleteness({ requestedSections: [], insurers: [], reported: { records: [], omitted: 0 } }),
+    contradictions: real,
+  });
+  const gap = assessed.quality.gaps.find((item) => item.code === "comparison_unavailable")!;
+  assert(gap, "advisory quality gap exists");
+  eq(gap.severity, "advisory", "never a blocker");
+  deepEq(gap.missing, ["source_unavailable"], "explicit reason code");
+  eq(assessed.contradictions.comparisons[0].quality_gap_id, gap.gap_id, "deterministic linkage");
 });
 
 test("18. PROPERTY — formatting variants of ONE identifier never contradict (1,000 randomised mutations)", () => {
@@ -433,7 +457,8 @@ test("23. NO PRECEDENCE — swapping which source holds which value changes noth
   eq(a.source_precedence, "none_applied", "stated");
   const text = JSON.stringify(a).toLowerCase();
   for (const word of ["chosen", "winner", "correct_value", "authoritative", "preferred_value", "resolved_to"]) assert(!text.includes(word), `no '${word}' anywhere`);
-  deepEq(a.contradictions[0].value_groups.map((g) => g.value_digest), b.contradictions[0].value_groups.map((g) => g.value_digest), "groups are ordered by neutral digest, not by source");
+  deepEq(a.contradictions[0].value_groups.map((g) => g.value_label), ["A", "B"], "groups use deterministic ordinals");
+  deepEq(b.contradictions[0].value_groups.map((g) => g.value_label), ["A", "B"], "ordinals remain deterministic when values move between sources");
 });
 
 test("24. a contradiction never resolves itself: status and resolution are always 'unresolved'", () => {
@@ -443,18 +468,18 @@ test("24. a contradiction never resolves itself: status and resolution are alway
   }
 });
 
-test("25. re-analysing the same input is byte-identical, and a changed value yields a different identity", () => {
+test("25. re-analysing is byte-identical; value changes keep the logical field/source conflict identity", () => {
   const input = [obs("broker.email", "a", "a@x.co"), obs("broker.email", "b", "b@x.co")];
   eq(JSON.stringify(analyse(input)), JSON.stringify(analyse(input)), "deterministic");
   const changed = analyse([obs("broker.email", "a", "a@x.co"), obs("broker.email", "b", "c@x.co")]);
-  assert(analyse(input).contradictions[0].contradiction_id !== changed.contradictions[0].contradiction_id, "a different disagreement has a different id");
+  eq(analyse(input).contradictions[0].contradiction_id, changed.contradictions[0].contradiction_id, "identity contains no client-value digest");
 });
 
 // ---------------------------------------------------------------------------
 // Privacy
 // ---------------------------------------------------------------------------
 
-test("26. PRIVACY — raw values are never persisted; sensitive kinds are masked; digests differ", () => {
+test("26. PRIVACY — raw values and value digests are never persisted; sensitive kinds are masked", () => {
   const raw1 = "Alice.Private@Example-Brokers.co.za";
   const raw2 = "bob.secret@other-brokers.co.za";
   const result = analyse([obs("broker.email", "a", raw1), obs("broker.email", "b", raw2)]);
@@ -463,16 +488,17 @@ test("26. PRIVACY — raw values are never persisted; sensitive kinds are masked
     assert(!text.toLowerCase().includes(needle.toLowerCase()), `${needle} must not be persisted`);
   }
   deepEq(result.contradictions[0].value_groups.map((g) => g.value_display).sort(), ["a•••@•••.za", "b•••@•••.za"], "masked");
-  eq(new Set(result.contradictions[0].value_groups.map((g) => g.value_digest)).size, 2, "distinct digests");
+  deepEq(result.contradictions[0].value_groups.map((g) => g.value_label), ["A", "B"], "ordinal labels only");
+  assert(!text.includes("value_digest"), "hand-written intent: value_digest does not exist anywhere in persisted evidence");
   const registration = analyse([obs("vehicle.registration", "a", "CA 123-456"), obs("vehicle.registration", "b", "CA 123-457")]);
   assert(!JSON.stringify(registration).includes("123456"), "identifier body not persisted");
   deepEq(registration.contradictions[0].value_groups.map((g) => g.value_display).sort(), ["C•••56", "C•••57"], "masked identifier");
 });
 
-test("27. PRIVACY — an enum is displayed only when the registry DECLARES a closed vocabulary; anything else is digest-only", () => {
+test("27. PRIVACY — an enum is displayed only when the registry DECLARES a closed vocabulary; anything else is withheld", () => {
   // No declared vocabulary: even a short, innocent-looking value is not displayed.
   const undeclared = analyse([obs("risk.sector", "a", "Another long sentence with a name"), obs("risk.sector", "b", "transport")]);
-  for (const group of undeclared.contradictions[0].value_groups) eq(group.value_display, null, "no declared vocabulary => digest only");
+  for (const group of undeclared.contradictions[0].value_groups) eq(group.value_display, null, "no declared vocabulary => withheld");
   // Declared vocabulary: members are shown; a free-text value outside it is not.
   const declared = analyseContradictions({
     observations: set([obs("risk.sector", "a", "Transport"), obs("risk.sector", "b", "A sentence about Mr Smith's business at 12 Main Road"), obs("risk.sector", "c", "logistics")]),
@@ -501,35 +527,35 @@ test("29. fingerprintObservations: normalised-equal inputs share a digest; any r
     reviewed: { broker: { email: { value: "b@x.co", status: "extracted", confidence: 0.9 } } },
     extractionId: "e",
     intake: { status: "available", record: { broker_email: "a@x.co" } },
-  });
-  const digest = fingerprintObservations(base);
+  }, EMAIL_REGISTRY);
+  const digest = fingerprintObservations(base, EMAIL_REGISTRY);
   assert(/^[0-9a-f]{64}$/.test(digest), "sha-256 hex");
   const cosmetic = collectObservations({
     reviewed: { broker: { email: { value: "b@x.co", status: "extracted", confidence: 0.9 } } },
     extractionId: "e",
     intake: { status: "available", record: { broker_email: "  A@X.CO " } },
-  });
-  eq(fingerprintObservations(cosmetic), digest, "cosmetic edit: same digest (same analysis)");
+  }, EMAIL_REGISTRY);
+  eq(fingerprintObservations(cosmetic, EMAIL_REGISTRY), digest, "cosmetic edit: same digest (same analysis)");
   const changed = collectObservations({
     reviewed: { broker: { email: { value: "b@x.co", status: "extracted", confidence: 0.9 } } },
     extractionId: "e",
     intake: { status: "available", record: { broker_email: "z@x.co" } },
-  });
-  assert(fingerprintObservations(changed) !== digest, "a different value");
+  }, EMAIL_REGISTRY);
+  assert(fingerprintObservations(changed, EMAIL_REGISTRY) !== digest, "a legitimate compared value changes the internal full fingerprint");
   const unreadable = collectObservations({
     reviewed: { broker: { email: { value: "b@x.co", status: "extracted", confidence: 0.9 } } },
     extractionId: "e",
     intake: { status: "unavailable" },
-  });
-  assert(fingerprintObservations(unreadable) !== digest, "an unreadable source is not the same as an empty one");
+  }, EMAIL_REGISTRY);
+  assert(fingerprintObservations(unreadable, EMAIL_REGISTRY) !== digest, "an unreadable source is not the same as an empty one");
   const missing = collectObservations({
     reviewed: { broker: { email: { value: "b@x.co", status: "extracted", confidence: 0.9 } } },
     extractionId: "e",
     intake: { status: "not_found" },
-  });
-  assert(fingerprintObservations(missing) !== digest && fingerprintObservations(missing) !== fingerprintObservations(unreadable), "not found, unreadable and available are three different inputs");
+  }, EMAIL_REGISTRY);
+  assert(fingerprintObservations(missing, EMAIL_REGISTRY) !== digest && fingerprintObservations(missing, EMAIL_REGISTRY) !== fingerprintObservations(unreadable, EMAIL_REGISTRY), "not found, unreadable and available are three different inputs");
   const reordered = { ...base, observations: [...base.observations].reverse() };
-  eq(fingerprintObservations(reordered), digest, "observation order is irrelevant");
+  eq(fingerprintObservations(reordered, EMAIL_REGISTRY), digest, "observation order is irrelevant");
   assert(!digest.includes("a@x.co"), "no raw value in the digest");
 });
 
@@ -537,15 +563,12 @@ test("29. fingerprintObservations: normalised-equal inputs share a digest; any r
 // The registry itself
 // ---------------------------------------------------------------------------
 
-test("30. the production registry is exactly the one defensible comparison, and every entry is well formed", () => {
-  deepEq(COMPARABLE_FIELDS.map((f) => f.field_key), ["broker.email"], "one field: intake broker email vs reviewed broker email");
-  for (const field of COMPARABLE_FIELDS) {
-    assert(field.sources.length >= 2, `${field.field_key}: at least two independent sources`);
-    assert(NORMALIZERS[field.normalizer], `${field.field_key}: known normaliser`);
-    eq(new Set(field.sources.map((s) => s.source_id)).size, field.sources.length, `${field.field_key}: distinct sources`);
-  }
-  deepEq(COMPARABLE_FIELDS[0].sources.map((s) => s.source_id), ["intake_form", "reviewed_extraction"], "intake vs reviewed");
-  deepEq(matcherRolesFor(COMPARABLE_FIELDS[0].field_path), [], "broker email is not consumed by the matcher");
+test("30. the production registry is empty because no retained pair satisfies semantic equivalence", () => {
+  deepEq(COMPARABLE_FIELDS, [], "no production source pair");
+  const production = analyseContradictions({ observations: { observations: [], unavailable_sources: [] } });
+  deepEq(production.comparisons, [], "no comparison attempt");
+  deepEq(production.contradictions, [], "no contradiction");
+  eq(production.unavailable_count, 0, "no warning merely because registry is empty");
 });
 
 test("31. collectObservations reads real shapes: provenance pointers carry no text, only ids and pages", () => {
@@ -561,7 +584,7 @@ test("31. collectObservations reads real shapes: provenance pointers carry no te
     },
     extractionId: "ext-1",
     intake: { status: "available", record: { broker_email: "a@x.co" } },
-  });
+  }, EMAIL_REGISTRY);
   const reviewed = result.observations.find((o) => o.source_id === "reviewed_extraction")!;
   deepEq(reviewed.pointer, { record: "atlas_extractions", record_id: "ext-1", field_path: "broker.email", document_id: goodDocument, page: 3 }, "pointer");
   eq(reviewed.field_status, "low_confidence_extracted", "status carried");
@@ -570,10 +593,10 @@ test("31. collectObservations reads real shapes: provenance pointers carry no te
     reviewed: { broker: { email: { value: "b@x.co", status: "extracted", source: { document_id: "not-a-uuid", page: "3" } } } },
     extractionId: "ext-1",
     intake: { status: "not_found" },
-  }).observations[0];
+  }, EMAIL_REGISTRY).observations[0];
   deepEq(garbled.pointer, { record: "atlas_extractions", record_id: "ext-1", field_path: "broker.email", document_id: null, page: null }, "an invented document id or page is dropped, not trusted");
   // Nothing from file names or snippets can reach the analysis.
-  const analysis = JSON.stringify(analyseContradictions({ observations: result }));
+  const analysis = JSON.stringify(analyseContradictions({ observations: result, registry: EMAIL_REGISTRY }));
   for (const forbidden of ["PRIVATE-NAME", "SNIPPET TEXT"]) assert(!analysis.includes(forbidden), `${forbidden} must not be carried`);
 });
 

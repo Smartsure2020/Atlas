@@ -521,7 +521,6 @@ export function ContradictionCard({ line, action }: { line: ContradictionLine; a
             <p className="atlas-list__title">
               Value {String.fromCharCode(65 + index)}{" "}
               {group.display !== null ? <q>{group.display}</q> : <span className="atlas-text-muted">(not shown)</span>}{" "}
-              <span className="atlas-text-muted">ref {group.reference}</span>
             </p>
             <p className="atlas-list__meta">
               Recorded by: {group.sources.map((source) => `${source.label} — ${source.where}`).join("; ")}

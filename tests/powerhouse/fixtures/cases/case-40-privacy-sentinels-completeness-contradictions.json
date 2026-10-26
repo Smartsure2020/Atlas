@@ -2,10 +2,10 @@
   "fixture_schema": "powerhouse-case-v1",
   "id": "case-40-privacy-sentinels-completeness-contradictions",
   "title": "Privacy sentinels in completeness and contradiction inputs",
-  "description": "Free text the extraction reported as missing, an extraction `conflicts` entry, and both broker email addresses all carry synthetic sentinels. None may reach any persisted column; the contradiction shows masked displays and digests only.",
+  "description": "Free text, an extraction `conflicts` entry, and both semantically different broker email fields carry synthetic sentinels. None may reach any persisted column; production performs no broker-email comparison and persists no value digest.",
   "intent": [
     "no sentinel (raw or normalised form) appears anywhere in the persisted recommendation row",
-    "the conflict is still detected and displayed only as `a•••@•••.test` / `b•••@•••.test`",
+    "no broker-email comparison, masked group or value digest is persisted",
     "extraction `conflicts[]` prose is not copied into any completeness or contradiction structure"
   ],
   "sentinels": [

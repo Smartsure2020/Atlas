@@ -527,7 +527,7 @@ const INTENTS: Record<string, Intent> = {
     const resolved = items.filter((i) => i.includes("|field="));
     eq(resolved.length, 1, "exactly one record names a schema field exactly");
     assert(resolved[0].includes("field=extracted_client.registration_or_id_number"), "resolved to the schema path");
-    assert(resolved[0].includes("missing_information[0]/high"), "keeps its position and priority");
+    assert(resolved[0].includes("extracted_client.registration_or_id_number/high"), "uses canonical schema path and priority, not array position");
     assert(items.some((i) => i.includes("missing_information[1]/medium")) && items.some((i) => i.includes("missing_information[3]/low")), "free text and the ambiguous bare key keep position + priority only");
     assert(!items.some((i) => i.includes("missing_information[2]")), "a record with no field is not an item");
     const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
@@ -586,53 +586,32 @@ const INTENTS: Record<string, Intent> = {
     eq(o.insurers["insurer-beta"].ruled_out, true, "Beta is ruled out by its own declined rule");
   },
   "case-28-sources-agree": (o) => {
-    deepEq(o.contradictions.comparisons, ["broker.email:agree"], "compared, agreed");
-    eq(o.contradictions.count, 0, "agreement is not a contradiction");
-    eq(o.completeness.state, "complete", "agreement adds nothing to completeness");
-    eq(o.quality.state, "decision_ready", "agreement is not scored");
+    deepEq(o.contradictions.comparisons, [], "production registry is empty: no comparison attempt");
+    eq(o.contradictions.count, 0, "no contradiction");
+    eq(o.completeness.state, "complete", "intake login identity adds nothing to completeness");
+    eq(o.quality.state, "decision_ready", "empty registry adds no warning");
   },
-  "case-29-sources-disagree": async (o, run) => {
-    deepEq(o.contradictions.comparisons, ["broker.email:conflict"], "compared, conflict");
-    eq(o.contradictions.count, 1, "one cluster");
-    eq(o.contradictions.advisory, 1, "advisory: not a matcher input");
-    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
-    const [c] = evidence.contradictions.contradictions;
-    eq(c.value_groups.length, 2, "two value groups");
-    deepEq(c.value_groups.map((g) => g.value_display).sort(), ["a•••@•••.za", "b•••@•••.za"], "masked, never the raw address");
-    eq(c.resolution_state, "unresolved", "unresolved");
-    eq(c.affects_matcher_input, false, "not a matcher input");
-    eq(evidence.contradictions.source_precedence, "none_applied", "no source is declared correct");
-    assert(o.quality.recommendation_gaps.some((g) => g.startsWith("conflicting_recorded_values:advisory")), "advisory quality gap");
-    eq(o.quality.state, "decision_ready", "advisory only");
-    // Differential: the agreeing twin has identical authoritative output.
-    const twin = observe((await runThroughHandler({ ...run.loaded.input, submission: { broker_email: "bob@otherbrokers.co.za" } })).row!);
-    assertSameAuthoritative(o, twin, "case 29 vs its agreeing twin");
+  "case-29-sources-disagree": (o) => {
+    deepEq(o.contradictions.comparisons, [], "creator login email and extracted intermediary email are not semantically comparable");
+    eq(o.contradictions.count, 0, "no fabricated conflict");
+    assert(!o.quality.recommendation_gaps.some((g) => g.startsWith("conflicting_recorded_values")), "no contradiction quality gap");
   },
   "case-32-identifier-formatting-normalises-equal": (o) => {
-    deepEq(o.contradictions.comparisons, ["broker.email:agree"], "formatting is not disagreement");
+    deepEq(o.contradictions.comparisons, [], "endpoint has no production comparison pair; formatting is tested in the injected engine suite");
     eq(o.contradictions.count, 0, "no contradiction");
   },
-  "case-33-identifier-genuine-mismatch": (o, run) => {
-    eq(o.contradictions.count, 1, "a one-letter difference is a contradiction: no tolerance, no fuzzy matching");
-    const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
-    const digests = evidence.contradictions.contradictions[0].value_groups.map((g) => g.value_digest);
-    eq(new Set(digests).size, 2, "the two values are told apart by digest even when the masked display coincides");
+  "case-33-identifier-genuine-mismatch": (o) => {
+    eq(o.contradictions.count, 0, "endpoint does not compare the invalid broker-email pair; genuine mismatch is tested with an injected engine registry");
   },
-  "case-35-contradiction-on-non-matcher-field": async (o, run) => {
-    eq(o.contradictions.count, 1, "conflict present");
-    eq(o.contradictions.items[0].split("|")[3], "matcher=false", "not a matcher input");
-    const twin = observe((await runThroughHandler({ ...run.loaded.input, submission: { broker_email: "document@brokerage.co.za" } })).row!);
-    eq(twin.contradictions.count, 0, "the twin has none");
-    assertSameAuthoritative(o, twin, "case 35 vs its agreeing twin");
-    eq(o.quality.state, twin.quality.state, "quality state is unchanged by an advisory contradiction");
+  "case-35-contradiction-on-non-matcher-field": (o) => {
+    eq(o.contradictions.count, 0, "endpoint production coverage is zero; non-matcher linkage is tested at engine level");
   },
   "case-40-privacy-sentinels-completeness-contradictions": (o, run) => {
     deepEq(o.privacy.sentinel_hits, [], "no sentinel — raw or normalised — in the persisted row");
-    eq(o.contradictions.count, 1, "the conflict is still detected");
+    eq(o.contradictions.count, 0, "invalid broker-email pair is not compared");
     const evidence = run.row!.evidence_json as RecommendationEvidenceV3;
-    deepEq(evidence.contradictions.contradictions[0].value_groups.map((g) => g.value_display).sort(), ["a•••@•••.test", "b•••@•••.test"], "masked only");
     const completenessText = JSON.stringify([evidence.completeness, evidence.contradictions]);
-    for (const needle of ["MISSING_TEXT_SENTINEL_40", "REASON_TEXT_SENTINEL_40", "CONFLICT_TEXT_SENTINEL_40", "@", "sentinel"]) {
+    for (const needle of ["MISSING_TEXT_SENTINEL_40", "REASON_TEXT_SENTINEL_40", "CONFLICT_TEXT_SENTINEL_40", "value_digest", "@", "sentinel"]) {
       if (needle === "@") {
         assert(!/[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]+/i.test(completenessText), "no full email address is persisted anywhere in the new structures");
       } else {

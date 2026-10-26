@@ -4,7 +4,7 @@
   "title": "Two structured sources agree",
   "description": "The submission's intake broker email and the reviewed extraction's broker email are identical. Agreement is not evidence and is never scored.",
   "intent": [
-    "the comparison is recorded (`broker.email:agree`) but NO contradiction is emitted",
+    "real endpoint architecture: no production comparison is attempted because broker login email and extracted intermediary email are different semantic facts",
     "agreement creates no quality gap, no completeness item and no new score input"
   ],
   "rule_defaults": {

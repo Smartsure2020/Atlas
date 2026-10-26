@@ -469,7 +469,7 @@ export interface ContradictionRecordV3 {
   affects_matcher_input: boolean;
   matcher_roles: string[];
   value_groups: {
-    value_digest: string;
+    value_label: string;
     value_display: string | null;
     source_count: number;
     sources: {
@@ -497,6 +497,7 @@ export interface ContradictionAnalysisV3 {
     unavailable_source_ids: string[];
     unavailable_reason: "unparseable_value" | "source_unavailable" | null;
     contradiction_id: string | null;
+    quality_gap_id: string | null;
   }[];
   contradictions: ContradictionRecordV3[];
   contradiction_count: number;

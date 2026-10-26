@@ -116,9 +116,7 @@
       "count": 0,
       "material": 0,
       "advisory": 0,
-      "comparisons": [
-        "broker.email:agree"
-      ],
+      "comparisons": [],
       "items": []
     }
   }

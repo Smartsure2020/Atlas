@@ -61,7 +61,7 @@ import type { AppetiteRow } from "../worker/src/matcher-types.js";
 import { buildQuoteReview } from "../worker/src/quote-review.js";
 import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3 } from "../worker/src/recommendation-evidence-v3.js";
 import { COMPLETENESS_MODEL_VERSION } from "../worker/src/completeness.js";
-import { CONTRADICTION_MODEL_VERSION, fingerprintObservations } from "../worker/src/contradictions.js";
+import { CONTRADICTION_MODEL_VERSION } from "../worker/src/contradictions.js";
 import { TAXONOMY_VERSION } from "../worker/src/taxonomy.js";
 
 // supabase-js builds a Realtime client eagerly inside createClient(), and on
@@ -1175,7 +1175,6 @@ const LIVE_BEHAVIOUR = {
   contradictionModelVersion: CONTRADICTION_MODEL_VERSION,
   // The phase-24 recommendation stubs seed no atlas_submissions row and the reviewed
   // fixture records no broker email, so there is nothing to compare.
-  contradictionInputsDigest: fingerprintObservations({ observations: [], unavailable_sources: [] }),
   // The phase-24 recommendation stubs seed no atlas_insurers rows.
   activeInsurers: [] as { id: string; name: string }[],
 };

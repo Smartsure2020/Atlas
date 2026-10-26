@@ -240,7 +240,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_daa6f07e"
+      "recommendation_input_fingerprint": "fp_667b13ca"
     },
     "matcher_input": {
       "product_candidates": [

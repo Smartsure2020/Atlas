@@ -2,10 +2,10 @@
   "fixture_schema": "powerhouse-case-v1",
   "id": "case-33-identifier-genuine-mismatch",
   "title": "Identifier genuine mismatch — no fuzzy tolerance",
-  "description": "The two addresses differ by a single letter in the local part (`jon` vs `john`). Atlas has no tolerance and no fuzzy matching, so this is a contradiction.",
+  "description": "Real endpoint case confirming a near-miss in the invalid broker-email pair is not compared. Genuine mismatch remains covered by the injected engine registry.",
   "intent": [
-    "a near-miss is still a contradiction: there is no similarity threshold",
-    "one cluster, two groups, advisory, unresolved"
+    "NO production comparison or contradiction for the semantically invalid pair",
+    "injected engine tests prove there is no similarity threshold for legitimate pairs"
   ],
   "rule_defaults": {
     "notes": null,

@@ -4,7 +4,7 @@
  * Why a new schema version and not additive v2 fields: v2 is live in production
  * and its `quality` block means "the v2 classification table". v3 changes what a
  * reader may conclude from `quality` (its gaps now carry completeness /
- * contradiction links, it has two new gap codes, and it is stamped
+ * contradiction links, it has new gap codes, and it is stamped
  * `recommendation-quality-v3`), and it adds two top-level analyses that a v2
  * reader must not assume were performed. A historical v2 packet therefore stays
  * a v2 packet: it is never rewritten, never reconstructed and never presented as
@@ -49,9 +49,9 @@ export interface RecommendationEvidenceV3
 
 export interface BuildEvidenceV3Input extends BuildEvidenceV2Input {
   /**
-   * Comparable recorded values collected by the endpoint BEFORE the cache
-   * decision (they are a fingerprint input) and reused here. Raw values are used
-   * only to normalise and digest; none is persisted.
+   * Comparable recorded values supplied to the pure engine. Production currently
+   * supplies an empty set because the live registry is empty; engine tests inject
+   * legitimate pairs. Raw values are transient and never persisted.
    */
   observations: ObservationSet;
 }
