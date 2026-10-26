@@ -21,9 +21,9 @@ that disagree."*
 | Evidence schema | `recommendation-evidence-v2` → **`recommendation-evidence-v3`** (§7). v1, v2 and NULL rows stay readable and are never rewritten or reconstructed. |
 | Quality model | `recommendation-quality-v2` → **`recommendation-quality-v3`** (§6). The v2 table is frozen and wrapped, not edited. |
 | New models | `recommendation-completeness-v1`, `recommendation-contradictions-v1`. |
-| Fingerprint | Gains both model versions and a SHA-256 digest of the compared recorded values (§8). |
+| Fingerprint | Gains the completeness and contradiction model versions; no production intake-value input remains because the live registry has no comparison that consumes it (§8). |
 | UI | Evidence Mode: *What Atlas still needs* and *Conflicts to review*. Missing Information tab: *What Atlas detected* (§10). |
-| Access | Unchanged. Nothing is exposed to brokers or the public (§13). |
+| Access | Evidence remains staff-only. A new staff-only detected-item endpoint derives the narrow broker-readable workflow row server-side (§11, §13). |
 | Migrations | **None.** `evidence_json` is untyped jsonb; the existing missing-information table is reused (§15). |
 | Graph / pipeline | Unchanged: Graph off, document pipeline `legacy`. |
 
@@ -35,25 +35,25 @@ duplicate values are never persisted; shadow comparisons store counts only. The 
 own `status: "conflicting"` and `conflicts[]` carry prose, not two comparable values, and
 no review action can clear them. So on today's data model:
 
-* **Exactly one contradiction is defensible**: the submission's **intake broker email**
-  versus the **reviewed extraction's broker email**. It is a personal identifier, the
-  matcher does not consume it, and the repository already compares emails with
-  `trim().toLowerCase()` everywhere (`config.ts`, `user-directory.ts`, `oauth.ts`,
-  `dev-sign-in.ts`). Its severity is therefore **advisory**.
-* The engine, contract, normalisers, clustering, severity policy, quality linkage, UI
-  and fingerprinting are generic and fully tested against injected registries for
-  boolean, date, number, identifier, closed-enum and matcher-consumed fields — but
-  **no production field other than broker email is registered**, because registering
-  one without a second independent source would be inventing one.
+* **Production contradiction classes currently registered: NONE.** The intake
+  `atlas_submissions.broker_email` is the authenticated creator/login address, while
+  `reviewed_json.broker.email` is the intermediary or administrator address extracted
+  from documents. They are not the same semantic fact and are not compared.
+* The engine, contract, normalisers, clustering, severity policy, quality linkage and UI
+  remain generic and are fully tested against injected registries for boolean, date,
+  number, identifier, closed-enum and matcher-consumed fields.
 * Every other candidate was examined and left out for a stated reason (baseline §G):
   extracted-vs-reviewed is superseded by the explicit review mechanism; names and
   addresses have no established deterministic normaliser; `quote_terms` describe a
   different subject than `current_cover`; a "claims history available" boolean against
   a document on file would need an invented semantic mapping.
 
-This is the honest answer to *"if Atlas does NOT retain two independently comparable
-values for a field, it cannot claim a contradiction."* It is reported again under
-Known limitations.
+Atlas currently does not retain two independently comparable structured values for the
+same semantic fact. **Contradiction engine is active and deterministic, but no production
+source pair currently satisfies the independent-source semantic-equivalence contract.**
+Future coverage requires legitimate upstream second-source retention, such as
+per-document structured extraction or prior reviewed states, subject to privacy and
+retention decisions.
 
 ## 3. Phase 3 — completeness
 
@@ -135,9 +135,11 @@ insurer keeps its own state.
 
 The extraction's `field` and `reason_required` are model-written free text and are
 **never persisted**. A record becomes an item with a schema path/label only when its
-text names a known extraction field exactly (or a bare key that is unique in the schema);
-otherwise only its position (`missing_information[2]`) and priority are kept. At most 50
-are persisted; the overflow is a count.
+text resolves exactly to a known extraction field (or a bare key unique in the schema).
+Its identity and requirement reference then use that canonical path, duplicates collapse,
+and the item disappears once the current reviewed field has a meaningful value. Unknown
+prose remains a positional, non-trackable observation; it is never promoted into an
+underwriting requirement. At most 50 records are persisted; the overflow is a count.
 
 ### 3.5 Fact completeness is intentionally thin
 
@@ -171,7 +173,7 @@ Module `worker/src/contradictions.ts`.
 ### 4.2 Contract
 
 ```
-contradiction_id   ctr:<field_key>:<12 hex of SHA-256 over the sorted value digests>
+contradiction_id   ctr:<12 hex of SHA-256 over model + field + sorted source identities/pointers>
 code               conflicting_recorded_values
 field_key, field_path?, label, scope=submission
 status / resolution_state   "unresolved"
@@ -179,7 +181,7 @@ severity           material | advisory
 severity_basis     matcher_consumed_field | field_not_consumed_by_matcher
 comparison_basis   { kind, normalization, normalization_steps[] }
 affects_matcher_input, matcher_roles[]      (derived from the single FACT_FIELDS table)
-value_groups[]     ≥ 2: { value_digest, value_display, source_count, sources[] }
+value_groups[]     ≥ 2: { value_label: A|B|C|…, value_display, source_count, sources[] }
 sources[]          { source_id, source_label, pointer, field_status, confidence }
 quality_gap_id     back-reference
 ```
@@ -198,7 +200,7 @@ comparison_unavailable`), so the packet answers *what Atlas saw*.
 | enum | `enum_trim_collapse_casefold` | require text; trim; collapse whitespace runs; lower-case | non-text, > 200 chars |
 | boolean | `boolean_yes_no` | accept boolean, `1/0`, `true/false/yes/no/y/n` (trim, lower-case) → `"true" / "false"` | anything else |
 | identifier | `identifier_strip_separators_uppercase` | text or number; remove whitespace and `- _ . / \`; upper-case; 1–64 chars of `A-Z0-9` | any other character (`#`, accents…), empty, too long |
-| email | `email_trim_lowercase` | text; trim; lower-case; one `@` between a local part and a dotted domain, no spaces / `<>` / commas / semicolons | display-name forms, lists, malformed |
+| email | `email_trim_lowercase` | text; NFC; remove U+200B/U+200C/U+200D/U+2060/U+FEFF; trim; remove trailing sentence punctuation; lower-case; one `@` between a local part and a dotted domain, no spaces / `<>` / commas / semicolons | display-name forms, lists, malformed |
 | date | `date_iso_calendar` | text; trim; `YYYY-MM-DD`; a real calendar date, year ≥ 1000 | `01/05/2026` (ambiguous), datetimes, `2026-02-29` |
 | number | `number_plain_decimal` | finite number or `[+-]digits[.digits]`; drop `+`, leading and trailing zeros; `-0` = `0`; compared as **text** | currency, thousands separators, exponents |
 
@@ -207,24 +209,22 @@ threshold (a one-letter difference in an email is a contradiction — case 33).
 
 ### 4.4 Value representation and privacy
 
-Raw values are **transient**: normalised, digested, discarded. Persisted:
+Raw values are **transient**: normalised, sorted in memory, and discarded. Persisted:
 
-* a **domain-separated SHA-256 prefix** (16 hex) per value group — identity only;
+* `value_label`: deterministic ordinal `A`, `B`, `C`, … assigned from that transient
+  normalised-value ordering; the normalised value itself is not persisted to establish it;
 * `value_display`: the typed canonical value for boolean / date / number; for an `enum`
   **only** when the registry declares a `closed_vocabulary` containing it (an "enum" that
   is really free text is withheld); for a personal identifier a **mask**
   (`a•••@•••.za`: first character of the local part and the TLD; identifiers keep the
-  first character and last two). Two values that mask the same are told apart by their
-  digest reference.
+  first character and last two).
 
-A digest of a low-entropy value (an email address, a boolean) can be guessed by someone
-who can already read the packet and has a candidate list. It is persisted for **identity
-and reproducibility, not secrecy**; the control is the existing access rule (§13), which
-is why only a 64-bit prefix is stored and why nothing is ever logged.
+No value digest is persisted, returned by `GET /recommendation`, displayed as a `ref`, or
+logged. Engine-only fingerprint tests may compute a full SHA-256 over injected,
+normalised observations, but that digest never enters a contradiction value group.
 
 Not persisted anywhere: raw text, full addresses, domains, file names, snippets, URLs,
-storage paths, tokens. Nothing is logged: the only log line on this path is
-`intake_record_unavailable` with a code and a submission id.
+storage paths, tokens or contradiction value digests.
 
 ### 4.5 Source precedence and resolution
 
@@ -243,17 +243,12 @@ relational state — §15.
 
 ## 5. Where the sources come from (data flow)
 
-`handleRunRecommendation` reads, before the cache decision:
-
-1. the active insurer inventory (existing, fail-closed);
-2. **the intake record: `select("broker_email")` from `atlas_submissions`** — the pasted
-   email body is never selected. This read is **not fail-closed**: it feeds a reliance
-   signal, never a score. An unreadable record becomes `source_unavailable` in the
-   analysis and a distinct value in the fingerprint; a missing row is `not_found`.
-
-`collectObservations` turns those and the reviewed extraction into observations;
-`fingerprintObservations` digests them for the cache key; the same observations are then
-handed to the pure builder. No second read, no raw value past this boundary.
+`handleRunRecommendation` keeps its existing active-insurer, reviewed-extraction,
+trusted-document and rule reads. The broker-email intake query and its dedicated failure
+path were removed because no valid production comparison consumes them. The production
+observation set is empty and the registry is empty: Evidence v3 truthfully emits no
+comparison attempt, no contradiction, no fabricated agreement and no empty-registry
+warning. Engine tests inject observations and a registry directly into the pure engine.
 
 ## 6. Quality model v3
 
@@ -272,13 +267,13 @@ a gap is created only for what had none.
 | `insurer_appetite_data_missing` | same code |
 | `insurer_rule_match_missing` | `taxonomy_match_missing` |
 
-New gap codes (both recommendation-level, so they colour the overall state but never an
-individual insurer's):
+New gap codes (recommendation-level, so they never alter score or rank):
 
 | Code | Severity | When |
 | --- | --- | --- |
 | `extraction_reported_information_missing` | advisory | one per reported item |
 | `conflicting_recorded_values` | material when the field is consumed by the matcher, else advisory — **never a blocker** | one per contradiction |
+| `comparison_unavailable` | advisory | one per registered comparison that cannot run; links by `quality_gap_id`, carries `source_unavailable` or `unparseable_value`, and never implies disagreement |
 
 Every gap now carries `completeness_item_ids[]` and `contradiction_id`. v3 gaps for the
 v2 codes are identical, in the same order, to what the v2 builder produces for the same
@@ -297,15 +292,15 @@ v2-shaped packet.
 
 ## 8. Fingerprint and versioning
 
-New **required** inputs of `buildRecommendationFingerprint`:
-`completenessModelVersion`, `contradictionModelVersion`, `contradictionInputsDigest`;
-`evidenceSchemaVersion` and `qualityModelVersion` now carry the v3 values. The digest is
-a SHA-256 over every registered observation's field, source and **normalised** outcome
-(or why it is unparseable), its pointer, field status and confidence, and unreadable
-sources — so a cosmetic edit (case, whitespace) does not force a recompute but a real
-edit to the intake address does, which `reviewed_at` could never have caught. "Not
-found", "unreadable" and "available" are three different inputs. Reviewed state,
-trusted documents, active rules and the insurer inventory were already covered.
+New **required** inputs of `buildRecommendationFingerprint` are
+`completenessModelVersion` and `contradictionModelVersion`; `evidenceSchemaVersion` and
+`qualityModelVersion` carry the v3 values. The former production
+`contradictionInputsDigest` input was removed with the invalid intake comparison. The
+fingerprint still covers every semantic input capable of changing persisted v3 output:
+matcher/taxonomy/evidence/quality/model versions, reviewed and extraction state, trusted
+documents, active rules and the active insurer inventory. The pure engine retains a full
+SHA-256 observation fingerprint for injected engine tests and future legitimate pairs;
+it is not a production broker-email query/input and is never persisted or logged.
 
 The 32-bit FNV checksum itself is unchanged (known debt, out of scope); the new digest
 is cryptographic and feeds it as a string. `MATCHER_VERSION` is not bumped.
@@ -326,7 +321,7 @@ null vs absent; malformed values) and the 26 mutation probes in §16.
   requiring rule), and *By insurer* (worst first; complete insurers named, not listed).
   Wording keeps the rule: "Nothing is blocked or declined by this."
 * **Conflicts to review**: "Atlas found conflicting recorded values", each value group
-  (masked / typed + reference), the sources and where they recorded it, whether the
+  (masked / typed), the sources and where they recorded it, whether the
   matcher uses the field, "Unresolved", and a *How Atlas compared them* disclosure.
   Never "false information", "fraud", "misrepresentation"; never which value is right.
   When nothing could be compared it says so rather than claiming consistency.
@@ -348,9 +343,12 @@ The tab is still the one place a person acts. It now shows **What Atlas detected
 the latest recommendation and *joins* it to the tracked items: documents match on the
 matcher's canonical document key (so `Risk survey`, `risk-survey` and a derived
 `RISK SURVEY` are one item; a frontend copy of the key is checked against the worker's
-in a test), other items on type + a deterministic title. "Track this" creates an
-**ordinary** item through the existing endpoint. A tracked item shows its own status; a
-closed one reads as closed.
+in a test), other items on type + a deterministic title. "Track this" sends only the
+`detected_item_id` to `POST /api/submissions/:id/missing-info/detected`. The server loads
+that submission's latest recommendation, requires Evidence v3, finds the item, applies a
+narrow allow-list, and derives type/title/description/source/owner from safe contract
+fields. Client-supplied content and extra properties are rejected. The existing generic
+manual-add endpoint remains unchanged.
 
 Only requests a broker can act on are trackable (documents, undeclared cover sections, a
 schema-named fact). Internal limitations — a section no rule covers, rule ties, insurers
@@ -358,7 +356,9 @@ without data — are listed but never tracked, because tracked items are readabl
 broker and feed request drafts. Free-text facts are left to the existing *Derive from
 analysis* flow, which already carries their text under existing access control.
 Conflicts are pointed at, never listed or tracked here. The panel receives evidence only
-for non-brokers.
+for non-brokers. Tracking is idempotent per submission + current recommendation +
+detected item: a deterministic UUID uses the existing primary key, pre-fetch returns an
+existing row, and an insert-race fallback reads the winner. No migration is needed.
 
 ## 12. Auditability
 
@@ -371,14 +371,15 @@ randomness and no network in either module.
 
 ## 13. Access control
 
-Unchanged. `GET /recommendation` still requires `roleCanViewUnderwritingIntelligence`;
+`GET /recommendation` still requires `roleCanViewUnderwritingIntelligence`;
 brokers are denied and the loader never fetches the recommendation for them. Completeness
 and contradiction data live only in `evidence_json`, so they inherit that control. The
 contradiction `value_display` is **less** sensitive than the existing evidence excerpts
 (masked or typed; no raw text), so nothing is silently broadened. One pre-existing
 observation, not changed here: `GET /missing-info` is guarded by submission access only
 (a broker can read items on their own submission) — which is why internal limitations and
-conflicts are never written to that table.
+conflicts are never written to that table. The detected-item POST has both router and
+handler role guards; broker requests are rejected before recommendation evidence is read.
 
 ## 14. Deterministic acceptance benchmark
 
@@ -395,47 +396,32 @@ non-additive differences).
 | 25 | One insurer complete, another incomplete | pipeline | `complete` / `incomplete_material` / `incomplete_nonblocking` side by side |
 | 26 | Section with no applicable rule | pipeline | material for a viable insurer, nonblocking once ruled out |
 | 27 | Several products, no declared sections | pipeline | case-level limitation + insurer items; nothing invented |
-| 28 | Sources agree | pipeline | compared, no contradiction |
-| 29 | Sources disagree | pipeline | one cluster, masked values, advisory, unresolved; **twin-run: identical authoritative output** |
+| 28 | Empty production registry | endpoint | no comparison attempt, contradiction or fabricated agreement |
+| 29 | Empty production registry | endpoint | no invalid broker-email conflict; authoritative output unchanged |
 | 30 | Boolean contradiction | **engine** | no second boolean source exists |
 | 31 | Date contradiction | **engine** | no second date source exists; `01/05/2026` is refused, not guessed |
-| 32 | Formatting normalises equal | pipeline | whitespace + case => `agree` (engine: `ABC 123` = `abc-123`) |
-| 33 | Genuine identifier mismatch | pipeline | one-letter difference contradicts; no fuzzy tolerance |
+| 32 | Empty production registry | endpoint | production does not compare the two broker-email meanings; injected engine proves identifier formatting equality |
+| 33 | Empty production registry | endpoint | production does not compare the two broker-email meanings; injected engine proves genuine mismatch |
 | 34 | Matcher-consumed field | **engine** | material gap, linked both ways, state `caution`, never a blocker |
-| 35 | Non-matcher field | pipeline | **twin-run**: score / rank / flags / confidence / documents identical; quality unchanged |
+| 35 | Empty production registry | endpoint | no comparison is fabricated; injected engine proves advisory non-matcher behaviour and unchanged authority fields |
 | 36 | Three sources, two agree | **engine** | one cluster; A A B B is one contradiction |
 | 37 | Historical v2 | historical | no completeness / contradictions / links; v2 quality model; GET verbatim |
 | 38 | Historical v1 | historical | same |
 | 39 | NULL evidence | historical | stays NULL |
-| 40 | Privacy sentinels | pipeline | no raw / normalised sentinel anywhere; masked displays only |
+| 40 | Privacy sentinels | endpoint + injected engine | no raw/normalised value, login/intermediary email or value digest in persisted rows/evidence/audit/job writes |
 
-Cases 30, 31, 34 and 36 are **not** pipeline cases and are labelled as such: building
-them through the endpoint would require inventing a second recorded source, which the
-brief forbids. They are proven against an explicitly injected registry in
-`tests/powerhouse/contradictions.test.ts`; no production registry entry is added for them.
-Cases 28, 29, 32 and 33 are four distinct scenarios on the one real comparison.
+Cases 28, 29, 32, 33, 35 and 40 retain real endpoint coverage for the empty production
+architecture. Their comparison behaviours are additionally proved with a real engine
+fixture and explicitly injected registry. Cases 30, 31, 34 and 36 are also engine-level.
+Cases 37–39 are historical compatibility. No case fabricates a production second source.
 
 ## 15. Migration
 
 **None created.** `evidence_json` carries both analyses; the existing
-`atlas_missing_info_items` carries tracking. A persistent *reviewed / waived* decision on
-a contradiction would need new relational state. If the business wants it, this is the
-proposal for review — **not created or applied**:
-
-* **Why JSON is insufficient:** `evidence_json` is immutable per recommendation row; a
-  review decision is made later, by a person, about a contradiction that spans reruns.
-* **Table:** `atlas_contradiction_reviews(id, submission_id → atlas_submissions on delete
-  cascade, contradiction_id text, field_key text, value_digests text[], decision enum
-  ('acknowledged','corrected','waived'), note text not null, decided_by uuid, decided_at,
-  recommendation_id → atlas_recommendations on delete set null)`, unique
-  `(submission_id, contradiction_id)` so a *changed* disagreement (different digests,
-  different id) is a new, unreviewed one.
-* **RLS:** select/insert for roles with `roleCanViewUnderwritingIntelligence` on submissions
-  they can access; **no broker policy**; no update/delete (append-only history).
-* **Retention / privacy:** digests and the free-text `note` only — no values; note length
-  capped and excluded from logs; follows the submission's retention.
-* **Shape:** one additive migration, one `POST /api/submissions/:id/contradictions/:cid/review`
-  endpoint, and a read join in `handleGetRecommendation` for staff only.
+`atlas_missing_info_items` carries tracking. The existing UUID primary key provides the
+detected-item idempotency boundary. Persistent contradiction review/waiver/resolution is
+a future workflow and governance decision; no table, migration or endpoint for it was
+created in this remediation.
 
 ## 16. Verification record
 
@@ -443,13 +429,13 @@ Run on the final head (nothing pushed, migrated or deployed).
 
 | Check | Result |
 | --- | --- |
-| Backend, every script in `npm test` (45; compiled once, same node commands) | all 45 exit 0, 0 failures |
-| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, persistence, remediation, differential, Phase 1A differential) | pass; 264 assertions counted |
+| Backend, every script in `npm test` | complete chain exit 0, 0 failures |
+| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 28/28, tracking 9/9, persistence 35/35 |
 | Matcher differential vs the frozen production v1 matcher (3,000 fixtures per corpus) | **0 unexpected authoritative differences**; 0 category violations; 0 order-invariance failures |
 | Phase 1A 500-fixture differential | unchanged pinned hash `b14d9927…a36` |
 | Phase 1A evidence (32) / handler (3) / Phase 24 clean-only trust (47) | pass |
-| Existing expected files (cases 1-21) vs `HEAD` | only the evidence-schema value and the new fields changed — 0 non-additive differences |
-| Mutation probes (`npm run test:powerhouse-mutations`) | **28/28 killed** (the 14 named in the brief plus 14 more) |
+| Evidence-v2 immutability corpus | pass; shared v2 semantics unchanged |
+| Mutation probes (`npm run test:powerhouse-mutations`) | **30/30 killed**, including invalid live broker-email registry, detected-item allow-list removal and idempotency removal |
 | Frontend vitest | 894 tests in 40 files, 0 failures (was 783) |
 | Frontend `tsc -b` + production build | pass |
 | Worker `tsc --noEmit` | pass |
@@ -490,16 +476,17 @@ matrices, and the evidence packet is already ~10 MB at 400 insurers × 16 rules;
 4. **Review / waiver of a contradiction**: do you want a persistent record (§15)?
 5. **Should an `incomplete_material` recommendation ever require sign-off?** Today it only
    informs, as with the Batch 2 quality gate.
-6. **Whether to retain the broker-email comparison**: it is advisory and the intake value
-   for broker submissions is the authenticated login email, so a mismatch with the
-   document's address is common and often benign.
+6. **Which legitimate second sources may be retained:** per-document structured values
+   or prior reviewed states require an explicit purpose, access and retention decision
+   before any production registry entry is enabled.
 7. Still open from Batch 2: multi-section aggregation, the rule-tie policy, who may see
    rule source excerpts.
 
 ## 18. Known limitations
 
-* One production contradiction (§2). The model does not retain per-document values, so
-  most disagreements cannot be detected until it does.
+* Zero production comparison pairs (§2). The model does not retain two independent,
+  semantically equivalent values, so production contradictions cannot be detected until
+  a legitimate second source is retained.
 * `status: "conflicting"` / `conflicts[]` written by the extraction model are not shown as
   contradictions: they are a model verdict, Atlas keeps neither value, and no review
   action can clear them (the review UI edits `value` only). The existing *Conflicting*

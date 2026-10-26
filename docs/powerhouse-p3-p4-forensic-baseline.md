@@ -1,6 +1,9 @@
 # Powerhouse Batch B — Checkpoint A: forensic baseline (Phase 3 + Phase 4)
 
-Recorded against `main` @ `1d56fbb` (Batch 2 production-accepted). Matcher
+Recorded against `main` @ `1d56fbb` (Batch 2 production-accepted). This is a historical
+pre-change checkpoint. The remediation review later invalidated its broker-email
+semantic-equivalence conclusion; the corrected production decision is recorded in the
+Batch B implementation document. Matcher
 `2026-10-section-evaluation-v2`, taxonomy `2026-07-token-aliases-v1`, evidence
 `recommendation-evidence-v2`, quality `recommendation-quality-v2`, document pipeline
 `legacy`, Graph off.
@@ -143,11 +146,10 @@ Candidate pairs examined, and why each is in or out:
 | `quote_terms.insured_name` / `atlas_submissions.client_name` vs `extracted_client.name`; `broker_name` vs `broker.name` | same subject | Names: no established normaliser (legal suffixes, initials, trading-as). Out; **business decision needed** to enable. |
 | `quote_terms.sections[]` duplicate keys with different sums/premiums | same JSON | Two entries with one section key can be two legitimate risks. Not provably the same fact. Out. |
 | `claims_history_available` (boolean) vs a "Claims history" document on file | different kinds of evidence | Would need an invented semantic mapping (`document_type` is a free label). Out. |
-| **`atlas_submissions.broker_email` (intake) vs `reviewed_json.broker.email`** | **yes — two independently recorded values for one identifier.** Intake is entered by a person or taken from the authenticated broker's login; the extracted value comes from the documents. | **In.** Email identifiers are already compared with `trim().toLowerCase()` throughout the repo (`config.ts`, `user-directory.ts`, `oauth.ts`, `dev-sign-in.ts`). |
+| `atlas_submissions.broker_email` (intake) vs `reviewed_json.broker.email` | two retained values, but **not the same semantic fact**: creator/login address versus intermediary/administrator address in the documents | **Out after independent review.** They must not be compared. |
 | extraction `status: "conflicting"` / `conflicts[]` | one value (or none) + LLM prose | Out as contradictions (an LLM verdict; unclearable). Left to the existing "Conflicting" confidence band. Reported as a limitation. |
 
-So **exactly one** comparison is defensible on today's data model, and it concerns a
-field the matcher does **not** consume (advisory by the severity policy). The
+So **no production comparison** is defensible on today's data model. The
 benchmark cases that need a boolean, date, number or matcher-consumed contradiction
 (30, 31, 34) cannot be built from a real second source without inventing one; they
 are proven at **engine level with an injected registry** and omitted from the
@@ -184,14 +186,13 @@ authoritative record already says is outstanding: the extraction's own
 2. Tracked items cannot be tied to a detected gap except by title; the `rule` source
    enum value is unused; generation requires a quote review.
 3. Fact-level "required" is unestablished in the repository. Do not invent it.
-4. Atlas does not retain two comparable values for almost any field. One
-   intake-vs-document identifier pair exists. The honest deliverable is a small
+4. Atlas does not retain two independently comparable values for the same semantic fact.
+   The honest deliverable is a small
    conservative engine + registry + a precise limitation statement, not a contradiction
    feed.
 5. A resolved conflict marker is indistinguishable from an unresolved one, so markers
    must not be presented as unresolved contradictions.
-6. The fingerprint does not see two things that can change completeness/contradiction
-   output: the **intake values** (`atlas_submissions.broker_email`) and the analysis
-   **model versions**. Reviewed state (`extraction_id` + `reviewed_at`, which also
+6. The fingerprint did not see the new analysis **model versions**. The broker-login
+   intake value must not become a contradiction input. Reviewed state (`extraction_id` + `reviewed_at`, which also
    covers `missing_information[]`), trusted documents, active rules and the insurer
    inventory are already fingerprinted.

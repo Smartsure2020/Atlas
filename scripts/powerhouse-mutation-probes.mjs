@@ -38,6 +38,7 @@ const SUITES = {
   acceptance: { kind: "node", file: ".test-dist/tests/powerhouse/acceptance.test.js" },
   completeness: { kind: "node", file: ".test-dist/tests/powerhouse/completeness.test.js" },
   contradictions: { kind: "node", file: ".test-dist/tests/powerhouse/contradictions.test.js" },
+  "detected-tracking": { kind: "node", file: ".test-dist/tests/powerhouse/detected-missing-info.test.js" },
   persistence: { kind: "node", file: ".test-dist/tests/powerhouse/persistence.test.js" },
   "evidence-v2": { kind: "node", file: ".test-dist/tests/powerhouse/evidence-v2.test.js" },
   "quality-gate": { kind: "node", file: ".test-dist/tests/powerhouse/quality-gate.test.js" },
@@ -67,7 +68,7 @@ const PROBES = [
   {
     id: "P03", brief: "contradiction normalisation removed (email case-fold)",
     file: "worker/src/contradictions.ts",
-    edits: [["      const value = raw.trim().toLowerCase();\n      if (value.length > 254)", "      const value = raw.trim();\n      if (value.length > 254)"]],
+    edits: [["        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase();", "        .replace(/[.,;:!?]+$/g, \"\");"]],
     suites: ["contradictions", "acceptance"],
   },
   {
@@ -101,9 +102,9 @@ const PROBES = [
     suites: ["contradictions"],
   },
   {
-    id: "P08", brief: "a contradiction changes a score",
+    id: "P08", brief: "a downstream completeness analysis changes a matcher score",
     file: "worker/src/recommendation-evidence-v3.ts",
-    edits: [["return { ...outcome, quality: insurerState };", "return { ...outcome, score: outcome.score - assessed.contradictions.contradiction_count, quality: insurerState };"]],
+    edits: [["return { ...outcome, quality: insurerState };", "return { ...outcome, score: outcome.score - assessed.completeness.item_count, quality: insurerState };"]],
     suites: ["acceptance", "completeness"],
   },
   {
@@ -131,7 +132,7 @@ const PROBES = [
     id: "P12", brief: "a raw privacy sentinel is copied into the evidence (extraction free text)",
     file: "worker/src/completeness.ts",
     edits: [
-      ["      field_path: resolveSchemaPath(field),", "      field_path: resolveSchemaPath(field),\n      text: field,"],
+      ["      field_path: fieldPath,", "      field_path: fieldPath,\n      text: field,"],
       ["label: record.field_path ? schemaFieldLabel(record.field_path) : null,", "label: (record as { text?: string }).text ?? null,"],
     ],
     suites: ["completeness", "acceptance"],
@@ -154,18 +155,12 @@ const PROBES = [
     edits: [["    contradiction_model_version: input.contradictionModelVersion,\n", ""]],
     suites: ["persistence"],
   },
-  {
-    id: "P14c", brief: "fingerprint: the compared recorded values removed",
-    file: "worker/src/phase7-core.ts",
-    edits: [["    contradiction_inputs: input.contradictionInputsDigest,\n", ""]],
-    suites: ["persistence"],
-  },
   // ---- Further plausible bugs ----------------------------------------------------------------
   {
-    id: "P15", brief: "the intake read also selects the pasted broker email body",
-    file: "worker/src/recommendation-endpoints.ts",
-    edits: [[".select(\"broker_email\")", ".select(\"broker_email, broker_email_body\")"]],
-    suites: ["persistence"],
+    id: "P15", brief: "the invalid broker-email production registry is restored",
+    file: "worker/src/contradictions.ts",
+    edits: [["export const COMPARABLE_FIELDS: readonly ComparableFieldSpec[] = [];", "export const COMPARABLE_FIELDS: readonly ComparableFieldSpec[] = [{ field_key: \"broker.email\", label: \"Broker email address\", normalizer: \"email_trim_lowercase\", sensitivity: \"personal_identifier\", field_path: \"broker.email\", sources: [{ source_id: SOURCE_INTAKE_FORM, label: \"Submission intake\", read: intakeColumnSource(\"broker_email\") }, { source_id: SOURCE_REVIEWED_EXTRACTION, label: \"Reviewed extraction\", read: reviewedFieldSource(\"broker\", \"email\") }] }];"]],
+    suites: ["contradictions", "acceptance"],
   },
   {
     id: "P16", brief: "personal identifiers are displayed unmasked",
@@ -180,10 +175,10 @@ const PROBES = [
     suites: ["contradictions"],
   },
   {
-    id: "P18", brief: "an unreadable intake record fails the whole recommendation",
-    file: "worker/src/recommendation-endpoints.ts",
-    edits: [["    intake = { status: \"unavailable\" };", "    return json({ error: \"intake_unavailable\" }, 503);"]],
-    suites: ["persistence"],
+    id: "P18", brief: "a stale extraction-reported field survives a completed review",
+    file: "worker/src/completeness.ts",
+    edits: [["if (reviewedFieldIsPresent(reviewed, fieldPath) || resolved.has(fieldPath)) return;", "if (resolved.has(fieldPath)) return;"]],
+    suites: ["completeness"],
   },
   {
     id: "P19", brief: "a wholly unevidenced insurer is no longer material",
@@ -233,6 +228,24 @@ const PROBES = [
     edits: [["if (typeof field !== \"string\" || field.trim() === \"\") return;", "if (typeof field !== \"string\") return;"]],
     suites: ["completeness"],
   },
+  {
+    id: "P27", brief: "persisted value digests are restored",
+    file: "worker/src/contradictions.ts",
+    edits: [["            value_label: ordinalLabel(index),", "            value_digest: sha256Hex(normalized).slice(0, 16),\n            value_label: ordinalLabel(index),"]],
+    suites: ["contradictions", "persistence"],
+  },
+  {
+    id: "P28", brief: "the server-side detected-item allow-list is removed",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["\n  return null;\n}\n\n/**\n * Existing UUID primary key", "\n  return { item_type: \"underwriting_info\", title: \"Internal item\", description: \"Internal diagnostic data\", section_key: null, source: \"quote_review\", owner: \"broker\" };\n}\n\n/**\n * Existing UUID primary key"]],
+    suites: ["detected-tracking"],
+  },
+  {
+    id: "P29", brief: "detected-item idempotency is removed",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["const hex = sha256Hex(`atlas-detected-missing-info-v1\\u0000${submissionId}\\u0000${recommendationId}\\u0000${detectedItemId}`);", "const hex = sha256Hex(`atlas-detected-missing-info-v1\\u0000${submissionId}\\u0000${recommendationId}\\u0000${detectedItemId}\\u0000${Math.random()}`);"]],
+    suites: ["detected-tracking"],
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -264,10 +277,11 @@ function applyEdits(original, edits, id) {
 
 function run(suiteName) {
   const suite = SUITES[suiteName];
+  const vitest = path.join(ROOT, "node_modules", ".bin", process.platform === "win32" ? "vitest.cmd" : "vitest");
   const result =
     suite.kind === "node"
       ? spawnSync(process.execPath, ["--import", REGISTER, suite.file], { cwd: ROOT, encoding: "utf8", timeout: 600_000 })
-      : spawnSync(process.platform === "win32" ? "npx.cmd" : "npx", ["vitest", "run", suite.file], { cwd: ROOT, encoding: "utf8", timeout: 600_000, shell: process.platform === "win32" });
+      : spawnSync(vitest, ["run", suite.file], { cwd: ROOT, encoding: "utf8", timeout: 600_000, shell: process.platform === "win32" });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   const failed = result.status !== 0 || /^not ok/m.test(output);
   return { failed, output };
