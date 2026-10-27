@@ -39,6 +39,7 @@ const SUITES = {
   completeness: { kind: "node", file: ".test-dist/tests/powerhouse/completeness.test.js" },
   contradictions: { kind: "node", file: ".test-dist/tests/powerhouse/contradictions.test.js" },
   "detected-tracking": { kind: "node", file: ".test-dist/tests/powerhouse/detected-missing-info.test.js" },
+  "missing-info-interoperability": { kind: "node", file: ".test-dist/tests/powerhouse/missing-info-interoperability.test.js" },
   persistence: { kind: "node", file: ".test-dist/tests/powerhouse/persistence.test.js" },
   "evidence-v2": { kind: "node", file: ".test-dist/tests/powerhouse/evidence-v2.test.js" },
   "quality-gate": { kind: "node", file: ".test-dist/tests/powerhouse/quality-gate.test.js" },
@@ -237,7 +238,7 @@ const PROBES = [
   {
     id: "P28", brief: "the server-side detected-item allow-list is removed",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["\n  return null;\n}\n\n/** Mirrors the workbench's logical tracking join", "\n  return { item_type: \"underwriting_info\", title: \"Internal item\", description: \"Internal diagnostic data\", section_key: null, source: \"quote_review\", owner: \"broker\" };\n}\n\n/** Mirrors the workbench's logical tracking join"]],
+    edits: [["\n  return null;\n}\n\nfunction exactPart", "\n  return { item_type: \"underwriting_info\", title: \"Internal item\", description: \"Internal diagnostic data\", section_key: null, source: \"quote_review\", owner: \"broker\" };\n}\n\nfunction exactPart"]],
     suites: ["detected-tracking"],
   },
   {
@@ -253,10 +254,10 @@ const PROBES = [
     suites: ["detected-tracking"],
   },
   {
-    id: "P31", brief: "closed missing-info rows stop counting as logical duplicates",
+    id: "P31", brief: "waived missing-info rows stop counting as logical duplicates",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["if (typeof item.id !== \"string\" || item.item_type !== candidate.item_type || typeof item.title !== \"string\") return false;", "if (typeof item.id !== \"string\" || item.item_type !== candidate.item_type || typeof item.title !== \"string\" || (item as { status?: unknown }).status === \"closed\") return false;"]],
-    suites: ["detected-tracking"],
+    edits: [["return items.find((item) => typeof item.id === \"string\" && missingInfoLogicalKey(item) === candidateKey) ?? null;", "return items.find((item) => typeof item.id === \"string\" && (item as { status?: unknown }).status !== \"waived\" && missingInfoLogicalKey(item) === candidateKey) ?? null;"]],
+    suites: ["missing-info-interoperability"],
   },
   {
     id: "P32", brief: "detected tracking selects the oldest recommendation",
@@ -311,6 +312,72 @@ const PROBES = [
     file: "worker/src/contradictions.ts",
     edits: [["        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase();", "        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase()\n        .replace(/['-]/g, \"\");"]],
     suites: ["contradictions"],
+  },
+  {
+    id: "P41", brief: "Derive stops consulting the shared logical identity matcher",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["if (findExistingLogicalMissingInfo(known, item)) continue;", "if (false && findExistingLogicalMissingInfo(known, item)) continue;"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P42", brief: "Track stops consulting the shared logical identity matcher",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["if (logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });", "if (false && logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P43", brief: "document identity stops using the canonical document key",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["if (itemType === \"document\") return `document|${documentKey(title)}`;", "if (itemType === \"document\") return `document|${title}`;"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P44", brief: "friendly and raw fact titles stop resolving to the same schema path",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [[": resolveSchemaFieldIdentity(title);", ": resolveSchemaPath(title);"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P45", brief: "received rows stop counting as logical duplicates",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return items.find((item) => typeof item.id === \"string\" && missingInfoLogicalKey(item) === candidateKey) ?? null;", "return items.find((item) => typeof item.id === \"string\" && (item as { status?: unknown }).status !== \"received\" && missingInfoLogicalKey(item) === candidateKey) ?? null;"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P46", brief: "not-required rows stop counting as logical duplicates",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return items.find((item) => typeof item.id === \"string\" && missingInfoLogicalKey(item) === candidateKey) ?? null;", "return items.find((item) => typeof item.id === \"string\" && (item as { status?: unknown }).status !== \"not_required\" && missingInfoLogicalKey(item) === candidateKey) ?? null;"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P47", brief: "Derive inserts after its logical-item lookup fails",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["if (existingError) return json({ error: \"fetch_failed\" }, 500);", "if (false && existingError) return json({ error: \"fetch_failed\" }, 500);"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P48", brief: "Track inserts after its logical-item lookup fails",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["if (submissionItemsError) return json({ error: \"fetch_failed\" }, 500);", "if (false && submissionItemsError) return json({ error: \"fetch_failed\" }, 500);"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P49", brief: "logical duplicate lookup loses deterministic created-at/id ordering",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["    .order(\"created_at\", { ascending: true })\n    .order(\"id\", { ascending: true });", ";", 2]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P50", brief: "unknown free-text facts are fuzzily merged",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return typeof value === \"string\" ? value.toLowerCase() : \"\";", "return typeof value === \"string\" ? value.toLowerCase().replace(/[^a-z0-9]/g, \"\") : \"\";"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P51", brief: "Derive no longer deduplicates two generated aliases within one batch",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["known.push({ id: `pending-${rows.length}`, ...row });", "// pending rows omitted"]],
+    suites: ["missing-info-interoperability"],
   },
 ];
 

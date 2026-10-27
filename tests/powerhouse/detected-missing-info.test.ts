@@ -142,8 +142,8 @@ test("B. eight equivalent concurrent requests converge on one row", async () => 
   } finally { stub.restore(); }
 });
 
-for (const status of ["open", "requested", "closed"] as const) {
-  test(`${status === "open" ? "C/D" : status === "requested" ? "E" : "F"}. a ${status} logical item from an earlier recommendation is returned without insert`, async () => {
+for (const status of ["open", "requested", "received", "waived", "not_required"] as const) {
+  test(`C-F. a ${status} logical item from an earlier recommendation is returned without insert`, async () => {
     const item = doc();
     const existing = { id: `existing-${status}`, submission_id: SUB, item_type: "document", title: "RISK-SURVEY", status };
     const seed = baseSeed([item], [existing], REC2);

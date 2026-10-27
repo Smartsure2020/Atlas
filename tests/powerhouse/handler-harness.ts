@@ -107,17 +107,16 @@ export function installRestStub(
       return response(rows);
     }
 
-    if (wantsRepresentation) {
-      const inserted = Array.isArray(body) ? body[0] : body;
-      const row = { id: `stub-${table}`, ...(inserted as Row) };
-      if (method === "POST") {
-        const rows = seed[table] ?? (seed[table] = []);
-        if (rows.some((existing) => existing.id === row.id)) {
-          return response({ code: "23505", message: "duplicate key" }, 409);
-        }
-        rows.push(row);
+    if (method === "POST") {
+      const stored = seed[table] ?? (seed[table] = []);
+      const inputs = (Array.isArray(body) ? body : [body]) as Row[];
+      const inserted = inputs.map((inputRow, index) => ({ id: `stub-${table}-${stored.length + index + 1}`, ...inputRow }));
+      if (inserted.some((row) => stored.some((existing) => existing.id === row.id))) {
+        return response({ code: "23505", message: "duplicate key" }, 409);
       }
-      return wantsObject ? response(row, 201) : response([row], 201);
+      stored.push(...inserted);
+      if (wantsRepresentation) return wantsObject ? response(inserted[0], 201) : response(inserted, 201);
+      return new Response(null, { status: 201 });
     }
     return new Response(null, { status: 204 });
   }) as typeof fetch;

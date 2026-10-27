@@ -168,18 +168,32 @@ export interface ReportedMissingRecord {
 
 const SCHEMA_PATHS: Map<string, string> = new Map();
 const SCHEMA_KEY_PATHS: Map<string, string | null> = new Map();
+const SCHEMA_LABEL_PATHS: Map<string, string | null> = new Map();
+function labelForSchemaPath(path: string): string {
+  const key = path.slice(path.indexOf(".") + 1);
+  const words = key.split("_").filter(Boolean).map((word) => (word === "id" ? "ID" : word));
+  const sentence = words.join(" ");
+  return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+}
 for (const [section, fields] of Object.entries(SECTION_FIELDS)) {
   for (const { field } of fields) {
     const path = `${section}.${field}`;
     SCHEMA_PATHS.set(path.toLowerCase(), path);
     // A bare key resolves only if it names exactly ONE field in the whole schema.
     SCHEMA_KEY_PATHS.set(field.toLowerCase(), SCHEMA_KEY_PATHS.has(field.toLowerCase()) ? null : path);
+    const label = labelForSchemaPath(path).toLowerCase();
+    SCHEMA_LABEL_PATHS.set(label, SCHEMA_LABEL_PATHS.has(label) ? null : path);
   }
 }
 
 export function resolveSchemaPath(text: string): string | null {
   const key = text.trim().toLowerCase();
   return SCHEMA_PATHS.get(key) ?? SCHEMA_KEY_PATHS.get(key) ?? null;
+}
+
+/** Exact registry identity for either a stored schema key/path or Atlas's own generated label. */
+export function resolveSchemaFieldIdentity(text: string): string | null {
+  return resolveSchemaPath(text) ?? SCHEMA_LABEL_PATHS.get(text.trim().toLowerCase()) ?? null;
 }
 
 function reviewedFieldIsPresent(reviewed: Record<string, unknown>, path: string): boolean {
@@ -197,10 +211,7 @@ function reviewedFieldIsPresent(reviewed: Record<string, unknown>, path: string)
 
 /** "registration_or_id_number" -> "Registration or ID number". Derived from the schema key only. */
 export function schemaFieldLabel(path: string): string {
-  const key = path.slice(path.indexOf(".") + 1);
-  const words = key.split("_").filter(Boolean).map((word) => (word === "id" ? "ID" : word));
-  const sentence = words.join(" ");
-  return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+  return labelForSchemaPath(path);
 }
 
 export function readExtractionReportedMissing(reviewed: Record<string, unknown>): {

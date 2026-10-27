@@ -8,7 +8,7 @@
 
 import { sha256Hex } from "./digest.js";
 import { documentKey } from "./matcher.js";
-import { resolveSchemaPath, schemaFieldLabel, type CompletenessItem } from "./completeness.js";
+import { resolveSchemaFieldIdentity, resolveSchemaPath, schemaFieldLabel, type CompletenessItem } from "./completeness.js";
 
 export interface DetectedMissingInfoRow {
   item_type: "document" | "underwriting_info";
@@ -19,10 +19,12 @@ export interface DetectedMissingInfoRow {
   owner: "broker";
 }
 
-export interface ExistingMissingInfoIdentity {
+export interface MissingInfoLogicalCandidate {
   id: unknown;
   item_type: unknown;
   title: unknown;
+  description?: unknown;
+  section_key?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -84,16 +86,48 @@ export function deriveDetectedMissingInfo(item: unknown): DetectedMissingInfoRow
   return null;
 }
 
-/** Mirrors the workbench's logical tracking join without using mutable status. */
+function exactPart(value: unknown): string {
+  return typeof value === "string" ? value.toLowerCase() : "";
+}
+
+/**
+ * One shared identity for Track and Derive. Unknown/free-text rows retain the
+ * former exact Derive tuple; only registry-resolved facts gain a canonical key.
+ */
+export function missingInfoLogicalKey(
+  candidate: Omit<MissingInfoLogicalCandidate, "id">,
+  structuredFactPath?: string | null
+): string {
+  const itemType = typeof candidate.item_type === "string" ? candidate.item_type : "";
+  const title = typeof candidate.title === "string" ? candidate.title : "";
+  if (itemType === "document") return `document|${documentKey(title)}`;
+
+  if (itemType === "underwriting_info") {
+    const factPath = structuredFactPath
+      ? resolveSchemaPath(structuredFactPath)
+      : resolveSchemaFieldIdentity(title);
+    if (factPath) return `fact|${factPath}`;
+    // The only non-fact completeness item Track approves today.
+    if (title === "Cover sections required") return "underwriting_info|cover_sections_required";
+  }
+
+  return [
+    "exact",
+    exactPart(candidate.section_key),
+    itemType,
+    exactPart(candidate.title),
+    exactPart(candidate.description),
+  ].join("|");
+}
+
+/** Mirrors the workbench join for supported structured requirements, status-blind. */
 export function findExistingLogicalMissingInfo(
-  items: readonly ExistingMissingInfoIdentity[],
-  candidate: DetectedMissingInfoRow
-): ExistingMissingInfoIdentity | null {
-  return items.find((item) => {
-    if (typeof item.id !== "string" || item.item_type !== candidate.item_type || typeof item.title !== "string") return false;
-    if (candidate.item_type === "document") return documentKey(item.title) === documentKey(candidate.title);
-    return item.title === candidate.title;
-  }) ?? null;
+  items: readonly MissingInfoLogicalCandidate[],
+  candidate: Omit<MissingInfoLogicalCandidate, "id">,
+  structuredFactPath?: string | null
+): MissingInfoLogicalCandidate | null {
+  const candidateKey = missingInfoLogicalKey(candidate, structuredFactPath);
+  return items.find((item) => typeof item.id === "string" && missingInfoLogicalKey(item) === candidateKey) ?? null;
 }
 
 /**

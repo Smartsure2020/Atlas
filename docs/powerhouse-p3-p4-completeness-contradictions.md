@@ -340,10 +340,13 @@ null vs absent; malformed values) and the mutation probes in §16.
 ## 11. Missing Information integration — one source of truth
 
 The tab is still the one place a person acts. It now shows **What Atlas detected** from
-the latest recommendation and *joins* it to the tracked items: documents match on the
+the latest recommendation and *joins* it to the tracked items. Documents match on the
 matcher's canonical document key (so `Risk survey`, `risk-survey` and a derived
 `RISK SURVEY` are one item; a frontend copy of the key is checked against the worker's
-in a test), other items on type + a deterministic title. "Track this" sends only the
+in a test). Schema-backed facts match on their exact canonical schema path, whether the
+stored title is Derive's raw key (`registration_or_id_number`) or Track's generated label
+(`Registration or ID number`). Unknown free text keeps the previous exact tuple and is
+never guessed or fuzzily joined. "Track this" sends only the
 `detected_item_id` to `POST /api/submissions/:id/missing-info/detected`. The server loads
 that submission's latest recommendation, requires Evidence v3, finds the item, applies a
 narrow allow-list, and derives type/title/description/source/owner from safe contract
@@ -356,12 +359,13 @@ without data — are listed but never tracked, because tracked items are readabl
 broker and feed request drafts. Free-text facts are left to the existing *Derive from
 analysis* flow, which already carries their text under existing access control.
 Conflicts are pointed at, never listed or tracked here. The panel receives evidence only
-for non-brokers. Before inserting, the server checks every tracked item for the submission
-using the same join as the workbench: canonical document key for documents, exact type +
-deterministic title for the other approved classes. Any status, including closed, counts
-as already tracked and is returned unchanged. A deterministic UUID scoped to submission +
-current recommendation + detected item remains the concurrent-insert backstop. No
-migration is needed.
+for non-brokers. Track and *Derive from analysis* call one server-side logical matcher
+before inserting. Every real status (`open`, `requested`, `received`, `waived`,
+`not_required`) counts as already tracked and is returned unchanged. Equivalent legacy
+rows are selected deterministically by oldest `created_at`, then lowest `id`; a failed
+lookup fails closed and performs no insert. Track's deterministic UUID, scoped to
+submission + current recommendation + detected item, remains the concurrent same-
+recommendation insert backstop. No migration is needed.
 
 ## 12. Auditability
 
@@ -421,11 +425,12 @@ Cases 37–39 are historical compatibility. No case fabricates a production seco
 ## 15. Migration
 
 **None created.** `evidence_json` carries both analyses; the existing
-`atlas_missing_info_items` carries tracking. Its existing type/title fields provide the
-cross-recommendation logical join, while the UUID primary key provides the same-
-recommendation concurrency boundary. Persistent contradiction review/waiver/resolution is
-a future workflow and governance decision; no table, migration or endpoint for it was
-created in this remediation.
+`atlas_missing_info_items` carries tracking. Its existing fields are interpreted through
+the shared document/schema/exact identity matcher for cross-entry-point and cross-
+recommendation joins, while Track's UUID primary key provides its same-recommendation
+concurrency boundary. Persistent contradiction review/waiver/resolution is a future
+workflow and governance decision; no table, migration or endpoint for it was created in
+this remediation.
 
 ## 16. Verification record
 
@@ -434,12 +439,12 @@ Run on the final head (nothing pushed, migrated or deployed).
 | Check | Result |
 | --- | --- |
 | Backend, every script in `npm test` | complete chain exit 0, 0 failures |
-| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 29/29, tracking 20/20, persistence 36/36 |
+| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, missing-info interoperability, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 29/29, tracking 22/22, interoperability 10/10, persistence 36/36 |
 | Matcher differential vs the frozen production v1 matcher (3,000 fixtures per corpus) | **0 unexpected authoritative differences**; 0 category violations; 0 order-invariance failures |
 | Phase 1A 500-fixture differential | unchanged pinned hash `b14d9927…a36` |
 | Phase 1A evidence (32) / handler (3) / Phase 24 clean-only trust (47) | pass |
 | Evidence-v2 immutability corpus | pass; shared v2 semantics unchanged |
-| Mutation probes (`npm run test:powerhouse-mutations`) | **41/41 killed**, including cross-rerun/closed-item dedupe, latest-recommendation ordering, detected-item identity, value-presence and email-character pins, invalid live broker-email registry, persisted value digest and allow-list bypass |
+| Mutation probes (`npm run test:powerhouse-mutations`) | **52/52 killed**, including bidirectional Track/Derive document and fact matching, all real-status semantics, lookup failure, deterministic ordering, no fuzzy matching, latest-recommendation ordering, detected-item identity, value-presence and email-character pins, invalid live broker-email registry, persisted value digest and allow-list bypass |
 | Frontend vitest | 894 tests in 40 files, 0 failures (was 783) |
 | Frontend `tsc -b` + production build | pass |
 | Worker `tsc --noEmit` | pass |
@@ -506,3 +511,14 @@ matrices, and the evidence packet is already ~10 MB at 400 insurers × 16 rules;
   `risk survey` in one insurer's rules are two matcher outcomes and one completeness item.
 * The fingerprint remains a 32-bit checksum.
 * Reviewed-fact page / quote provenance does not exist upstream (unchanged).
+* Existing duplicate missing-information rows are not merged or deleted. When they exist,
+  Track returns the oldest row, breaking equal timestamps by the lowest id.
+* A missing-information row stores a document title, not a separate canonical document
+  identity. Two genuinely different document requirements with the same persisted
+  canonical title therefore cannot be distinguished without a schema change.
+* The table has no persisted canonical logical key or uniqueness constraint. Two truly
+  concurrent *Derive from analysis* requests can therefore both pass the read-before-
+  insert check; eliminating that theoretical race requires a migration. Track retains its
+  deterministic-ID backstop for concurrent repeats of the same detected item.
+* A deliberately repeated request after `waived` or `not_required` still reuses the
+  existing row. A reopen/new-request policy is a separate workflow decision.

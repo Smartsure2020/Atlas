@@ -19,7 +19,7 @@ import {
   type CommunicationType,
 } from "./phase4-workflow";
 import { roleCanViewManagerDashboard, roleCanViewUnderwritingIntelligence, roleCanWrite } from "./phase6-hardening";
-import { detectedMissingInfoId, findExistingLogicalMissingInfo, findTrackableCompletenessItem } from "./detected-missing-info";
+import { detectedMissingInfoId, findExistingLogicalMissingInfo, findTrackableCompletenessItem, type MissingInfoLogicalCandidate } from "./detected-missing-info";
 
 async function latestReview(admin: ReturnType<typeof adminClient>, submissionId: string) {
   const { data } = await admin
@@ -65,17 +65,21 @@ export async function handleGenerateMissingInfo(submissionId: string, env: Env, 
     extractionMissing: snapshot?.reviewed_json?.missing_information ?? [],
   });
 
-  const { data: existing } = await admin
+  const { data: existing, error: existingError } = await admin
     .from("atlas_missing_info_items")
-    .select("section_key, item_type, title, description")
-    .eq("submission_id", submissionId);
-  const existingKeys = new Set(
-    ((existing ?? []) as Record<string, unknown>[])
-      .map((i) => `${i.section_key ?? ""}|${i.item_type}|${i.title}|${i.description ?? ""}`.toLowerCase())
-  );
-  const rows = generated
-    .filter((i) => !existingKeys.has(`${i.section_key ?? ""}|${i.item_type}|${i.title}|${i.description ?? ""}`.toLowerCase()))
-    .map((i) => ({ ...i, submission_id: submissionId, created_by: user.id }));
+    .select("id, section_key, item_type, title, description, status, created_at")
+    .eq("submission_id", submissionId)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+  if (existingError) return json({ error: "fetch_failed" }, 500);
+  const known = [...(existing ?? [])] as MissingInfoLogicalCandidate[];
+  const rows: Record<string, unknown>[] = [];
+  for (const item of generated) {
+    if (findExistingLogicalMissingInfo(known, item)) continue;
+    const row = { ...item, submission_id: submissionId, created_by: user.id };
+    rows.push(row);
+    known.push({ id: `pending-${rows.length}`, ...row });
+  }
 
   if (rows.length > 0) {
     const { error } = await admin.from("atlas_missing_info_items").insert(rows);
@@ -163,10 +167,16 @@ export async function handleTrackDetectedMissingInfo(submissionId: string, reque
 
   const { data: submissionItems, error: submissionItemsError } = await admin
     .from("atlas_missing_info_items")
-    .select("id, item_type, title, status")
-    .eq("submission_id", submissionId);
+    .select("id, section_key, item_type, title, description, status, created_at")
+    .eq("submission_id", submissionId)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
   if (submissionItemsError) return json({ error: "fetch_failed" }, 500);
-  const logicalExisting = findExistingLogicalMissingInfo(submissionItems ?? [], detected.row);
+  const logicalExisting = findExistingLogicalMissingInfo(
+    submissionItems ?? [],
+    detected.row,
+    detected.item.code === "extraction_reported_information_missing" ? detected.item.field_path : null
+  );
   if (logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });
 
   const id = detectedMissingInfoId(submissionId, String(recommendation.id), body.detected_item_id);
