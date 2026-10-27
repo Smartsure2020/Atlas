@@ -237,7 +237,7 @@ const PROBES = [
   {
     id: "P28", brief: "the server-side detected-item allow-list is removed",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["\n  return null;\n}\n\n/**\n * Existing UUID primary key", "\n  return { item_type: \"underwriting_info\", title: \"Internal item\", description: \"Internal diagnostic data\", section_key: null, source: \"quote_review\", owner: \"broker\" };\n}\n\n/**\n * Existing UUID primary key"]],
+    edits: [["\n  return null;\n}\n\n/** Mirrors the workbench's logical tracking join", "\n  return { item_type: \"underwriting_info\", title: \"Internal item\", description: \"Internal diagnostic data\", section_key: null, source: \"quote_review\", owner: \"broker\" };\n}\n\n/** Mirrors the workbench's logical tracking join"]],
     suites: ["detected-tracking"],
   },
   {
@@ -245,6 +245,72 @@ const PROBES = [
     file: "worker/src/detected-missing-info.ts",
     edits: [["const hex = sha256Hex(`atlas-detected-missing-info-v1\\u0000${submissionId}\\u0000${recommendationId}\\u0000${detectedItemId}`);", "const hex = sha256Hex(`atlas-detected-missing-info-v1\\u0000${submissionId}\\u0000${recommendationId}\\u0000${detectedItemId}\\u0000${Math.random()}`);"]],
     suites: ["detected-tracking"],
+  },
+  {
+    id: "P30", brief: "submission-wide logical missing-info deduplication is removed",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["if (logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });", "if (false && logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });"]],
+    suites: ["detected-tracking"],
+  },
+  {
+    id: "P31", brief: "closed missing-info rows stop counting as logical duplicates",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["if (typeof item.id !== \"string\" || item.item_type !== candidate.item_type || typeof item.title !== \"string\") return false;", "if (typeof item.id !== \"string\" || item.item_type !== candidate.item_type || typeof item.title !== \"string\" || (item as { status?: unknown }).status === \"closed\") return false;"]],
+    suites: ["detected-tracking"],
+  },
+  {
+    id: "P32", brief: "detected tracking selects the oldest recommendation",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [[".select(\"id, evidence_json\")\n    .eq(\"submission_id\", submissionId)\n    .order(\"created_at\", { ascending: false })\n    .limit(1)", ".select(\"id, evidence_json\")\n    .eq(\"submission_id\", submissionId)\n    .order(\"created_at\", { ascending: true })\n    .limit(1)"]],
+    suites: ["detected-tracking"],
+  },
+  {
+    id: "P33", brief: "detected tracking omits recommendation ordering",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [[".select(\"id, evidence_json\")\n    .eq(\"submission_id\", submissionId)\n    .order(\"created_at\", { ascending: false })\n    .limit(1)", ".select(\"id, evidence_json\")\n    .eq(\"submission_id\", submissionId)\n    .limit(1)"]],
+    suites: ["detected-tracking"],
+  },
+  {
+    id: "P34", brief: "detected tracking omits the one-row recommendation limit",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [[".select(\"id, evidence_json\")\n    .eq(\"submission_id\", submissionId)\n    .order(\"created_at\", { ascending: false })\n    .limit(1)", ".select(\"id, evidence_json\")\n    .eq(\"submission_id\", submissionId)\n    .order(\"created_at\", { ascending: false })"]],
+    suites: ["detected-tracking"],
+  },
+  {
+    id: "P35", brief: "the detected item component is removed from its deterministic ID",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["const hex = sha256Hex(`atlas-detected-missing-info-v1\\u0000${submissionId}\\u0000${recommendationId}\\u0000${detectedItemId}`);", "const hex = sha256Hex(`atlas-detected-missing-info-v1\\u0000${submissionId}\\u0000${recommendationId}`);"]],
+    suites: ["detected-tracking"],
+  },
+  {
+    id: "P36", brief: "a whitespace-only reviewed value counts as supplied",
+    file: "worker/src/completeness.ts",
+    edits: [["if (typeof value === \"string\") return value.trim() !== \"\";", "if (typeof value === \"string\") return true;"]],
+    suites: ["completeness"],
+  },
+  {
+    id: "P37", brief: "an empty reviewed array counts as supplied",
+    file: "worker/src/completeness.ts",
+    edits: [["if (Array.isArray(value)) return value.length > 0;", "if (Array.isArray(value)) return true;"]],
+    suites: ["completeness"],
+  },
+  {
+    id: "P38", brief: "email plus tags are stripped during normalisation",
+    file: "worker/src/contradictions.ts",
+    edits: [["        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase();", "        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase()\n        .replace(/\\+/g, \"\");"]],
+    suites: ["contradictions"],
+  },
+  {
+    id: "P39", brief: "email dots are stripped during normalisation",
+    file: "worker/src/contradictions.ts",
+    edits: [["        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase();", "        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase()\n        .replace(/\\./g, \"\");"]],
+    suites: ["contradictions"],
+  },
+  {
+    id: "P40", brief: "email apostrophes and hyphens are stripped during normalisation",
+    file: "worker/src/contradictions.ts",
+    edits: [["        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase();", "        .replace(/[.,;:!?]+$/g, \"\")\n        .toLowerCase()\n        .replace(/['-]/g, \"\");"]],
+    suites: ["contradictions"],
   },
 ];
 

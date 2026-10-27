@@ -302,14 +302,14 @@ documents, active rules and the active insurer inventory. The pure engine retain
 SHA-256 observation fingerprint for injected engine tests and future legitimate pairs;
 it is not a production broker-email query/input and is never persisted or logged.
 
-The 32-bit FNV checksum itself is unchanged (known debt, out of scope); the new digest
-is cryptographic and feeds it as a string. `MATCHER_VERSION` is not bumped.
+The 32-bit FNV checksum itself is unchanged (known debt, out of scope).
+`MATCHER_VERSION` is not bumped.
 
 ## 9. Hardening the engine against false positives
 
 Property tests (1,000 randomised formatting mutations of one identifier; every
 single-character change of an address; shuffles of source order; duplicate documents;
-null vs absent; malformed values) and the 26 mutation probes in §16.
+null vs absent; malformed values) and the mutation probes in §16.
 
 ## 10. UI
 
@@ -356,9 +356,12 @@ without data — are listed but never tracked, because tracked items are readabl
 broker and feed request drafts. Free-text facts are left to the existing *Derive from
 analysis* flow, which already carries their text under existing access control.
 Conflicts are pointed at, never listed or tracked here. The panel receives evidence only
-for non-brokers. Tracking is idempotent per submission + current recommendation +
-detected item: a deterministic UUID uses the existing primary key, pre-fetch returns an
-existing row, and an insert-race fallback reads the winner. No migration is needed.
+for non-brokers. Before inserting, the server checks every tracked item for the submission
+using the same join as the workbench: canonical document key for documents, exact type +
+deterministic title for the other approved classes. Any status, including closed, counts
+as already tracked and is returned unchanged. A deterministic UUID scoped to submission +
+current recommendation + detected item remains the concurrent-insert backstop. No
+migration is needed.
 
 ## 12. Auditability
 
@@ -418,8 +421,9 @@ Cases 37–39 are historical compatibility. No case fabricates a production seco
 ## 15. Migration
 
 **None created.** `evidence_json` carries both analyses; the existing
-`atlas_missing_info_items` carries tracking. The existing UUID primary key provides the
-detected-item idempotency boundary. Persistent contradiction review/waiver/resolution is
+`atlas_missing_info_items` carries tracking. Its existing type/title fields provide the
+cross-recommendation logical join, while the UUID primary key provides the same-
+recommendation concurrency boundary. Persistent contradiction review/waiver/resolution is
 a future workflow and governance decision; no table, migration or endpoint for it was
 created in this remediation.
 
@@ -430,12 +434,12 @@ Run on the final head (nothing pushed, migrated or deployed).
 | Check | Result |
 | --- | --- |
 | Backend, every script in `npm test` | complete chain exit 0, 0 failures |
-| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 28/28, tracking 9/9, persistence 35/35 |
+| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 29/29, tracking 20/20, persistence 36/36 |
 | Matcher differential vs the frozen production v1 matcher (3,000 fixtures per corpus) | **0 unexpected authoritative differences**; 0 category violations; 0 order-invariance failures |
 | Phase 1A 500-fixture differential | unchanged pinned hash `b14d9927…a36` |
 | Phase 1A evidence (32) / handler (3) / Phase 24 clean-only trust (47) | pass |
 | Evidence-v2 immutability corpus | pass; shared v2 semantics unchanged |
-| Mutation probes (`npm run test:powerhouse-mutations`) | **30/30 killed**, including invalid live broker-email registry, detected-item allow-list removal and idempotency removal |
+| Mutation probes (`npm run test:powerhouse-mutations`) | **41/41 killed**, including cross-rerun/closed-item dedupe, latest-recommendation ordering, detected-item identity, value-presence and email-character pins, invalid live broker-email registry, persisted value digest and allow-list bypass |
 | Frontend vitest | 894 tests in 40 files, 0 failures (was 783) |
 | Frontend `tsc -b` + production build | pass |
 | Worker `tsc --noEmit` | pass |
@@ -481,6 +485,10 @@ matrices, and the evidence packet is already ~10 MB at 400 insurers × 16 rules;
    before any production registry entry is enabled.
 7. Still open from Batch 2: multi-section aggregation, the rule-tie policy, who may see
    rule source excerpts.
+8. **Recommendation freshness at tracking time:** the endpoint validates against the
+   latest persisted recommendation. Whether it must also prove that recommendation is
+   newer than the latest review/extraction/document change is a separate workflow policy;
+   no freshness contract is added in this remediation.
 
 ## 18. Known limitations
 
@@ -496,7 +504,5 @@ matrices, and the evidence packet is already ~10 MB at 400 insurers × 16 rules;
   separators and spacing but nothing else; the matcher's own per-insurer de-duplication is
   by lower-cased exact string (an existing behaviour, not changed), so `risk_survey` and
   `risk survey` in one insurer's rules are two matcher outcomes and one completeness item.
-* A broker-tracked document can still be duplicated by the later *Derive from analysis*
-  (its dedupe key includes the description); the Missing Information tab recognises both.
 * The fingerprint remains a 32-bit checksum.
 * Reviewed-fact page / quote provenance does not exist upstream (unchanged).

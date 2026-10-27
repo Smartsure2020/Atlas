@@ -1,13 +1,12 @@
 {
   "fixture_schema": "powerhouse-case-v1",
   "id": "case-29-sources-disagree",
-  "title": "Two structured sources genuinely disagree",
-  "description": "The intake broker email and the reviewed extraction's broker email are different addresses. The field is not consumed by the matcher, so the contradiction is advisory.",
+  "title": "Invalid source pair with different fixture values",
+  "description": "The endpoint does not compare creator login identity with an extracted intermediary email, even when the synthetic fixture values differ.",
   "intent": [
     "real endpoint architecture: no contradiction is emitted for the invalid broker-email pair; genuine disagreement is covered by the injected engine registry",
-    "values appear only as masked displays plus digests — never the raw address",
-    "severity is advisory (not matcher-consumed); resolution_state is unresolved; no source is declared correct",
-    "scores, ranks and flags are exactly those of the agreeing twin (case 28)"
+    "no raw address, masked value group or value digest is persisted",
+    "scores, ranks and flags are unaffected because no production comparison is attempted"
   ],
   "rule_defaults": {
     "notes": null,

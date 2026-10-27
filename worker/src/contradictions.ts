@@ -302,8 +302,8 @@ export interface ComparableFieldSpec {
   /**
    * For an `enum` field: the closed set of (normalised) values that are safe to
    * display. A value outside the set — or any enum field that declares no set —
-   * is shown by digest only, because an "enum" that is really free text must never
-   * be copied into the evidence.
+   * is not displayed, because an "enum" that is really free text must never be
+   * copied into the evidence.
    */
   closed_vocabulary?: readonly string[];
   sources: ObservationSourceSpec[];

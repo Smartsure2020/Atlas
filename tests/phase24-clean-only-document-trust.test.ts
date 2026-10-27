@@ -1173,8 +1173,8 @@ const LIVE_BEHAVIOUR = {
   qualityModelVersion: QUALITY_MODEL_VERSION,
   completenessModelVersion: COMPLETENESS_MODEL_VERSION,
   contradictionModelVersion: CONTRADICTION_MODEL_VERSION,
-  // The phase-24 recommendation stubs seed no atlas_submissions row and the reviewed
-  // fixture records no broker email, so there is nothing to compare.
+  // Production has no registered independently comparable source pair, so the
+  // recommendation fingerprint has no contradiction observation input.
   // The phase-24 recommendation stubs seed no atlas_insurers rows.
   activeInsurers: [] as { id: string; name: string }[],
 };

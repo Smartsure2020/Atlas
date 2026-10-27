@@ -19,7 +19,7 @@ import {
   type CommunicationType,
 } from "./phase4-workflow";
 import { roleCanViewManagerDashboard, roleCanViewUnderwritingIntelligence, roleCanWrite } from "./phase6-hardening";
-import { detectedMissingInfoId, findTrackableCompletenessItem } from "./detected-missing-info";
+import { detectedMissingInfoId, findExistingLogicalMissingInfo, findTrackableCompletenessItem } from "./detected-missing-info";
 
 async function latestReview(admin: ReturnType<typeof adminClient>, submissionId: string) {
   const { data } = await admin
@@ -160,6 +160,14 @@ export async function handleTrackDetectedMissingInfo(submissionId: string, reque
   }
   const detected = findTrackableCompletenessItem(evidence, body.detected_item_id);
   if (!detected) return json({ error: "detected_item_not_trackable" }, 422);
+
+  const { data: submissionItems, error: submissionItemsError } = await admin
+    .from("atlas_missing_info_items")
+    .select("id, item_type, title, status")
+    .eq("submission_id", submissionId);
+  if (submissionItemsError) return json({ error: "fetch_failed" }, 500);
+  const logicalExisting = findExistingLogicalMissingInfo(submissionItems ?? [], detected.row);
+  if (logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });
 
   const id = detectedMissingInfoId(submissionId, String(recommendation.id), body.detected_item_id);
   const { data: existing } = await admin

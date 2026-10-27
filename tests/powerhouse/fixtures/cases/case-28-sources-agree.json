@@ -1,11 +1,11 @@
 {
   "fixture_schema": "powerhouse-case-v1",
   "id": "case-28-sources-agree",
-  "title": "Two structured sources agree",
-  "description": "The submission's intake broker email and the reviewed extraction's broker email are identical. Agreement is not evidence and is never scored.",
+  "title": "Invalid source pair with matching fixture values",
+  "description": "The endpoint does not compare creator login identity with an extracted intermediary email, even when the synthetic fixture values happen to match.",
   "intent": [
     "real endpoint architecture: no production comparison is attempted because broker login email and extracted intermediary email are different semantic facts",
-    "agreement creates no quality gap, no completeness item and no new score input"
+    "the absence of a valid production pair creates no quality gap, completeness item or score input"
   ],
   "rule_defaults": {
     "notes": null,

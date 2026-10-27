@@ -12,7 +12,7 @@ import { MATCHER_VERSION, MATCHER_VERSION_V1 } from "../../worker/src/matcher.js
 import { MATCHER_INPUT_SNAPSHOT_MINIMISED } from "../../worker/src/recommendation-evidence.js";
 import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3 } from "../../worker/src/recommendation-evidence-v3.js";
 import { COMPLETENESS_MODEL_VERSION } from "../../worker/src/completeness.js";
-import { CONTRADICTION_MODEL_VERSION } from "../../worker/src/contradictions.js";
+import { COMPARABLE_FIELDS, CONTRADICTION_MODEL_VERSION } from "../../worker/src/contradictions.js";
 import { TAXONOMY_VERSION } from "../../worker/src/taxonomy.js";
 import {
   EXT,
@@ -475,6 +475,13 @@ test("16. historical raw matcher_input rows are not touched by this change (shap
 // ---------------------------------------------------------------------------
 // Batch B remediation — production has no valid independently comparable pair
 // ---------------------------------------------------------------------------
+
+test("B0. FORWARD GUARD — a future production comparison requires intentional fingerprint reconnection", () => {
+  assert(
+    COMPARABLE_FIELDS.length === 0,
+    "production contradiction registry became non-empty: collect its observations and include their semantic fingerprint before enabling the pair"
+  );
+});
 
 function reviewedWithBrokerEmail(email: string): Row {
   const reviewed = reviewedWithSentinels();

@@ -112,7 +112,7 @@ export interface Observation {
     advisory: number;
     /** field_key:outcome for every comparison Atlas made */
     comparisons: string[];
-    /** field_key|severity|groups=N|matcher=bool|digests=… per contradiction */
+    /** field_key|severity|groups=N|matcher=bool per contradiction */
     items: string[];
   };
 }

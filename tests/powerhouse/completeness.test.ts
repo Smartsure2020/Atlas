@@ -291,6 +291,30 @@ test("14b. stale extraction reports disappear once the reviewed schema value is 
   eq(supplied.records.length, 0, "present reviewed value suppresses stale extraction report");
 });
 
+test("14bb. reviewed-value presence distinguishes missing shapes from supplied falsey and structured values", () => {
+  const report = [{ field: "extracted_client.registration_or_id_number", priority: "high" }];
+  const recordsFor = (field: Record<string, unknown>) => readExtractionReportedMissing({
+    extracted_client: { registration_or_id_number: field },
+    missing_information: report,
+  }).records.length;
+
+  for (const [label, field] of [
+    ["omitted", {}],
+    ["null", { value: null }],
+    ["undefined", { value: undefined }],
+    ["empty string", { value: "" }],
+    ["whitespace", { value: "  \t " }],
+    ["empty array", { value: [] }],
+  ] as [string, Record<string, unknown>][]) eq(recordsFor(field), 1, `${label} remains missing`);
+
+  for (const [label, value] of [
+    ["zero", 0],
+    ["false", false],
+    ["nonempty array", [0]],
+    ["nonempty object", { supplied: true }],
+  ] as [string, unknown][]) eq(recordsFor({ value }), 0, `${label} is supplied`);
+});
+
 test("14c. duplicate/reordered structured reports produce one identical item; unknown prose is never promoted", () => {
   const a = completeness(risk(), [rule({})], [], {
     missing_information: [

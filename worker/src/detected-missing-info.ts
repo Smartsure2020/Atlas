@@ -19,6 +19,12 @@ export interface DetectedMissingInfoRow {
   owner: "broker";
 }
 
+export interface ExistingMissingInfoIdentity {
+  id: unknown;
+  item_type: unknown;
+  title: unknown;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -78,9 +84,22 @@ export function deriveDetectedMissingInfo(item: unknown): DetectedMissingInfoRow
   return null;
 }
 
+/** Mirrors the workbench's logical tracking join without using mutable status. */
+export function findExistingLogicalMissingInfo(
+  items: readonly ExistingMissingInfoIdentity[],
+  candidate: DetectedMissingInfoRow
+): ExistingMissingInfoIdentity | null {
+  return items.find((item) => {
+    if (typeof item.id !== "string" || item.item_type !== candidate.item_type || typeof item.title !== "string") return false;
+    if (candidate.item_type === "document") return documentKey(item.title) === documentKey(candidate.title);
+    return item.title === candidate.title;
+  }) ?? null;
+}
+
 /**
- * Existing UUID primary key supplies concurrency-safe idempotency. The identity
- * is scoped to one submission, one persisted recommendation and one detected item.
+ * The UUID primary key is the concurrency backstop for repeated requests against
+ * one recommendation. Cross-recommendation identity is checked separately using
+ * the same logical type/title (or canonical document key) join as the workbench.
  */
 export function detectedMissingInfoId(submissionId: string, recommendationId: string, detectedItemId: string): string {
   const hex = sha256Hex(`atlas-detected-missing-info-v1\u0000${submissionId}\u0000${recommendationId}\u0000${detectedItemId}`);

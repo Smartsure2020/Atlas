@@ -144,6 +144,10 @@ test("2. normalisers: valid equivalents agree, real differences differ, unreadab
   eq(ok("email_trim_lowercase", "broker@example.co.za."), "broker@example.co.za", "trailing sentence punctuation");
   eq(ok("email_trim_lowercase", "bro\u200Bker@example.co.za"), "broker@example.co.za", "zero-width characters");
   eq(ok("email_trim_lowercase", "cafe\u0301@example.co.za"), ok("email_trim_lowercase", "caf\u00e9@example.co.za"), "NFD and NFC agree");
+  eq(ok("email_trim_lowercase", " First.Last+quotes_tag@EXAMPLE.co.za "), "first.last+quotes_tag@example.co.za", "plus, dot and underscore are preserved");
+  eq(ok("email_trim_lowercase", "o'connor-smith@example.co.za"), "o'connor-smith@example.co.za", "apostrophe and hyphen are preserved");
+  assert(ok("email_trim_lowercase", "first.last@example.co.za") !== ok("email_trim_lowercase", "firstlast@example.co.za"), "dots are never stripped");
+  assert(ok("email_trim_lowercase", "broker+one@example.co.za") !== ok("email_trim_lowercase", "broker+two@example.co.za"), "plus tags are never stripped");
   assert(ok("email_trim_lowercase", "broker@example.co.za") !== ok("email_trim_lowercase", "broker2@example.co.za"), "genuine email mismatch remains");
   bad("email_trim_lowercase", "Broker <broker@example.co.za>");
   bad("email_trim_lowercase", "a@b");

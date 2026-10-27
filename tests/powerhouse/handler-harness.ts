@@ -73,6 +73,24 @@ export function installRestStub(
           rows = rows.filter((row) => expected.includes(String(row[key])));
         }
       });
+      const order = url.searchParams.get("order");
+      if (order) {
+        const terms = order.split(",").map((term) => {
+          const [key, direction = "asc"] = term.split(".");
+          return { key, direction };
+        });
+        rows.sort((left, right) => {
+          for (const term of terms) {
+            const a = left[term.key];
+            const b = right[term.key];
+            const compared = String(a ?? "").localeCompare(String(b ?? ""));
+            if (compared !== 0) return term.direction === "desc" ? -compared : compared;
+          }
+          return 0;
+        });
+      }
+      const limit = url.searchParams.get("limit");
+      if (limit !== null) rows = rows.slice(0, Math.max(0, Number.parseInt(limit, 10) || 0));
       const select = url.searchParams.get("select");
       if (options.projectSelect && select) {
         const fields = select.split(",").map((item) => item.trim()).filter(Boolean);
