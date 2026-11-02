@@ -196,6 +196,14 @@ export function resolveSchemaFieldIdentity(text: string): string | null {
   return resolveSchemaPath(text) ?? SCHEMA_LABEL_PATHS.get(text.trim().toLowerCase()) ?? null;
 }
 
+/** Exact aliases Atlas itself derives for one canonical schema path. */
+export function schemaFieldAliases(path: string): readonly string[] | null {
+  const canonical = SCHEMA_PATHS.get(path.trim().toLowerCase());
+  if (!canonical) return null;
+  const key = canonical.slice(canonical.indexOf(".") + 1);
+  return [canonical, key, labelForSchemaPath(canonical)];
+}
+
 function reviewedFieldIsPresent(reviewed: Record<string, unknown>, path: string): boolean {
   const [section, key] = path.split(".");
   const bag = reviewed[section];

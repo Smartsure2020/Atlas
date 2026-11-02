@@ -1,4 +1,5 @@
 import { handleGenerateMissingInfo, handleTrackDetectedMissingInfo } from "../../worker/src/phase4-endpoints.js";
+import { resolveSchemaFieldIdentity } from "../../worker/src/completeness.js";
 import { env, installRestStub, MANAGER, SUB, type Row } from "./handler-harness.js";
 
 const REC = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -51,26 +52,26 @@ function review(fields: { field: string; reason_required?: string }[] = []): Row
   };
 }
 
-function section(documents: string[]): Row {
+function section(documents: string[], options: { id?: string; key?: string; name?: string; ruleId?: string | null; findings?: string[] } = {}): Row {
   return {
-    id: "section-1",
+    id: options.id ?? "section-1",
     quote_review_id: REVIEW,
-    section_key: "commercial_motor",
-    section_name: "Commercial motor",
-    matched_rule_id: null,
+    section_key: options.key ?? "commercial_motor",
+    section_name: options.name ?? "Commercial motor",
+    matched_rule_id: options.ruleId ?? "rule-1",
     missing_documents: documents,
-    findings: [],
+    findings: options.findings ?? [],
     rating_findings: [],
     excess_findings: [],
     warranty_findings: [],
   };
 }
 
-function seedFor(item: Row, options: { fields?: { field: string; reason_required?: string }[]; documents?: string[] } = {}): Record<string, Row[]> {
+function seedFor(item: Row, options: { fields?: { field: string; reason_required?: string }[]; documents?: string[]; sections?: Row[] } = {}): Record<string, Row[]> {
   return {
     atlas_recommendations: [recommendation(REC, "2026-10-26T08:00:00.000Z", [item])],
     atlas_quote_reviews: [review(options.fields)],
-    atlas_quote_review_sections: options.documents ? [section(options.documents)] : [],
+    atlas_quote_review_sections: options.sections ?? (options.documents ? [section(options.documents)] : []),
     atlas_missing_info_items: [],
   };
 }
@@ -214,9 +215,9 @@ test("7. deterministic ordering chooses the oldest equivalent legacy row, then t
   const item = doc();
   const seed = seedFor(item);
   seed.atlas_missing_info_items = [
-    { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", submission_id: SUB, item_type: "document", title: "risk-survey", description: "old duplicate", status: "waived", created_at: "2026-01-01T00:00:00.000Z" },
-    { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", submission_id: SUB, item_type: "document", title: "RISK SURVEY", description: "old duplicate", status: "received", created_at: "2026-01-01T00:00:00.000Z" },
-    { id: "00000000-0000-4000-8000-000000000000", submission_id: SUB, item_type: "document", title: "Risk survey", description: "newer duplicate", status: "open", created_at: "2026-02-01T00:00:00.000Z" },
+    { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", submission_id: SUB, item_type: "document", title: "risk-survey", description: "old duplicate", source: "rule", status: "waived", created_at: "2026-01-01T00:00:00.000Z" },
+    { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", submission_id: SUB, item_type: "document", title: "RISK SURVEY", description: "old duplicate", source: "rule", status: "received", created_at: "2026-01-01T00:00:00.000Z" },
+    { id: "00000000-0000-4000-8000-000000000000", submission_id: SUB, item_type: "document", title: "Risk survey", description: "newer duplicate", source: "rule", status: "open", created_at: "2026-02-01T00:00:00.000Z" },
   ];
   await withStub(seed, async (stub) => {
     const first = await track(seed, item);
@@ -252,6 +253,143 @@ test("9. the same logical requirement remains independent across submissions", a
   await withStub(seed, async () => {
     const run = await track(seed, item);
     eq([run.res.status, run.rows.length], [201, 2], "other submission does not suppress insert");
+  });
+});
+
+const AMBIGUOUS_PATHS = [
+  "extracted_client.name",
+  "broker.name",
+  "extracted_client.risk_address",
+  "quote_terms.risk_address",
+  "current_cover.required_documents",
+  "quote_terms.required_documents",
+] as const;
+
+test("10. every ambiguous schema path interoperates through candidate-specific exact aliases", async () => {
+  for (const path of AMBIGUOUS_PATHS) {
+    const item = fact(path);
+    const bare = path.slice(path.indexOf(".") + 1);
+
+    const rerun = seedFor(item);
+    await withStub(rerun, async () => {
+      const first = await track(rerun, item);
+      rerun.atlas_recommendations.push(recommendation(REC2, "2026-10-26T09:00:00.000Z", [item]));
+      const second = await track(rerun, item);
+      eq([second.res.status, second.body.id, second.rows.length], [200, first.body.id, 1], `${path}: Track -> Track`);
+    });
+
+    const trackDerive = seedFor(item, { fields: [{ field: path, reason_required: "Required." }] });
+    await withStub(trackDerive, async () => {
+      await track(trackDerive, item);
+      eq([(await derive(trackDerive)).body.generated_count, trackDerive.atlas_missing_info_items.length], [0, 1], `${path}: Track -> Derive full path`);
+    });
+
+    const deriveFullTrack = seedFor(item, { fields: [{ field: path, reason_required: "Required." }] });
+    await withStub(deriveFullTrack, async () => {
+      await derive(deriveFullTrack);
+      const existingId = deriveFullTrack.atlas_missing_info_items[0].id;
+      const tracked = await track(deriveFullTrack, item);
+      eq([tracked.res.status, tracked.body.id, tracked.rows.length], [200, existingId, 1], `${path}: Derive full path -> Track`);
+    });
+
+    const deriveBareTrack = seedFor(item, { fields: [{ field: bare, reason_required: "Required." }] });
+    await withStub(deriveBareTrack, async () => {
+      await derive(deriveBareTrack);
+      const existingId = deriveBareTrack.atlas_missing_info_items[0].id;
+      const tracked = await track(deriveBareTrack, item);
+      eq([tracked.res.status, tracked.body.id, tracked.rows.length], [200, existingId, 1], `${path}: Derive bare key -> Track`);
+    });
+  }
+});
+
+test("11. ambiguous labels and bare keys never globally resolve or collapse paired canonical paths", async () => {
+  for (const text of ["name", "Name", "risk_address", "Risk address", "required_documents", "Required documents"]) {
+    eq(resolveSchemaFieldIdentity(text), null, `${text}: remains globally ambiguous`);
+  }
+  for (const [firstPath, secondPath] of [
+    ["quote_terms.risk_address", "extracted_client.risk_address"],
+    ["quote_terms.required_documents", "current_cover.required_documents"],
+  ] as const) {
+    const first = fact(firstPath);
+    const second = fact(secondPath);
+    const seed = seedFor(first);
+    seed.atlas_recommendations = [recommendation(REC, "2026-10-26T08:00:00.000Z", [first, second])];
+    await withStub(seed, async () => {
+      const one = await track(seed, first);
+      const two = await track(seed, second);
+      eq([one.res.status, two.res.status, seed.atlas_missing_info_items.length], [201, 201, 2], `${firstPath} and ${secondPath}: distinct`);
+      assert(one.body.id !== two.body.id, "paired ambiguous paths have distinct deterministic ids");
+    });
+  }
+});
+
+test("12. canonical required documents dedupe across rules and sections; findings retain exact tuple identity", async () => {
+  const item = doc();
+
+  const rules = seedFor(item, { sections: [
+    section(["Risk Survey"], { id: "rule-section-1", key: "motor", name: "Motor", ruleId: "rule-1" }),
+    section(["risk-survey"], { id: "rule-section-2", key: "property", name: "Property", ruleId: "rule-2" }),
+  ] });
+  await withStub(rules, async () => {
+    const generated = await derive(rules);
+    eq([generated.body.generated_count, generated.rows.length, generated.rows[0].source], [1, 1, "rule"], "same canonical document across rules is one requirement");
+  });
+
+  const sections = seedFor(item, { sections: [
+    section(["Valuation certificate"], { id: "buildings", key: "buildings", name: "Buildings" }),
+    section(["VALUATION-CERTIFICATE"], { id: "contents", key: "contents", name: "Contents" }),
+  ] });
+  await withStub(sections, async () => {
+    eq([(await derive(sections)).body.generated_count, sections.atlas_missing_info_items.length], [1, 1], "one document supplied once across sections");
+  });
+
+  const findings = seedFor(item, { sections: [section([], {
+    name: "Commercial motor",
+    findings: ["Required document A is missing.", "Required document B is missing."],
+  })] });
+  await withStub(findings, async () => {
+    const generated = await derive(findings);
+    eq([generated.body.generated_count, generated.rows.length], [2, 2], "different findings with one section title remain distinct");
+    assert(generated.rows.every((row) => row.source === "quote_review"), "findings use non-canonical source metadata");
+  });
+
+  const tuple = seedFor(item, { sections: [
+    section([], { id: "one", key: "one", name: "Shared title", findings: ["Required document is missing."] }),
+    section([], { id: "two", key: "two", name: "Shared title", findings: ["Required document is missing."] }),
+  ] });
+  await withStub(tuple, async () => {
+    eq([(await derive(tuple)).body.generated_count, tuple.atlas_missing_info_items.length], [2, 2], "same title/description but different section remains distinct");
+  });
+
+  const mixed = seedFor(item, { sections: [section(["Risk Survey"], {
+    name: "Risk Survey",
+    findings: ["Required document is missing."],
+  })] });
+  await withStub(mixed, async () => {
+    const generated = await derive(mixed);
+    eq([generated.body.generated_count, generated.rows.length], [2, 2], "canonical and finding rows with one visible title remain distinct");
+    eq(new Set(generated.rows.map((row) => row.source)).size, 2, "classification is structural");
+  });
+});
+
+test("13. Derive remains submission-scoped and exact fallback retains item_type", async () => {
+  const item = fact();
+  const crossSubmission = seedFor(item, { fields: [{ field: "Unknown requirement", reason_required: "Same reason" }] });
+  crossSubmission.atlas_missing_info_items.push({
+    id: "other-submission", submission_id: OTHER, section_key: null, item_type: "underwriting_info",
+    title: "Unknown requirement", description: "Same reason", source: "extraction", status: "open",
+  });
+  await withStub(crossSubmission, async () => {
+    eq([(await derive(crossSubmission)).body.generated_count, crossSubmission.atlas_missing_info_items.length], [1, 2], "other submission never suppresses Derive");
+  });
+
+  const differentType = seedFor(item, { fields: [{ field: "Shared visible title", reason_required: "Same reason" }] });
+  differentType.atlas_missing_info_items.push({
+    id: "other-type", submission_id: SUB, section_key: null, item_type: "quote_term",
+    title: "Shared visible title", description: "Same reason", source: "extraction", status: "open",
+  });
+  await withStub(differentType, async () => {
+    eq([(await derive(differentType)).body.generated_count, differentType.atlas_missing_info_items.length], [1, 2], "different item_type remains distinct");
   });
 });
 

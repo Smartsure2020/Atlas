@@ -8,7 +8,7 @@
 
 import { sha256Hex } from "./digest.js";
 import { documentKey } from "./matcher.js";
-import { resolveSchemaFieldIdentity, resolveSchemaPath, schemaFieldLabel, type CompletenessItem } from "./completeness.js";
+import { resolveSchemaFieldIdentity, resolveSchemaPath, schemaFieldAliases, schemaFieldLabel, type CompletenessItem } from "./completeness.js";
 
 export interface DetectedMissingInfoRow {
   item_type: "document" | "underwriting_info";
@@ -25,6 +25,7 @@ export interface MissingInfoLogicalCandidate {
   title: unknown;
   description?: unknown;
   section_key?: unknown;
+  source?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -90,6 +91,32 @@ function exactPart(value: unknown): string {
   return typeof value === "string" ? value.toLowerCase() : "";
 }
 
+function aliasPart(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+/** Only structured rule-sourced rows use document-title canonicalisation. */
+export function isCanonicalRequiredDocument(candidate: Omit<MissingInfoLogicalCandidate, "id">): boolean {
+  return candidate.item_type === "document" && candidate.source === "rule";
+}
+
+export function missingInfoStructuredFactPath(
+  candidate: Omit<MissingInfoLogicalCandidate, "id">,
+  structuredFactPath?: string | null
+): string | null {
+  if (candidate.item_type !== "underwriting_info") return null;
+  return structuredFactPath ? resolveSchemaPath(structuredFactPath) : resolveSchemaFieldIdentity(String(candidate.title ?? ""));
+}
+
+function candidateFactAliases(path: string, peerFactPaths: readonly string[]): Set<string> {
+  const aliases = schemaFieldAliases(path) ?? [];
+  const peers = peerFactPaths
+    .map((peer) => resolveSchemaPath(peer))
+    .filter((peer): peer is string => !!peer && peer !== path)
+    .map((peer) => new Set((schemaFieldAliases(peer) ?? []).map(aliasPart)));
+  return new Set(aliases.map(aliasPart).filter((alias) => !peers.some((peer) => peer.has(alias))));
+}
+
 /**
  * One shared identity for Track and Derive. Unknown/free-text rows retain the
  * former exact Derive tuple; only registry-resolved facts gain a canonical key.
@@ -100,7 +127,7 @@ export function missingInfoLogicalKey(
 ): string {
   const itemType = typeof candidate.item_type === "string" ? candidate.item_type : "";
   const title = typeof candidate.title === "string" ? candidate.title : "";
-  if (itemType === "document") return `document|${documentKey(title)}`;
+  if (isCanonicalRequiredDocument(candidate)) return `required_document|${documentKey(title)}`;
 
   if (itemType === "underwriting_info") {
     const factPath = structuredFactPath
@@ -120,20 +147,39 @@ export function missingInfoLogicalKey(
   ].join("|");
 }
 
-/** Mirrors the workbench join for supported structured requirements, status-blind. */
+/** Server-authoritative, status-blind identity lookup for supported requirements. */
 export function findExistingLogicalMissingInfo(
   items: readonly MissingInfoLogicalCandidate[],
   candidate: Omit<MissingInfoLogicalCandidate, "id">,
-  structuredFactPath?: string | null
+  structuredFactPath?: string | null,
+  peerFactPaths: readonly string[] = []
 ): MissingInfoLogicalCandidate | null {
   const candidateKey = missingInfoLogicalKey(candidate, structuredFactPath);
-  return items.find((item) => typeof item.id === "string" && missingInfoLogicalKey(item) === candidateKey) ?? null;
+  const candidatePath = missingInfoStructuredFactPath(candidate, structuredFactPath);
+  const aliases = candidatePath ? candidateFactAliases(candidatePath, peerFactPaths) : null;
+  return items.find((item) => {
+    if (typeof item.id !== "string") return false;
+    if (missingInfoLogicalKey(item) === candidateKey) return true;
+    return !!aliases && item.item_type === "underwriting_info" && aliases.has(aliasPart(item.title));
+  }) ?? null;
+}
+
+/** Canonical fact paths present in one persisted Evidence v3 packet. */
+export function structuredFactPathsInEvidence(evidence: unknown): string[] {
+  if (!isRecord(evidence) || !isRecord(evidence.completeness) || !Array.isArray(evidence.completeness.items)) return [];
+  const paths = new Set<string>();
+  for (const item of evidence.completeness.items) {
+    if (!isRecord(item) || item.code !== "extraction_reported_information_missing" || typeof item.field_path !== "string") continue;
+    const path = resolveSchemaPath(item.field_path);
+    if (path && path === item.field_path) paths.add(path);
+  }
+  return [...paths];
 }
 
 /**
  * The UUID primary key is the concurrency backstop for repeated requests against
  * one recommendation. Cross-recommendation identity is checked separately using
- * the same logical type/title (or canonical document key) join as the workbench.
+ * the shared server-side logical identity matcher.
  */
 export function detectedMissingInfoId(submissionId: string, recommendationId: string, detectedItemId: string): string {
   const hex = sha256Hex(`atlas-detected-missing-info-v1\u0000${submissionId}\u0000${recommendationId}\u0000${detectedItemId}`);

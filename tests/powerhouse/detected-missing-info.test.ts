@@ -145,7 +145,7 @@ test("B. eight equivalent concurrent requests converge on one row", async () => 
 for (const status of ["open", "requested", "received", "waived", "not_required"] as const) {
   test(`C-F. a ${status} logical item from an earlier recommendation is returned without insert`, async () => {
     const item = doc();
-    const existing = { id: `existing-${status}`, submission_id: SUB, item_type: "document", title: "RISK-SURVEY", status };
+    const existing = { id: `existing-${status}`, submission_id: SUB, item_type: "document", title: "RISK-SURVEY", source: "rule", status };
     const seed = baseSeed([item], [existing], REC2);
     const stub = installRestStub(seed);
     try {
@@ -184,7 +184,7 @@ test("I. the same requirement remains independent across submissions", async () 
   const item = doc();
   const seed: Record<string, Row[]> = {
     atlas_recommendations: [recommendation(REC2, "2026-10-26T08:00:00.000Z", [item])],
-    atlas_missing_info_items: [{ id: "other-submission", submission_id: OTHER, item_type: "document", title: "Risk survey", status: "open" }],
+    atlas_missing_info_items: [{ id: "other-submission", submission_id: OTHER, item_type: "document", title: "Risk survey", source: "rule", status: "open" }],
   };
   const stub = installRestStub(seed);
   try {
@@ -198,7 +198,7 @@ test("J. type and canonical document identity prevent false title collisions", a
   const item = doc();
   const seed = baseSeed([item], [
     { id: "same-words-other-type", submission_id: SUB, item_type: "underwriting_info", title: "Risk survey", status: "open" },
-    { id: "different-document-key", submission_id: SUB, item_type: "document", title: "Risk survey addendum", status: "open" },
+    { id: "different-document-key", submission_id: SUB, item_type: "document", title: "Risk survey addendum", source: "rule", status: "open" },
   ]);
   const stub = installRestStub(seed);
   try {

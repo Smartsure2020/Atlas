@@ -256,7 +256,7 @@ const PROBES = [
   {
     id: "P31", brief: "waived missing-info rows stop counting as logical duplicates",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["return items.find((item) => typeof item.id === \"string\" && missingInfoLogicalKey(item) === candidateKey) ?? null;", "return items.find((item) => typeof item.id === \"string\" && (item as { status?: unknown }).status !== \"waived\" && missingInfoLogicalKey(item) === candidateKey) ?? null;"]],
+    edits: [["if (typeof item.id !== \"string\") return false;", "if (typeof item.id !== \"string\" || (item as { status?: unknown }).status === \"waived\") return false;"]],
     suites: ["missing-info-interoperability"],
   },
   {
@@ -316,7 +316,7 @@ const PROBES = [
   {
     id: "P41", brief: "Derive stops consulting the shared logical identity matcher",
     file: "worker/src/phase4-endpoints.ts",
-    edits: [["if (findExistingLogicalMissingInfo(known, item)) continue;", "if (false && findExistingLogicalMissingInfo(known, item)) continue;"]],
+    edits: [["if (findExistingLogicalMissingInfo(known, item, null, generatedFactPaths)) continue;", "if (false && findExistingLogicalMissingInfo(known, item, null, generatedFactPaths)) continue;"]],
     suites: ["missing-info-interoperability"],
   },
   {
@@ -328,25 +328,25 @@ const PROBES = [
   {
     id: "P43", brief: "document identity stops using the canonical document key",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["if (itemType === \"document\") return `document|${documentKey(title)}`;", "if (itemType === \"document\") return `document|${title}`;"]],
+    edits: [["if (isCanonicalRequiredDocument(candidate)) return `required_document|${documentKey(title)}`;", "if (isCanonicalRequiredDocument(candidate)) return `required_document|${title}`;"]],
     suites: ["missing-info-interoperability"],
   },
   {
-    id: "P44", brief: "friendly and raw fact titles stop resolving to the same schema path",
+    id: "P44", brief: "Derive candidates stop resolving their canonical fact path",
     file: "worker/src/detected-missing-info.ts",
-    edits: [[": resolveSchemaFieldIdentity(title);", ": resolveSchemaPath(title);"]],
+    edits: [["return structuredFactPath ? resolveSchemaPath(structuredFactPath) : resolveSchemaFieldIdentity(String(candidate.title ?? \"\"));", "return structuredFactPath ? resolveSchemaPath(structuredFactPath) : null;"]],
     suites: ["missing-info-interoperability"],
   },
   {
     id: "P45", brief: "received rows stop counting as logical duplicates",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["return items.find((item) => typeof item.id === \"string\" && missingInfoLogicalKey(item) === candidateKey) ?? null;", "return items.find((item) => typeof item.id === \"string\" && (item as { status?: unknown }).status !== \"received\" && missingInfoLogicalKey(item) === candidateKey) ?? null;"]],
+    edits: [["if (typeof item.id !== \"string\") return false;", "if (typeof item.id !== \"string\" || (item as { status?: unknown }).status === \"received\") return false;"]],
     suites: ["missing-info-interoperability"],
   },
   {
     id: "P46", brief: "not-required rows stop counting as logical duplicates",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["return items.find((item) => typeof item.id === \"string\" && missingInfoLogicalKey(item) === candidateKey) ?? null;", "return items.find((item) => typeof item.id === \"string\" && (item as { status?: unknown }).status !== \"not_required\" && missingInfoLogicalKey(item) === candidateKey) ?? null;"]],
+    edits: [["if (typeof item.id !== \"string\") return false;", "if (typeof item.id !== \"string\" || (item as { status?: unknown }).status === \"not_required\") return false;"]],
     suites: ["missing-info-interoperability"],
   },
   {
@@ -377,6 +377,57 @@ const PROBES = [
     id: "P51", brief: "Derive no longer deduplicates two generated aliases within one batch",
     file: "worker/src/phase4-endpoints.ts",
     edits: [["known.push({ id: `pending-${rows.length}`, ...row });", "// pending rows omitted"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P52", brief: "candidate-path aliases are removed from fact identity matching",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["const aliases = candidatePath ? candidateFactAliases(candidatePath, peerFactPaths) : null;", "const aliases = null;"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P53", brief: "ambiguous schema bare keys and labels globally resolve to the first path",
+    file: "worker/src/completeness.ts",
+    edits: [
+      ["SCHEMA_KEY_PATHS.set(field.toLowerCase(), SCHEMA_KEY_PATHS.has(field.toLowerCase()) ? null : path);", "if (!SCHEMA_KEY_PATHS.has(field.toLowerCase())) SCHEMA_KEY_PATHS.set(field.toLowerCase(), path);"],
+      ["SCHEMA_LABEL_PATHS.set(label, SCHEMA_LABEL_PATHS.has(label) ? null : path);", "if (!SCHEMA_LABEL_PATHS.has(label)) SCHEMA_LABEL_PATHS.set(label, path);"],
+    ],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P54", brief: "peer-path collision protection is removed from ambiguous fact aliases",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return new Set(aliases.map(aliasPart).filter((alias) => !peers.some((peer) => peer.has(alias))));", "return new Set(aliases.map(aliasPart));"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P55", brief: "findings-derived document rows collapse by title alone",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return candidate.item_type === \"document\" && candidate.source === \"rule\";", "return candidate.item_type === \"document\";"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P56", brief: "canonical required-document deduplication is removed",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return candidate.item_type === \"document\" && candidate.source === \"rule\";", "return false;"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P57", brief: "Derive logical lookup loses submission scope",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["const { data: existing, error: existingError } = await admin\n    .from(\"atlas_missing_info_items\")\n    .select(\"id, section_key, item_type, title, description, source, status, created_at\")\n    .eq(\"submission_id\", submissionId)", "const { data: existing, error: existingError } = await admin\n    .from(\"atlas_missing_info_items\")\n    .select(\"id, section_key, item_type, title, description, source, status, created_at\")"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P58", brief: "item_type is removed from exact fallback identity",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["    itemType,\n    exactPart(candidate.title),", "    \"\",\n    exactPart(candidate.title),"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P59", brief: "Track ignores its authoritative structured fact path",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["const candidatePath = missingInfoStructuredFactPath(candidate, structuredFactPath);", "const candidatePath = missingInfoStructuredFactPath(candidate);"]],
     suites: ["missing-info-interoperability"],
   },
 ];

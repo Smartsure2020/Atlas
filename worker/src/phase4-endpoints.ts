@@ -19,7 +19,7 @@ import {
   type CommunicationType,
 } from "./phase4-workflow";
 import { roleCanViewManagerDashboard, roleCanViewUnderwritingIntelligence, roleCanWrite } from "./phase6-hardening";
-import { detectedMissingInfoId, findExistingLogicalMissingInfo, findTrackableCompletenessItem, type MissingInfoLogicalCandidate } from "./detected-missing-info";
+import { detectedMissingInfoId, findExistingLogicalMissingInfo, findTrackableCompletenessItem, missingInfoStructuredFactPath, structuredFactPathsInEvidence, type MissingInfoLogicalCandidate } from "./detected-missing-info";
 
 async function latestReview(admin: ReturnType<typeof adminClient>, submissionId: string) {
   const { data } = await admin
@@ -67,15 +67,18 @@ export async function handleGenerateMissingInfo(submissionId: string, env: Env, 
 
   const { data: existing, error: existingError } = await admin
     .from("atlas_missing_info_items")
-    .select("id, section_key, item_type, title, description, status, created_at")
+    .select("id, section_key, item_type, title, description, source, status, created_at")
     .eq("submission_id", submissionId)
     .order("created_at", { ascending: true })
     .order("id", { ascending: true });
   if (existingError) return json({ error: "fetch_failed" }, 500);
   const known = [...(existing ?? [])] as MissingInfoLogicalCandidate[];
+  const generatedFactPaths = generated
+    .map((item) => missingInfoStructuredFactPath(item))
+    .filter((path): path is string => path !== null);
   const rows: Record<string, unknown>[] = [];
   for (const item of generated) {
-    if (findExistingLogicalMissingInfo(known, item)) continue;
+    if (findExistingLogicalMissingInfo(known, item, null, generatedFactPaths)) continue;
     const row = { ...item, submission_id: submissionId, created_by: user.id };
     rows.push(row);
     known.push({ id: `pending-${rows.length}`, ...row });
@@ -167,7 +170,7 @@ export async function handleTrackDetectedMissingInfo(submissionId: string, reque
 
   const { data: submissionItems, error: submissionItemsError } = await admin
     .from("atlas_missing_info_items")
-    .select("id, section_key, item_type, title, description, status, created_at")
+    .select("id, section_key, item_type, title, description, source, status, created_at")
     .eq("submission_id", submissionId)
     .order("created_at", { ascending: true })
     .order("id", { ascending: true });
@@ -175,7 +178,8 @@ export async function handleTrackDetectedMissingInfo(submissionId: string, reque
   const logicalExisting = findExistingLogicalMissingInfo(
     submissionItems ?? [],
     detected.row,
-    detected.item.code === "extraction_reported_information_missing" ? detected.item.field_path : null
+    detected.item.code === "extraction_reported_information_missing" ? detected.item.field_path : null,
+    structuredFactPathsInEvidence(evidence)
   );
   if (logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });
 
