@@ -380,9 +380,12 @@ const PROBES = [
     suites: ["missing-info-interoperability"],
   },
   {
-    id: "P52", brief: "candidate-path aliases are removed from fact identity matching",
+    id: "P52", brief: "stored registry aliases stop resolving to canonical fact identity",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["const aliases = candidatePath ? candidateFactAliases(candidatePath, peerFactPaths) : null;", "const aliases = null;"]],
+    edits: [
+      ["      : resolveSchemaFieldIdentity(title);", "      : null;"],
+      ["const aliases = candidatePath ? candidateFactAliases(candidatePath, peerFactPaths) : null;", "const aliases = null;"],
+    ],
     suites: ["missing-info-interoperability"],
   },
   {
@@ -397,7 +400,7 @@ const PROBES = [
   {
     id: "P54", brief: "peer-path collision protection is removed from ambiguous fact aliases",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["return new Set(aliases.map(aliasPart).filter((alias) => !peers.some((peer) => peer.has(alias))));", "return new Set(aliases.map(aliasPart));"]],
+    edits: [["return new Set(aliases.map(aliasPart).filter(\n    (alias) => resolveSchemaFieldIdentity(alias) === path && !peers.some((peer) => peer.has(alias))\n  ));", "return new Set(aliases.map(aliasPart));"]],
     suites: ["missing-info-interoperability"],
   },
   {
@@ -427,7 +430,55 @@ const PROBES = [
   {
     id: "P59", brief: "Track ignores its authoritative structured fact path",
     file: "worker/src/detected-missing-info.ts",
-    edits: [["const candidatePath = missingInfoStructuredFactPath(candidate, structuredFactPath);", "const candidatePath = missingInfoStructuredFactPath(candidate);"]],
+    edits: [["const candidateKey = missingInfoLogicalKey(candidate, structuredFactPath);", "const candidateKey = missingInfoLogicalKey(candidate);"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P60", brief: "legacy production Derive document tuples are no longer recognised",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["if (legacyDocumentKey && item.item_type === \"document\" && missingInfoExactKey(item) === legacyDocumentKey) return true;", "if (false && legacyDocumentKey && item.item_type === \"document\" && missingInfoExactKey(item) === legacyDocumentKey) return true;"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P61", brief: "historical Track deterministic-ID lookup is removed",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["if (historical) return json({ ok: true, id: String(historical.id), duplicate: true });", "if (false && historical) return json({ ok: true, id: String(historical.id), duplicate: true });"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P62", brief: "Track reruns compute provenance from the current recommendation instead of prior recommendations",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["    provenance.ids,\n    body.detected_item_id", "    [String(recommendation.id)],\n    body.detected_item_id"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P63", brief: "a globally ambiguous human alias is accepted for one canonical path",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["resolveSchemaFieldIdentity(alias) === path && !peers.some((peer) => peer.has(alias))", "!peers.some((peer) => peer.has(alias))"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P64", brief: "fact alias matching accepts substrings",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["aliases.has(aliasPart(item.title))", "[...aliases].some((alias) => aliasPart(item.title).includes(alias))"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P65", brief: "fact alias matching ignores item_type",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return !!aliases && item.item_type === \"underwriting_info\" && aliases.has(aliasPart(item.title));", "return !!aliases && aliases.has(aliasPart(item.title));"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P66", brief: "Derive peer-path and global collision protection are removed",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return new Set(aliases.map(aliasPart).filter(\n    (alias) => resolveSchemaFieldIdentity(alias) === path && !peers.some((peer) => peer.has(alias))\n  ));", "return new Set(aliases.map(aliasPart));"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P67", brief: "source is omitted from existing-row identity projections",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [[".select(\"id, section_key, item_type, title, description, source, status, created_at\")", ".select(\"id, section_key, item_type, title, description, status, created_at\")", 2]],
     suites: ["missing-info-interoperability"],
   },
 ];

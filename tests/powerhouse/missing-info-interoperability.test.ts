@@ -1,5 +1,5 @@
 import { handleGenerateMissingInfo, handleTrackDetectedMissingInfo } from "../../worker/src/phase4-endpoints.js";
-import { resolveSchemaFieldIdentity } from "../../worker/src/completeness.js";
+import { resolveSchemaFieldIdentity, schemaFieldLabel } from "../../worker/src/completeness.js";
 import { env, installRestStub, MANAGER, SUB, type Row } from "./handler-harness.js";
 
 const REC = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -265,7 +265,7 @@ const AMBIGUOUS_PATHS = [
   "quote_terms.required_documents",
 ] as const;
 
-test("10. every ambiguous schema path interoperates through candidate-specific exact aliases", async () => {
+test("10. ambiguous paths use Track provenance and only structurally provable aliases", async () => {
   for (const path of AMBIGUOUS_PATHS) {
     const item = fact(path);
     const bare = path.slice(path.indexOf(".") + 1);
@@ -297,16 +297,24 @@ test("10. every ambiguous schema path interoperates through candidate-specific e
       await derive(deriveBareTrack);
       const existingId = deriveBareTrack.atlas_missing_info_items[0].id;
       const tracked = await track(deriveBareTrack, item);
-      eq([tracked.res.status, tracked.body.id, tracked.rows.length], [200, existingId, 1], `${path}: Derive bare key -> Track`);
+      eq([tracked.res.status, tracked.rows.length], [201, 2], `${path}: ambiguous bare key is not guessed`);
+      assert(tracked.body.id !== existingId, `${path}: Track does not consume irreducibly ambiguous Derive text`);
+    });
+
+    const deriveLabelTrack = seedFor(item, { fields: [{ field: schemaFieldLabel(path), reason_required: "Required." }] });
+    await withStub(deriveLabelTrack, async () => {
+      await derive(deriveLabelTrack);
+      eq([(await track(deriveLabelTrack, item)).res.status, deriveLabelTrack.atlas_missing_info_items.length], [201, 2], `${path}: ambiguous label is not guessed`);
     });
   }
 });
 
-test("11. ambiguous labels and bare keys never globally resolve or collapse paired canonical paths", async () => {
+test("11. paired ambiguous Track rows remain distinct and reuse their own historical IDs after rerun", async () => {
   for (const text of ["name", "Name", "risk_address", "Risk address", "required_documents", "Required documents"]) {
     eq(resolveSchemaFieldIdentity(text), null, `${text}: remains globally ambiguous`);
   }
   for (const [firstPath, secondPath] of [
+    ["broker.name", "extracted_client.name"],
     ["quote_terms.risk_address", "extracted_client.risk_address"],
     ["quote_terms.required_documents", "current_cover.required_documents"],
   ] as const) {
@@ -314,16 +322,68 @@ test("11. ambiguous labels and bare keys never globally resolve or collapse pair
     const second = fact(secondPath);
     const seed = seedFor(first);
     seed.atlas_recommendations = [recommendation(REC, "2026-10-26T08:00:00.000Z", [first, second])];
-    await withStub(seed, async () => {
+    await withStub(seed, async (stub) => {
       const one = await track(seed, first);
       const two = await track(seed, second);
       eq([one.res.status, two.res.status, seed.atlas_missing_info_items.length], [201, 201, 2], `${firstPath} and ${secondPath}: distinct`);
       assert(one.body.id !== two.body.id, "paired ambiguous paths have distinct deterministic ids");
+      const rerunFirst = fact(firstPath);
+      const rerunSecond = fact(secondPath);
+      eq([rerunFirst.item_id, rerunSecond.item_id], [first.item_id, second.item_id], "completeness item identity is stable across reruns");
+      seed.atlas_recommendations.push(recommendation(REC2, "2026-10-26T09:00:00.000Z", [rerunFirst, rerunSecond]));
+      const oneAgain = await track(seed, rerunFirst);
+      const twoAgain = await track(seed, rerunSecond);
+      eq(
+        [oneAgain.res.status, oneAgain.body.id, twoAgain.res.status, twoAgain.body.id, seed.atlas_missing_info_items.length],
+        [200, one.body.id, 200, two.body.id, 2],
+        `${firstPath} and ${secondPath}: each rerun maps to its own prior Track row`
+      );
+      const provenanceLoad = stub.requests.find((entry) =>
+        entry.table === "atlas_recommendations" && entry.url.searchParams.get("select") === "id"
+      );
+      assert(provenanceLoad, "historical provenance query recorded");
+      eq(
+        [provenanceLoad.url.searchParams.get("order"), provenanceLoad.url.searchParams.get("limit")],
+        ["created_at.desc", "100"],
+        "historical provenance is bounded and loads IDs only"
+      );
     });
   }
 });
 
-test("12. canonical required documents dedupe across rules and sections; findings retain exact tuple identity", async () => {
+test("12. a single ambiguous peer never reuses another path's human title", async () => {
+  for (const [firstPath, secondPath] of [
+    ["quote_terms.risk_address", "extracted_client.risk_address"],
+    ["quote_terms.required_documents", "current_cover.required_documents"],
+  ] as const) {
+    const first = fact(firstPath);
+    const second = fact(secondPath);
+    const seed = seedFor(first);
+    await withStub(seed, async () => {
+      const trackedFirst = await track(seed, first);
+      seed.atlas_recommendations.push(recommendation(REC2, "2026-10-26T09:00:00.000Z", [second]));
+      const trackedSecond = await track(seed, second);
+      eq([trackedFirst.res.status, trackedSecond.res.status, seed.atlas_missing_info_items.length], [201, 201, 2], `${firstPath} title cannot prove ${secondPath}`);
+      assert(trackedFirst.body.id !== trackedSecond.body.id, "cross-path title reuse rejected");
+    });
+  }
+});
+
+test("13. fact aliases require an exact title and underwriting item type", async () => {
+  const item = fact("extracted_client.registration_or_id_number");
+  for (const [label, existing] of [
+    ["substring", { id: "substring", submission_id: SUB, item_type: "underwriting_info", title: "prefix registration_or_id_number suffix", status: "open" }],
+    ["other type", { id: "other-type-alias", submission_id: SUB, item_type: "quote_term", title: "extracted_client.registration_or_id_number", status: "open" }],
+  ] as [string, Row][]) {
+    const seed = seedFor(item);
+    seed.atlas_missing_info_items.push(existing);
+    await withStub(seed, async () => {
+      eq([(await track(seed, item)).res.status, seed.atlas_missing_info_items.length], [201, 2], `${label}: alias is not sufficient`);
+    });
+  }
+});
+
+test("14. canonical required documents dedupe across rules and sections; findings retain exact tuple identity", async () => {
   const item = doc();
 
   const rules = seedFor(item, { sections: [
@@ -372,7 +432,41 @@ test("12. canonical required documents dedupe across rules and sections; finding
   });
 });
 
-test("13. Derive remains submission-scoped and exact fallback retains item_type", async () => {
+test("15. production-era Derive documents use exact legacy compatibility only", async () => {
+  const item = doc();
+  const legacy = {
+    id: "legacy-derived-document", submission_id: SUB, section_key: "commercial_motor", item_type: "document",
+    title: "Risk Survey", description: "Required for Commercial motor.", source: "quote_review", status: "open",
+    created_at: "2026-01-01T00:00:00.000Z",
+  };
+
+  const deriveLegacy = seedFor(item, { documents: ["Risk Survey"] });
+  deriveLegacy.atlas_missing_info_items.push({ ...legacy });
+  await withStub(deriveLegacy, async () => {
+    eq([(await derive(deriveLegacy)).body.generated_count, deriveLegacy.atlas_missing_info_items.length], [0, 1], "old Derive -> new Derive reuses exact tuple");
+  });
+
+  const trackLegacy = seedFor(item, { documents: ["Risk Survey"] });
+  trackLegacy.atlas_missing_info_items.push({ ...legacy });
+  await withStub(trackLegacy, async () => {
+    const tracked = await track(trackLegacy, item);
+    eq([tracked.res.status, tracked.body.id, trackLegacy.atlas_missing_info_items.length], [200, legacy.id, 1], "old Derive -> Track is proven by current structured requirement plus exact legacy tuple");
+  });
+
+  for (const [label, nearMiss] of [
+    ["finding", { ...legacy, id: "finding", description: "Required document is missing." }],
+    ["manual", { ...legacy, id: "manual", title: "Risk Survey copy", source: "manual" }],
+    ["different section", { ...legacy, id: "other-section", section_key: "contents", description: "Required for Contents." }],
+  ] as [string, Row][]) {
+    const seed = seedFor(item, { documents: ["Risk Survey"] });
+    seed.atlas_missing_info_items.push(nearMiss);
+    await withStub(seed, async () => {
+      eq([(await derive(seed)).body.generated_count, seed.atlas_missing_info_items.length], [1, 2], `${label}: exact legacy tuple is required`);
+    });
+  }
+});
+
+test("16. Derive remains submission-scoped and exact fallback retains item_type", async () => {
   const item = fact();
   const crossSubmission = seedFor(item, { fields: [{ field: "Unknown requirement", reason_required: "Same reason" }] });
   crossSubmission.atlas_missing_info_items.push({
@@ -390,6 +484,33 @@ test("13. Derive remains submission-scoped and exact fallback retains item_type"
   });
   await withStub(differentType, async () => {
     eq([(await derive(differentType)).body.generated_count, differentType.atlas_missing_info_items.length], [1, 2], "different item_type remains distinct");
+  });
+});
+
+test("17. harness projections expose only selected identity columns and handlers select every dependency", async () => {
+  const projectionSeed = { atlas_missing_info_items: [{ id: "visible", source: "rule", hidden: "must-not-leak" }] };
+  await withStub(projectionSeed, async () => {
+    const response = await fetch("http://stub.supabase.test/rest/v1/atlas_missing_info_items?select=id%2Csource");
+    eq(await response.json(), [{ id: "visible", source: "rule" }], "REST stub applies select projection");
+  });
+
+  const item = doc();
+  const seed = seedFor(item);
+  seed.atlas_missing_info_items.push({
+    id: "canonical-existing", submission_id: SUB, section_key: null, item_type: "document",
+    title: "RISK-SURVEY", description: "different tuple", source: "rule", status: "received",
+    created_at: "2026-01-01T00:00:00.000Z",
+  });
+  await withStub(seed, async (stub) => {
+    const run = await track(seed, item);
+    eq([run.res.status, run.body.id], [200, "canonical-existing"], "selected source preserves canonical identity");
+    const lookup = stub.requests.find((entry) => entry.table === "atlas_missing_info_items" && entry.method === "GET" && entry.url.searchParams.has("order"));
+    assert(lookup, "identity lookup recorded");
+    eq(
+      lookup.url.searchParams.get("select"),
+      "id,section_key,item_type,title,description,source,status,created_at",
+      "production lookup selects every identity, status, and ordering dependency"
+    );
   });
 });
 

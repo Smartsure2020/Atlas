@@ -114,7 +114,21 @@ function candidateFactAliases(path: string, peerFactPaths: readonly string[]): S
     .map((peer) => resolveSchemaPath(peer))
     .filter((peer): peer is string => !!peer && peer !== path)
     .map((peer) => new Set((schemaFieldAliases(peer) ?? []).map(aliasPart)));
-  return new Set(aliases.map(aliasPart).filter((alias) => !peers.some((peer) => peer.has(alias))));
+  return new Set(aliases.map(aliasPart).filter(
+    (alias) => resolveSchemaFieldIdentity(alias) === path && !peers.some((peer) => peer.has(alias))
+  ));
+}
+
+/** The pre-remediation Derive identity tuple, deliberately excluding source. */
+export function missingInfoExactKey(candidate: Omit<MissingInfoLogicalCandidate, "id">): string {
+  const itemType = typeof candidate.item_type === "string" ? candidate.item_type : "";
+  return [
+    "exact",
+    exactPart(candidate.section_key),
+    itemType,
+    exactPart(candidate.title),
+    exactPart(candidate.description),
+  ].join("|");
 }
 
 /**
@@ -138,13 +152,7 @@ export function missingInfoLogicalKey(
     if (title === "Cover sections required") return "underwriting_info|cover_sections_required";
   }
 
-  return [
-    "exact",
-    exactPart(candidate.section_key),
-    itemType,
-    exactPart(candidate.title),
-    exactPart(candidate.description),
-  ].join("|");
+  return missingInfoExactKey(candidate);
 }
 
 /** Server-authoritative, status-blind identity lookup for supported requirements. */
@@ -155,13 +163,40 @@ export function findExistingLogicalMissingInfo(
   peerFactPaths: readonly string[] = []
 ): MissingInfoLogicalCandidate | null {
   const candidateKey = missingInfoLogicalKey(candidate, structuredFactPath);
+  const legacyDocumentKey = isCanonicalRequiredDocument(candidate) ? missingInfoExactKey(candidate) : null;
   const candidatePath = missingInfoStructuredFactPath(candidate, structuredFactPath);
   const aliases = candidatePath ? candidateFactAliases(candidatePath, peerFactPaths) : null;
   return items.find((item) => {
     if (typeof item.id !== "string") return false;
     if (missingInfoLogicalKey(item) === candidateKey) return true;
+    if (legacyDocumentKey && item.item_type === "document" && missingInfoExactKey(item) === legacyDocumentKey) return true;
     return !!aliases && item.item_type === "underwriting_info" && aliases.has(aliasPart(item.title));
   }) ?? null;
+}
+
+/** Stable completeness identity corresponding to a structurally proven candidate. */
+export function detectedItemIdForMissingInfoCandidate(
+  candidate: Omit<MissingInfoLogicalCandidate, "id">
+): string | null {
+  if (isCanonicalRequiredDocument(candidate)) {
+    const key = documentKey(typeof candidate.title === "string" ? candidate.title : "");
+    return key ? `cmp:required_document_missing:-:-:${key}` : null;
+  }
+  const path = missingInfoStructuredFactPath(candidate);
+  return path ? `cmp:extraction_reported_information_missing:-:-:field:${path}` : null;
+}
+
+/** Match only IDs Atlas could have generated for this stable item on real recommendations. */
+export function findHistoricalTrackedMissingInfo(
+  items: readonly MissingInfoLogicalCandidate[],
+  submissionId: string,
+  recommendationIds: readonly string[],
+  detectedItemId: string
+): MissingInfoLogicalCandidate | null {
+  const ids = new Set(recommendationIds.map((recommendationId) =>
+    detectedMissingInfoId(submissionId, recommendationId, detectedItemId)
+  ));
+  return items.find((item) => typeof item.id === "string" && ids.has(item.id)) ?? null;
 }
 
 /** Canonical fact paths present in one persisted Evidence v3 packet. */

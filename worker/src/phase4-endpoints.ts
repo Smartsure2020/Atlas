@@ -19,7 +19,65 @@ import {
   type CommunicationType,
 } from "./phase4-workflow";
 import { roleCanViewManagerDashboard, roleCanViewUnderwritingIntelligence, roleCanWrite } from "./phase6-hardening";
-import { detectedMissingInfoId, findExistingLogicalMissingInfo, findTrackableCompletenessItem, missingInfoStructuredFactPath, structuredFactPathsInEvidence, type MissingInfoLogicalCandidate } from "./detected-missing-info";
+import {
+  detectedItemIdForMissingInfoCandidate,
+  detectedMissingInfoId,
+  findExistingLogicalMissingInfo,
+  findHistoricalTrackedMissingInfo,
+  findTrackableCompletenessItem,
+  isCanonicalRequiredDocument,
+  missingInfoLogicalKey,
+  missingInfoStructuredFactPath,
+  structuredFactPathsInEvidence,
+  type MissingInfoLogicalCandidate,
+} from "./detected-missing-info";
+
+const TRACK_PROVENANCE_RECOMMENDATION_LIMIT = 100;
+
+async function recommendationIdsForTrackProvenance(
+  admin: ReturnType<typeof adminClient>,
+  submissionId: string,
+  excludeRecommendationId?: string
+): Promise<{ ids: string[]; error: boolean }> {
+  let query = admin
+    .from("atlas_recommendations")
+    .select("id")
+    .eq("submission_id", submissionId);
+  if (excludeRecommendationId) query = query.neq("id", excludeRecommendationId);
+  const { data, error } = await query
+    .order("created_at", { ascending: false })
+    .limit(TRACK_PROVENANCE_RECOMMENDATION_LIMIT);
+  return {
+    ids: (data ?? []).flatMap((row) => typeof row.id === "string" && row.id ? [row.id] : []),
+    error: !!error,
+  };
+}
+
+async function currentStructuredDocumentCandidates(
+  admin: ReturnType<typeof adminClient>,
+  submissionId: string
+): Promise<{ items: MissingInfoItemInput[]; error: boolean }> {
+  const { data: review, error: reviewError } = await admin
+    .from("atlas_quote_reviews")
+    .select("id")
+    .eq("submission_id", submissionId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (reviewError) return { items: [], error: true };
+  if (!review?.id) return { items: [], error: false };
+  const { data: sections, error: sectionsError } = await admin
+    .from("atlas_quote_review_sections")
+    .select("section_key, section_name, matched_rule_id, missing_documents, findings, rating_findings, excess_findings, warranty_findings")
+    .eq("quote_review_id", String(review.id))
+    .order("created_at", { ascending: true });
+  if (sectionsError) return { items: [], error: true };
+  return {
+    items: missingInfoFromQuoteReview({ sections: (sections ?? []) as any })
+      .filter((item) => isCanonicalRequiredDocument(item)),
+    error: false,
+  };
+}
 
 async function latestReview(admin: ReturnType<typeof adminClient>, submissionId: string) {
   const { data } = await admin
@@ -76,9 +134,16 @@ export async function handleGenerateMissingInfo(submissionId: string, env: Env, 
   const generatedFactPaths = generated
     .map((item) => missingInfoStructuredFactPath(item))
     .filter((path): path is string => path !== null);
+  const generatedDetectedItemIds = generated.map((item) => detectedItemIdForMissingInfoCandidate(item));
+  const provenance = known.length > 0 && generatedDetectedItemIds.some(Boolean)
+    ? await recommendationIdsForTrackProvenance(admin, submissionId)
+    : { ids: [], error: false };
+  if (provenance.error) return json({ error: "fetch_failed" }, 500);
   const rows: Record<string, unknown>[] = [];
-  for (const item of generated) {
+  for (const [index, item] of generated.entries()) {
     if (findExistingLogicalMissingInfo(known, item, null, generatedFactPaths)) continue;
+    const detectedItemId = generatedDetectedItemIds[index];
+    if (detectedItemId && findHistoricalTrackedMissingInfo(known, submissionId, provenance.ids, detectedItemId)) continue;
     const row = { ...item, submission_id: submissionId, created_by: user.id };
     rows.push(row);
     known.push({ id: `pending-${rows.length}`, ...row });
@@ -182,6 +247,27 @@ export async function handleTrackDetectedMissingInfo(submissionId: string, reque
     structuredFactPathsInEvidence(evidence)
   );
   if (logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });
+
+  if (isCanonicalRequiredDocument(detected.row)) {
+    const structured = await currentStructuredDocumentCandidates(admin, submissionId);
+    if (structured.error) return json({ error: "fetch_failed" }, 500);
+    const detectedKey = missingInfoLogicalKey(detected.row);
+    for (const candidate of structured.items) {
+      if (missingInfoLogicalKey(candidate) !== detectedKey) continue;
+      const legacyExisting = findExistingLogicalMissingInfo(submissionItems ?? [], candidate);
+      if (legacyExisting) return json({ ok: true, id: String(legacyExisting.id), duplicate: true });
+    }
+  }
+
+  const provenance = await recommendationIdsForTrackProvenance(admin, submissionId, String(recommendation.id));
+  if (provenance.error) return json({ error: "fetch_failed" }, 500);
+  const historical = findHistoricalTrackedMissingInfo(
+    submissionItems ?? [],
+    submissionId,
+    provenance.ids,
+    body.detected_item_id
+  );
+  if (historical) return json({ ok: true, id: String(historical.id), duplicate: true });
 
   const id = detectedMissingInfoId(submissionId, String(recommendation.id), body.detected_item_id);
   const { data: existing } = await admin

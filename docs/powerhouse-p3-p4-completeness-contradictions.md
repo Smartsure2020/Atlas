@@ -362,16 +362,30 @@ for non-brokers. Track and *Derive from analysis* call one server-side logical m
 before inserting. Structured facts normally use their exact canonical path. For the six
 paths whose bare key/label is shared (`extracted_client.name`, `broker.name`, both
 `risk_address` paths and both `required_documents` paths), the known candidate path
-authorises only that path's exact registry aliases (full path, bare key and generated
-label). Aliases shared by another fact in the same candidate set are excluded. Atlas never
-maps an ambiguous stored title globally to one path; a legacy title that cannot be proved
-remains ambiguous.
+authorises only exact registry aliases that resolve uniquely back to that same path. A
+full canonical path remains proof; a shared bare key or generated label does not. Atlas
+never maps an ambiguous stored title globally to one path, even when only one peer is in
+the current recommendation. Full-path Derive rows can therefore interoperate, while bare
+or label-only ambiguous Derive rows can remain separate rather than be guessed.
 
 Rule-sourced `document` rows are canonical required-document requirements and use
 `documentKey(title)`. The same document required by several rules or sections is one
-broker requirement because it is supplied once. Quote-review findings, manual documents
-and other non-canonical rows keep the prior exact section/type/title/description tuple,
-so two findings with the same section title are not silently merged. Every real status
+broker requirement because it is supplied once. Production-era structured Derive rows
+written with `source=quote_review` remain compatible only when their former exact
+section/type/title/description tuple matches a current structured rule requirement; source
+is deliberately not part of that legacy tuple. Track uses the current structured review
+requirement to prove this bridge. A merely similar finding or manual row is not consumed.
+Quote-review findings, manual documents and other non-canonical rows otherwise keep the
+exact tuple, so two findings with the same section title are not silently merged.
+
+Track also has provenance stronger than human-facing text. Completeness item IDs are
+deterministic from canonical fact paths or document keys. After validating the current
+latest v3 item, Track loads at most the 100 newest prior recommendation IDs for the same
+submission (IDs only, never their evidence packets), recomputes the deterministic Track
+IDs for that stable item, and reuses an existing matching row. Derive applies the same
+proof when its structured candidate yields a stable completeness item ID. This keeps each
+member of an ambiguous pair attached to its own earlier Track row without title inference.
+Every real status
 (`open`, `requested`, `received`, `waived`, `not_required`) counts as already tracked and
 is returned unchanged. Equivalent legacy rows are selected deterministically by oldest
 `created_at`, then lowest `id`; a failed lookup fails closed and performs no insert.
@@ -450,12 +464,12 @@ Run on the final head (nothing pushed, migrated or deployed).
 | Check | Result |
 | --- | --- |
 | Backend, every script in `npm test` | complete chain exit 0, 0 failures |
-| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, missing-info interoperability, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 29/29, tracking 22/22, interoperability 14/14, persistence 36/36 |
+| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, missing-info interoperability, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 29/29, tracking 22/22, interoperability 18/18, persistence 36/36 |
 | Matcher differential vs the frozen production v1 matcher (3,000 fixtures per corpus) | **0 unexpected authoritative differences**; 0 category violations; 0 order-invariance failures |
 | Phase 1A 500-fixture differential | unchanged pinned hash `b14d9927…a36` |
 | Phase 1A evidence (32) / handler (3) / Phase 24 clean-only trust (47) | pass |
 | Evidence-v2 immutability corpus | pass; shared v2 semantics unchanged |
-| Mutation probes (`npm run test:powerhouse-mutations`) | **60/60 killed**, including candidate-path aliases, global-ambiguity and peer-collision guards, canonical-vs-finding document classification, Derive submission scope, exact item type, all real-status semantics, lookup failure, deterministic ordering, no fuzzy matching, latest-recommendation ordering, detected-item identity, value-presence and email-character pins, invalid live broker-email registry, persisted value digest and allow-list bypass |
+| Mutation probes (`npm run test:powerhouse-mutations`) | **68/68 killed**, including exact legacy-document compatibility, deterministic Track provenance, paired ambiguous reruns, global-ambiguity and peer-collision guards, exact/non-substring aliases, alias item type, selected source metadata, canonical-vs-finding document classification, Derive submission scope, all real-status semantics, lookup failure, deterministic ordering, invalid live broker-email registry, persisted value digest and allow-list bypass |
 | Frontend vitest | 894 tests in 40 files, 0 failures (was 783) |
 | Frontend `tsc -b` + production build | pass |
 | Worker `tsc --noEmit` | pass |
@@ -525,8 +539,9 @@ matrices, and the evidence packet is already ~10 MB at 400 insurers × 16 rules;
 * Existing duplicate missing-information rows are not merged or deleted. When they exist,
   Track returns the oldest row, breaking equal timestamps by the lowest id.
 * The six ambiguous fact paths cannot be recovered from an old row containing only a
-  shared label or bare key when competing paths are simultaneously plausible. Candidate-
-  path aliases solve provable directions without inventing a global mapping.
+  shared label or bare key. Shared text is never proof, even if only one path is present
+  now. Full canonical paths and deterministic Atlas Track IDs solve provable directions
+  without inventing a global mapping.
 * A missing-information row stores a document title, not a separate canonical document
   identity. Two genuinely different document requirements with the same persisted
   canonical title therefore cannot be distinguished without a schema change.
@@ -544,5 +559,8 @@ matrices, and the evidence packet is already ~10 MB at 400 insurers × 16 rules;
   concurrent *Derive from analysis* requests can therefore both pass the read-before-
   insert check; eliminating that theoretical race requires a migration. Track retains its
   deterministic-ID backstop for concurrent repeats of the same detected item.
+* Historical Track provenance is intentionally bounded to the 100 newest prior
+  recommendations for the submission. It loads IDs only; a Track row older than that
+  window can remain separate rather than trigger an unbounded evidence scan.
 * A deliberately repeated request after `waived` or `not_required` still reuses the
   existing row. A reopen/new-request policy is a separate workflow decision.

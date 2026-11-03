@@ -46,6 +46,16 @@ export function installRestStub(
   const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
     status, headers: { "Content-Type": "application/json" },
   });
+  const project = (rows: Row[], select: string | null): Row[] => {
+    if (options.projectSelect === false || !select || select === "*") return rows;
+    const fields = select.split(",").map((item) => item.trim()).filter(Boolean);
+    return rows.map((row) => Object.fromEntries(fields.map((fieldSpec) => {
+      const separator = fieldSpec.indexOf(":");
+      const output = separator >= 0 ? fieldSpec.slice(0, separator) : fieldSpec;
+      const source = separator >= 0 ? fieldSpec.slice(separator + 1) : fieldSpec;
+      return [output, row[source]];
+    })));
+  };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const match = url.pathname.match(/^\/rest\/v1\/([a-z_0-9]+)$/);
@@ -68,6 +78,9 @@ export function installRestStub(
         if (raw.startsWith("eq.")) {
           const expected = raw.slice(3);
           rows = rows.filter((row) => String(row[key]) === expected);
+        } else if (raw.startsWith("neq.")) {
+          const expected = raw.slice(4);
+          rows = rows.filter((row) => String(row[key]) !== expected);
         } else if (raw.startsWith("in.(") && raw.endsWith(")")) {
           const expected = raw.slice(4, -1).split(",").map((item) => item.replace(/^"|"$/g, ""));
           rows = rows.filter((row) => expected.includes(String(row[key])));
@@ -91,16 +104,7 @@ export function installRestStub(
       }
       const limit = url.searchParams.get("limit");
       if (limit !== null) rows = rows.slice(0, Math.max(0, Number.parseInt(limit, 10) || 0));
-      const select = url.searchParams.get("select");
-      if (options.projectSelect && select) {
-        const fields = select.split(",").map((item) => item.trim()).filter(Boolean);
-        rows = rows.map((row) => Object.fromEntries(fields.map((fieldSpec) => {
-          const separator = fieldSpec.indexOf(":");
-          const output = separator >= 0 ? fieldSpec.slice(0, separator) : fieldSpec;
-          const source = separator >= 0 ? fieldSpec.slice(separator + 1) : fieldSpec;
-          return [output, row[source]];
-        })));
-      }
+      rows = project(rows, url.searchParams.get("select"));
       if (wantsObject) {
         return rows.length === 1 ? response(rows[0]) : response({ code: "PGRST116", message: "0 rows" }, 406);
       }
@@ -115,7 +119,10 @@ export function installRestStub(
         return response({ code: "23505", message: "duplicate key" }, 409);
       }
       stored.push(...inserted);
-      if (wantsRepresentation) return wantsObject ? response(inserted[0], 201) : response(inserted, 201);
+      if (wantsRepresentation) {
+        const projected = project(inserted, url.searchParams.get("select"));
+        return wantsObject ? response(projected[0], 201) : response(projected, 201);
+      }
       return new Response(null, { status: 201 });
     }
     return new Response(null, { status: 204 });
