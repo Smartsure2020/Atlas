@@ -481,6 +481,72 @@ const PROBES = [
     edits: [[".select(\"id, section_key, item_type, title, description, source, status, created_at\")", ".select(\"id, section_key, item_type, title, description, status, created_at\")", 2]],
     suites: ["missing-info-interoperability"],
   },
+  {
+    id: "P68", brief: "historical recommendation provenance loses submission scope",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["    .from(\"atlas_recommendations\")\n    .select(\"id\")\n    .eq(\"submission_id\", submissionId);", "    .from(\"atlas_recommendations\")\n    .select(\"id\");"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P69", brief: "Track ignores a failed historical provenance query",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["  const provenance = await recommendationIdsForTrackProvenance(admin, submissionId, String(recommendation.id));\n  if (provenance.error) return json({ error: \"fetch_failed\" }, 500);", "  const provenance = await recommendationIdsForTrackProvenance(admin, submissionId, String(recommendation.id));\n  if (false && provenance.error) return json({ error: \"fetch_failed\" }, 500);"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P70", brief: "Derive ignores a failed historical provenance query",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["  const provenance = known.length > 0 && generatedDetectedItemIds.some(Boolean)\n    ? await recommendationIdsForTrackProvenance(admin, submissionId)\n    : { ids: [], error: false };\n  if (provenance.error) return json({ error: \"fetch_failed\" }, 500);", "  const provenance = known.length > 0 && generatedDetectedItemIds.some(Boolean)\n    ? await recommendationIdsForTrackProvenance(admin, submissionId)\n    : { ids: [], error: false };\n  if (false && provenance.error) return json({ error: \"fetch_failed\" }, 500);"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P71", brief: "Track ignores a failed quote-review legacy-bridge lookup",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["if (reviewError) return { items: [], error: true };", "if (false && reviewError) return { items: [], error: true };"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P72", brief: "Track ignores a failed quote-review-section legacy-bridge lookup",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["if (sectionsError) return { items: [], error: true };", "if (false && sectionsError) return { items: [], error: true };"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P73", brief: "historical provenance examines only the newest prior recommendation",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["  const { data, error } = await query\n    .order(\"created_at\", { ascending: false })\n    .limit(TRACK_PROVENANCE_RECOMMENDATION_LIMIT);", "  const { data, error } = await query\n    .order(\"created_at\", { ascending: false })\n    .limit(1);"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P74", brief: "historical provenance examines only the oldest prior recommendation",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["  const { data, error } = await query\n    .order(\"created_at\", { ascending: false })\n    .limit(TRACK_PROVENANCE_RECOMMENDATION_LIMIT);", "  const { data, error } = await query\n    .order(\"created_at\", { ascending: true })\n    .limit(1);"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P75", brief: "source is removed only from Derive's existing-row projection",
+    file: "worker/src/phase4-endpoints.ts",
+    edits: [["  const { data: existing, error: existingError } = await admin\n    .from(\"atlas_missing_info_items\")\n    .select(\"id, section_key, item_type, title, description, source, status, created_at\")", "  const { data: existing, error: existingError } = await admin\n    .from(\"atlas_missing_info_items\")\n    .select(\"id, section_key, item_type, title, description, status, created_at\")"]],
+    suites: ["missing-info-interoperability"],
+  },
+  {
+    id: "P76", brief: "Track-side canonical document completeness item formula drifts",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return key ? `cmp:required_document_missing:-:-:${key}` : null;", "return key ? `cmp:required_document_missing:-:document:${key}` : null;"]],
+    suites: ["completeness"],
+  },
+  {
+    id: "P77", brief: "Track-side structured fact path component drifts",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["return path ? `cmp:extraction_reported_information_missing:-:-:field:${path}` : null;", "return path ? `cmp:extraction_reported_information_missing:-:-:path:${path}` : null;"]],
+    suites: ["completeness"],
+  },
+  {
+    id: "P78", brief: "deterministic Track UUID drops recommendation scope",
+    file: "worker/src/detected-missing-info.ts",
+    edits: [["const hex = sha256Hex(`atlas-detected-missing-info-v1\\u0000${submissionId}\\u0000${recommendationId}\\u0000${detectedItemId}`);", "const hex = sha256Hex(`atlas-detected-missing-info-v1\\u0000${submissionId}\\u0000${detectedItemId}`);"]],
+    suites: ["completeness"],
+  },
 ];
 
 // ---------------------------------------------------------------------------

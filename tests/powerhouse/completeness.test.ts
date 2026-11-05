@@ -26,6 +26,13 @@ import {
 } from "../../worker/src/recommendation-evidence-v3.js";
 import { TAXONOMY_VERSION } from "../../worker/src/taxonomy.js";
 import { MATCHER_VERSION } from "../../worker/src/matcher.js";
+import {
+  deriveDetectedMissingInfo,
+  detectedItemIdForMissingInfoCandidate,
+  detectedMissingInfoId,
+  findTrackableCompletenessItem,
+} from "../../worker/src/detected-missing-info.js";
+import { missingInfoFromQuoteReview } from "../../worker/src/phase4-workflow.js";
 import { clone } from "./fixture-loader.js";
 
 const tests: { name: string; fn: () => void | Promise<void> }[] = [];
@@ -493,6 +500,57 @@ test("26. the packet carries stable references only: no URL, storage path or tok
   const evidence = v3(risk(), [rule({ required_documents: ["Risk survey"] })], [], { missing_information: [{ field: "extracted_client.name" }] });
   const text = JSON.stringify([evidence.completeness, evidence.contradictions]);
   for (const needle of ["http://", "https://", "storage_path", "signed_url", "token", "secret", "service-role"]) assert(!text.includes(needle), `no ${needle}`);
+});
+
+test("27. real completeness IDs exactly match Track-side document and structured-fact identities", () => {
+  const documentEvidence = v3(
+    risk({ available_documents: [] }),
+    [rule({ required_documents: ["Risk Survey"] })]
+  );
+  const documentItem = documentEvidence.completeness.items.find((item) => item.code === "required_document_missing");
+  assert(documentItem, "real completeness path emitted the required document");
+
+  const paths = [
+    "extracted_client.registration_or_id_number",
+    "extracted_client.name",
+    "broker.name",
+    "extracted_client.risk_address",
+    "quote_terms.risk_address",
+    "current_cover.required_documents",
+    "quote_terms.required_documents",
+  ];
+  const factEvidence = v3(risk(), [rule({})], [], {
+    missing_information: paths.map((field) => ({ field, reason_required: "Required." })),
+  });
+  const factItems = paths.map((path) => {
+    const item = factEvidence.completeness.items.find((candidate) => candidate.field_path === path);
+    assert(item, `${path}: real completeness path emitted the fact`);
+    return item;
+  });
+
+  const phase4Candidates = missingInfoFromQuoteReview({
+    quoteReviewId: "review",
+    sections: [{
+      section_key: "commercial_motor", section_name: "Commercial motor", matched_rule_id: "rule",
+      missing_documents: ["Risk Survey"], findings: [], rating_findings: [], excess_findings: [], warranty_findings: [],
+    }],
+    extractionMissing: paths.map((field) => ({ field, reason_required: "Required." })),
+  });
+  const phase4Ids = new Set(phase4Candidates.map((candidate) => detectedItemIdForMissingInfoCandidate(candidate)).filter(Boolean));
+
+  for (const item of [documentItem, ...factItems]) {
+    const trackSide = deriveDetectedMissingInfo(item);
+    assert(trackSide, `${item.item_id}: item is Track-eligible`);
+    const found = findTrackableCompletenessItem(
+      { schema_version: "recommendation-evidence-v3", completeness: { items: [item] } },
+      item.item_id
+    );
+    assert(found && JSON.stringify(found.row) === JSON.stringify(trackSide), `${item.item_id}: Track resolves the real completeness identity`);
+    assert(phase4Ids.has(item.item_id), `${item.item_id}: completeness and Phase 4 formula compatibility`);
+    const firstRecommendation = detectedMissingInfoId("submission", "recommendation-a", item.item_id);
+    const secondRecommendation = detectedMissingInfoId("submission", "recommendation-b", item.item_id);
+    assert(firstRecommendation !== secondRecommendation, `${item.item_id}: deterministic Track UUID remains recommendation-scoped`);
+  }
 });
 
 let failures = 0;

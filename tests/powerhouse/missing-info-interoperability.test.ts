@@ -1,11 +1,13 @@
 import { handleGenerateMissingInfo, handleTrackDetectedMissingInfo } from "../../worker/src/phase4-endpoints.js";
 import { resolveSchemaFieldIdentity, schemaFieldLabel } from "../../worker/src/completeness.js";
+import { deriveDetectedMissingInfo, detectedMissingInfoId } from "../../worker/src/detected-missing-info.js";
 import { env, installRestStub, MANAGER, SUB, type Row } from "./handler-harness.js";
 
 const REC = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const REC2 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const REVIEW = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const OTHER = "99999999-9999-4999-8999-999999999999";
+const OTHER2 = "88888888-8888-4888-8888-888888888888";
 
 interface Test { name: string; fn: () => void | Promise<void> }
 const tests: Test[] = [];
@@ -93,9 +95,41 @@ async function track(seed: Record<string, Row[]>, item: Row) {
   return { res, body: await res.json() as Row, rows: seed.atlas_missing_info_items };
 }
 
-async function withStub(seed: Record<string, Row[]>, fn: (stub: ReturnType<typeof installRestStub>) => Promise<void>, failTables: string[] = []) {
-  const stub = installRestStub(seed, { failTables });
+async function withStub(
+  seed: Record<string, Row[]>,
+  fn: (stub: ReturnType<typeof installRestStub>) => Promise<void>,
+  failure: string[] | Parameters<typeof installRestStub>[1] = []
+) {
+  const stub = installRestStub(seed, Array.isArray(failure) ? { failTables: failure } : failure);
   try { await fn(stub); } finally { stub.restore(); }
+}
+
+const at = (sequence: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, sequence)).toISOString();
+const recId = (label: string, sequence: number) => `${label}-rec-${sequence}`;
+const isProvenanceQuery = (request: { table: string; url: URL }) =>
+  request.table === "atlas_recommendations" && request.url.searchParams.get("select") === "id";
+
+function trackedRow(item: Row, recommendationId: string, submissionId = SUB): Row {
+  const derived = deriveDetectedMissingInfo(item);
+  assert(derived, "fixture item must be trackable");
+  return {
+    id: detectedMissingInfoId(submissionId, recommendationId, String(item.item_id)),
+    submission_id: submissionId,
+    ...derived,
+    status: "open",
+    created_at: at(0),
+  };
+}
+
+function history(item: Row, newerPriorCount: number, label = "history"): { originId: string; currentId: string; rows: Row[] } {
+  const originId = recId(label, 0);
+  const rows = [recommendation(originId, at(0), [item])];
+  for (let index = 1; index <= newerPriorCount; index++) {
+    rows.push(recommendation(recId(label, index), at(index), [item]));
+  }
+  const currentId = recId(label, newerPriorCount + 1);
+  rows.push(recommendation(currentId, at(newerPriorCount + 1), [item]));
+  return { originId, currentId, rows };
 }
 
 test("1. DOCUMENT real workflows: Derive -> Track, Track -> Derive and Derive -> Derive each keep one row", async () => {
@@ -511,6 +545,165 @@ test("17. harness projections expose only selected identity columns and handlers
       "id,section_key,item_type,title,description,source,status,created_at",
       "production lookup selects every identity, status, and ordering dependency"
     );
+  });
+});
+
+test("18. provenance is submission-scoped before the 100-row limit is applied", async () => {
+  const item = fact("quote_terms.risk_address");
+  const scoped = history(item, 99, "submission-a");
+  const seed = seedFor(item);
+  seed.atlas_recommendations = [
+    ...scoped.rows,
+    ...Array.from({ length: 101 }, (_, index) =>
+      recommendation(recId("submission-b", index), at(200 + index), [item], index % 2 ? OTHER : OTHER2)
+    ),
+  ];
+  seed.atlas_missing_info_items = [trackedRow(item, scoped.originId)];
+
+  await withStub(seed, async (stub) => {
+    const run = await track(seed, item);
+    eq([run.res.status, run.body.id, run.rows.length], [200, seed.atlas_missing_info_items[0].id, 1], "foreign recommendations cannot crowd out A's origin");
+    const query = stub.requests.find(isProvenanceQuery);
+    assert(query, "provenance query was required");
+    eq([query.url.searchParams.get("submission_id"), query.url.searchParams.get("limit")], [`eq.${SUB}`, "100"], "scope precedes the accepted cap");
+  });
+});
+
+test("19. Track fails closed only when the recommendation-ID provenance query fails", async () => {
+  const item = fact("quote_terms.risk_address");
+  const prior = history(item, 0, "track-failure");
+  const seed = seedFor(item);
+  seed.atlas_recommendations = prior.rows;
+  seed.atlas_missing_info_items = [trackedRow(item, prior.originId)];
+
+  await withStub(seed, async (stub) => {
+    const before = JSON.stringify(seed.atlas_missing_info_items);
+    const run = await track(seed, item);
+    eq([run.res.status, run.body.error], [500, "fetch_failed"], "Track rejects a failed provenance read");
+    eq(stub.writes("atlas_missing_info_items").length, 0, "Track performs no insert");
+    eq(JSON.stringify(seed.atlas_missing_info_items), before, "existing row is unchanged");
+    eq(stub.requests.filter(isProvenanceQuery).length, 1, "the injected failure reached exactly the provenance query");
+  }, { failRequest: isProvenanceQuery });
+});
+
+test("20. Derive fails closed on required provenance failure and skips provenance with no existing rows", async () => {
+  const item = fact("quote_terms.risk_address");
+  const prior = history(item, 0, "derive-failure");
+  const seeded = seedFor(item, { fields: [{ field: "quote_terms.risk_address", reason_required: "Required." }] });
+  seeded.atlas_recommendations = prior.rows;
+  seeded.atlas_missing_info_items = [trackedRow(item, prior.originId)];
+
+  await withStub(seeded, async (stub) => {
+    const before = JSON.stringify(seeded.atlas_missing_info_items);
+    const run = await derive(seeded);
+    eq([run.res.status, run.body.error], [500, "fetch_failed"], "Derive rejects a failed required provenance read");
+    eq(stub.writes("atlas_missing_info_items").length, 0, "Derive performs no insert");
+    eq(JSON.stringify(seeded.atlas_missing_info_items), before, "existing row is unchanged");
+  }, { failRequest: isProvenanceQuery });
+
+  const empty = seedFor(item, { fields: [{ field: "quote_terms.risk_address", reason_required: "Required." }] });
+  await withStub(empty, async (stub) => {
+    const run = await derive(empty);
+    eq([run.res.status, run.body.generated_count, run.rows.length], [200, 1, 1], "Derive succeeds without unnecessary provenance");
+    eq(stub.requests.filter(isProvenanceQuery).length, 0, "no existing rows means no provenance query");
+  }, { failRequest: isProvenanceQuery });
+});
+
+test("21. Track's legacy document bridge fails closed on either support-query failure", async () => {
+  const item = doc();
+  const legacy = {
+    id: "legacy-bridge-row", submission_id: SUB, section_key: "commercial_motor", item_type: "document",
+    title: "Risk Survey", description: "Required for Commercial motor.", source: "quote_review", status: "open",
+    created_at: at(0),
+  };
+  for (const [label, failRequest] of [
+    ["quote review", (request: { table: string; url: URL }) => request.table === "atlas_quote_reviews" && request.url.searchParams.get("select") === "id"],
+    ["quote review sections", (request: { table: string }) => request.table === "atlas_quote_review_sections"],
+  ] as const) {
+    const seed = seedFor(item, { documents: ["Risk Survey"] });
+    seed.atlas_missing_info_items = [{ ...legacy }];
+    await withStub(seed, async (stub) => {
+      const run = await track(seed, item);
+      eq([run.res.status, run.body.error], [500, "fetch_failed"], `${label}: bridge failure is closed`);
+      eq(stub.writes("atlas_missing_info_items").length, 0, `${label}: no insert`);
+    }, { failRequest });
+  }
+});
+
+test("22. Track provenance searches multiple prior recommendations, not only an endpoint", async () => {
+  const item = fact("quote_terms.risk_address");
+  const twoBack = history(item, 1, "two-back");
+  const twoBackSeed = seedFor(item);
+  twoBackSeed.atlas_recommendations = twoBack.rows;
+  twoBackSeed.atlas_missing_info_items = [trackedRow(item, twoBack.originId)];
+  await withStub(twoBackSeed, async () => {
+    const run = await track(twoBackSeed, item);
+    eq([run.res.status, run.rows.length], [200, 1], "origin two recommendations back is found");
+  });
+
+  const middleOrigin = recId("middle", 2);
+  const middleSeed = seedFor(item);
+  middleSeed.atlas_recommendations = [0, 1, 2, 3, 4].map((index) => recommendation(recId("middle", index), at(index), [item]));
+  middleSeed.atlas_missing_info_items = [trackedRow(item, middleOrigin)];
+  await withStub(middleSeed, async () => {
+    const run = await track(middleSeed, item);
+    eq([run.res.status, run.rows.length], [200, 1], "origin neither newest nor oldest is found");
+  });
+});
+
+test("23. Track pins ambiguous 99/100/101 boundaries and unambiguous beyond-cap identity", async () => {
+  const ambiguous = fact("quote_terms.risk_address");
+  for (const [distance, expectedStatus, expectedRows] of [[99, 200, 1], [100, 200, 1], [101, 201, 2]] as const) {
+    const prior = history(ambiguous, distance - 1, `track-${distance}`);
+    const seed = seedFor(ambiguous);
+    seed.atlas_recommendations = prior.rows;
+    seed.atlas_missing_info_items = [trackedRow(ambiguous, prior.originId)];
+    await withStub(seed, async () => {
+      const run = await track(seed, ambiguous);
+      eq([run.res.status, run.rows.length], [expectedStatus, expectedRows], `ambiguous origin ${distance} back`);
+    });
+  }
+
+  const unambiguous = fact();
+  const far = history(unambiguous, 149, "unambiguous-150");
+  const control = seedFor(unambiguous);
+  control.atlas_recommendations = far.rows;
+  control.atlas_missing_info_items = [trackedRow(unambiguous, far.originId)];
+  await withStub(control, async () => {
+    const run = await track(control, unambiguous);
+    eq([run.res.status, run.rows.length], [200, 1], "unambiguous fact dedupes 150 back through logical identity");
+  });
+});
+
+test("24. Derive pins its latest-inclusive 100-row provenance window", async () => {
+  const item = fact("quote_terms.risk_address");
+  for (const [distance, expectedGenerated, expectedRows] of [[99, 0, 1], [100, 1, 2]] as const) {
+    const originId = recId(`derive-${distance}`, 0);
+    const seed = seedFor(item, { fields: [{ field: "quote_terms.risk_address", reason_required: "Required." }] });
+    seed.atlas_recommendations = Array.from({ length: distance + 1 }, (_, index) =>
+      recommendation(recId(`derive-${distance}`, index), at(index), [item])
+    );
+    seed.atlas_missing_info_items = [trackedRow(item, originId)];
+    await withStub(seed, async () => {
+      const run = await derive(seed);
+      eq([run.res.status, run.body.generated_count, run.rows.length], [200, expectedGenerated, expectedRows], `Derive origin ${distance} back`);
+    });
+  }
+});
+
+test("25. Derive's own source projection preserves canonical document identity", async () => {
+  const item = doc();
+  const seed = seedFor(item, { documents: ["RISK-SURVEY"] });
+  seed.atlas_missing_info_items = [{
+    id: "canonical-rule-document", submission_id: SUB, section_key: "different-section", item_type: "document",
+    title: "Risk Survey", description: "different tuple", source: "rule", status: "received", created_at: at(0),
+  }];
+  await withStub(seed, async (stub) => {
+    const run = await derive(seed);
+    eq([run.res.status, run.body.generated_count, run.rows.length], [200, 0, 1], "Derive reuses canonical rule document despite tuple differences");
+    const lookup = stub.requests.find((request) => request.table === "atlas_missing_info_items" && request.method === "GET");
+    assert(lookup, "Derive existing-row query recorded");
+    assert((lookup.url.searchParams.get("select") ?? "").split(",").map((part) => part.trim()).includes("source"), "Derive selects source");
   });
 });
 

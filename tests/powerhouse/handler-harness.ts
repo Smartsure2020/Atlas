@@ -35,7 +35,7 @@ export function env(): Env {
 
 export function installRestStub(
   seed: Record<string, Row[]>,
-  options: { projectSelect?: boolean; failTables?: string[] } = {}
+  options: { projectSelect?: boolean; failTables?: string[]; failRequest?: (request: Recorded) => boolean } = {}
 ) {
   const original = globalThis.fetch;
   const requests: Recorded[] = [];
@@ -63,13 +63,14 @@ export function installRestStub(
     const table = match[1];
     const method = (init?.method ?? "GET").toUpperCase();
     const body = parse(init?.body);
-    requests.push({ method, table, body, url });
+    const recorded = { method, table, body, url };
+    requests.push(recorded);
     const headers = new Headers(init?.headers);
     const wantsObject = (headers.get("accept") ?? "").includes("vnd.pgrst.object+json");
     const wantsRepresentation = (headers.get("prefer") ?? "").includes("return=representation");
 
     if (method === "GET") {
-      if ((options.failTables ?? []).includes(table)) {
+      if ((options.failTables ?? []).includes(table) || options.failRequest?.(recorded)) {
         return response({ code: "57P03", message: "stub database error", details: null, hint: null }, 500);
       }
       let rows = [...(seed[table] ?? [])];

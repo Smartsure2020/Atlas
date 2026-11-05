@@ -380,11 +380,28 @@ exact tuple, so two findings with the same section title are not silently merged
 
 Track also has provenance stronger than human-facing text. Completeness item IDs are
 deterministic from canonical fact paths or document keys. After validating the current
-latest v3 item, Track loads at most the 100 newest prior recommendation IDs for the same
-submission (IDs only, never their evidence packets), recomputes the deterministic Track
-IDs for that stable item, and reuses an existing matching row. Derive applies the same
-proof when its structured candidate yields a stable completeness item ID. This keeps each
-member of an ambiguous pair attached to its own earlier Track row without title inference.
+latest v3 item, Track queries recommendation **IDs only**, scoped to the same submission,
+newest first and bounded to the next 100 historical recommendations. The current/latest
+recommendation is excluded from that query and its deterministic ID is checked separately.
+No historical `evidence_json` is loaded. Track recomputes the deterministic IDs for the
+stable item and reuses an existing matching row. The submission predicate is applied
+before the limit; recommendations from another submission cannot crowd the origin out of
+the window.
+
+Derive applies the same ID-only, same-submission, newest-first proof when a structured
+candidate yields a stable completeness item ID and relevant existing rows make provenance
+necessary. Unlike Track, Derive includes the current/latest recommendation in its 100-row
+window, so its historical reach is one recommendation shorter: origin 99 back is included;
+origin 100 back is not. With no existing rows, Derive skips this support query. A failed
+provenance lookup fails closed in both entry points, and a failed quote-review or section
+lookup for Track's legacy-document bridge also fails closed; none of these failures may
+fall through to an insert. This keeps each member of an ambiguous pair attached to its own
+earlier Track row without title inference.
+
+The bound primarily affects the six ambiguous structured paths whose human title cannot
+prove identity. Beyond the provenance window they may create a safe duplicate. Canonical
+documents and unambiguous structured facts continue to deduplicate through normal logical
+identity beyond the cap. The design does not promise unlimited historical deduplication.
 Every real status
 (`open`, `requested`, `received`, `waived`, `not_required`) counts as already tracked and
 is returned unchanged. Equivalent legacy rows are selected deterministically by oldest
@@ -464,12 +481,12 @@ Run on the final head (nothing pushed, migrated or deployed).
 | Check | Result |
 | --- | --- |
 | Backend, every script in `npm test` | complete chain exit 0, 0 failures |
-| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, missing-info interoperability, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 29/29, tracking 22/22, interoperability 18/18, persistence 36/36 |
+| `npm run test:powerhouse-acceptance` (cases, UI-snapshot drift, v1 golden, matcher v2, quality gate, evidence v2, digest, contradictions, completeness, detected tracking, missing-info interoperability, persistence, remediation, differential, Phase 1A differential) | pass; acceptance 37/37, snapshots 37/37, contradictions 31/31, completeness 30/30, tracking 22/22, interoperability 26/26, persistence 36/36 |
 | Matcher differential vs the frozen production v1 matcher (3,000 fixtures per corpus) | **0 unexpected authoritative differences**; 0 category violations; 0 order-invariance failures |
 | Phase 1A 500-fixture differential | unchanged pinned hash `b14d9927…a36` |
 | Phase 1A evidence (32) / handler (3) / Phase 24 clean-only trust (47) | pass |
 | Evidence-v2 immutability corpus | pass; shared v2 semantics unchanged |
-| Mutation probes (`npm run test:powerhouse-mutations`) | **68/68 killed**, including exact legacy-document compatibility, deterministic Track provenance, paired ambiguous reruns, global-ambiguity and peer-collision guards, exact/non-substring aliases, alias item type, selected source metadata, canonical-vs-finding document classification, Derive submission scope, all real-status semantics, lookup failure, deterministic ordering, invalid live broker-email registry, persisted value digest and allow-list bypass |
+| Mutation probes (`npm run test:powerhouse-mutations`) | **79/79 killed**, including provenance submission scope before the limit, Track/Derive provenance failure, legacy-bridge support-query failure, multi-prior search, Derive-only source projection, completeness/Track item-ID formulas and recommendation-scoped deterministic UUIDs, plus all prior guards |
 | Frontend vitest | 894 tests in 40 files, 0 failures (was 783) |
 | Frontend `tsc -b` + production build | pass |
 | Worker `tsc --noEmit` | pass |
@@ -559,8 +576,14 @@ matrices, and the evidence packet is already ~10 MB at 400 insurers × 16 rules;
   concurrent *Derive from analysis* requests can therefore both pass the read-before-
   insert check; eliminating that theoretical race requires a migration. Track retains its
   deterministic-ID backstop for concurrent repeats of the same detected item.
-* Historical Track provenance is intentionally bounded to the 100 newest prior
-  recommendations for the submission. It loads IDs only; a Track row older than that
-  window can remain separate rather than trigger an unbounded evidence scan.
+* Historical provenance is intentionally bounded. Track searches the next 100 prior
+  same-submission recommendation IDs; Derive's 100 IDs include latest/current. Ambiguous
+  Track rows outside the applicable window can remain separate rather than trigger an
+  unbounded evidence scan. Equal `created_at` values have no additional recommendation-ID
+  tie-breaker (Low); the cap remains the accepted bounded design.
+* Track's legacy document bridge depends on the current quote review still containing the
+  matching structured document and section. If it no longer does, a safe duplicate is
+  acceptable. The exact legacy tuple deliberately excludes `source`.
+* Derive's read-before-insert scan remains quadratic in the number of candidates (Low).
 * A deliberately repeated request after `waived` or `not_required` still reuses the
   existing row. A reopen/new-request policy is a separate workflow decision.
