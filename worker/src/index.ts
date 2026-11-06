@@ -37,6 +37,7 @@ import {
   handleSaveCommunication,
   handleUpdateCommunication,
   handleUpdateMissingInfo,
+  handleTrackDetectedMissingInfo,
 } from "./phase4-endpoints";
 import { handleGenerateEmail, emailTypeFromPath } from "./email-endpoints";
 import { handleGetAuditTimeline } from "./audit-endpoints";
@@ -357,6 +358,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         if (sub === "/missing-info" && request.method === "POST") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot add missing information items.");
           return handleAddMissingInfo(id, request, env, user);
+        }
+        if (sub === "/missing-info/detected" && request.method === "POST") {
+          if (!roleCanViewUnderwritingIntelligence(user.role) || !roleCanWrite(user.role)) {
+            return jsonError("permission_denied", 403, "Your role cannot track detected recommendation evidence.");
+          }
+          return handleTrackDetectedMissingInfo(id, request, env, user);
         }
         if (sub === "/missing-info/generate" && request.method === "POST") {
           if (!roleCanWrite(user.role)) return jsonError("permission_denied", 403, "Readonly users cannot generate missing information items.");

@@ -195,7 +195,10 @@ export function missingInfoFromQuoteReview(input: {
         description: `Required for ${section.section_name}.`,
         status: "open",
         required_by_rule_id: section.matched_rule_id ?? null,
-        source: "quote_review",
+        // `missing_documents` is the structured rule-required document list.
+        // Findings stay `quote_review`, allowing identity matching to distinguish
+        // canonical requirements from prose findings without inspecting prose.
+        source: "rule",
         owner: "broker",
       });
     }

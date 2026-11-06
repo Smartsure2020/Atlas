@@ -1,8 +1,8 @@
 /**
  * Atlas — Evidence Mode view model
  * ----------------------------------------------------------------------------
- * Turns the persisted `evidence_json` (recommendation-evidence-v1 or -v2) into
- * the exact lines the Evidence Mode UI shows.
+ * Turns the persisted `evidence_json` (recommendation-evidence-v1, -v2 or -v3)
+ * into the exact lines the Evidence Mode UI shows.
  *
  * Rules this module keeps (and tests enforce):
  *   • evidence_json is the ONLY source. Nothing is reconstructed from reasoning
@@ -21,20 +21,30 @@
  */
 
 import type {
+  CompletenessItemV3,
+  CompletenessRequirementV3,
+  CompletenessState,
+  ContradictionRecordV3,
   EvidenceRule,
   IntelligenceState,
   QualityGapV2,
+  QualityGapV3,
   QualitySeverity,
   RecommendationEvidence,
   RecommendationEvidenceV1,
   RecommendationEvidenceV2,
+  RecommendationEvidenceV3,
   ScoredEvidenceOutcome,
   ScoredEvidenceOutcomeV2,
   ConsideredRuleV2,
   SectionEvaluationV2,
 } from "./recommendations";
 import type { Tone } from "./status";
-import { isReadableV1, isReadableV2 } from "./recommendation-evidence-guards";
+import { isReadableV1, isReadableV2, isReadableV3 } from "./recommendation-evidence-guards";
+
+/** v2 and v3 share every field the per-insurer display reads; v3 only adds analyses. */
+type V2Family = RecommendationEvidenceV2 | RecommendationEvidenceV3;
+export type ReadyVersion = "v1" | "v2" | "v3";
 
 /* ---------------------------------------------------------------------------
    Resolving what the row actually holds
@@ -51,7 +61,8 @@ export type EvidenceView =
    */
   | { kind: "malformed"; schemaVersion: string | null }
   | { kind: "ready"; version: "v1"; evidence: RecommendationEvidenceV1 }
-  | { kind: "ready"; version: "v2"; evidence: RecommendationEvidenceV2 };
+  | { kind: "ready"; version: "v2"; evidence: RecommendationEvidenceV2 }
+  | { kind: "ready"; version: "v3"; evidence: RecommendationEvidenceV3 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -78,6 +89,9 @@ export function resolveEvidence(value: unknown): EvidenceView {
     } else if (schema === "recommendation-evidence-v2") {
       if (!isReadableV2(value)) return { kind: "malformed", schemaVersion: schema };
       view = { kind: "ready", version: "v2", evidence: value as unknown as RecommendationEvidenceV2 };
+    } else if (schema === "recommendation-evidence-v3") {
+      if (!isReadableV3(value)) return { kind: "malformed", schemaVersion: schema };
+      view = { kind: "ready", version: "v3", evidence: value as unknown as RecommendationEvidenceV3 };
     } else {
       return { kind: "unsupported", schemaVersion: schema };
     }
@@ -85,6 +99,8 @@ export function resolveEvidence(value: unknown): EvidenceView {
     // can never be the first thing to discover a bad packet.
     recommendationQuality(view);
     for (const outcome of view.evidence.insurers as { insurer_id: string }[]) insurerView(view, outcome.insurer_id);
+    completenessView(view);
+    contradictionsView(view);
     return view;
   } catch {
     return { kind: "malformed", schemaVersion: schema };
@@ -299,6 +315,14 @@ const GAP_COPY: Record<string, GapCopy> = {
     title: "Rules for one possible product disagree",
     body: "Several equally good rules apply to a product line the submission implies and they disagree. Atlas used a fixed identity order to pick one; that is not an underwriting judgement.",
   },
+  extraction_reported_information_missing: {
+    title: "The extraction reported information as outstanding",
+    body: "The reviewed extraction lists this item as missing. Atlas records that it was reported; it does not know whether it changes the outcome, and nothing is declined because of it.",
+  },
+  conflicting_recorded_values: {
+    title: "Atlas found conflicting recorded values",
+    body: "Two sources recorded different values for the same fact. Atlas does not say which is correct and applies no source precedence. This is not evidence of misrepresentation.",
+  },
 };
 
 /** Wording for the machine tokens in a gap's `missing` list. */
@@ -321,6 +345,7 @@ const MISSING_LABEL: Record<string, string> = {
   trusted_document: "trusted document",
   trusted_required_document: "a trusted copy of any required document",
   confidence: "confidence rating",
+  consistent_recorded_value: "one consistent recorded value",
 };
 
 /** Wording for the aspects in which tied rules differ. */
@@ -463,10 +488,13 @@ export interface GapLine {
   section: string | null;
   rule: string | null;
   missing: string[];
+  /** v3 only: the completeness items / contradiction this gap is the quality view of (empty / null otherwise). */
+  completenessItemIds: string[];
+  contradictionId: string | null;
 }
 
 export interface InsurerEvidenceView {
-  version: "v1" | "v2";
+  version: ReadyVersion;
   status: "scored";
   insurerId: string;
   insurerName: string;
@@ -518,6 +546,9 @@ export interface InsurerEvidenceView {
     unresolvedRuleIds: string[];
     evidenceIds: string[];
     qualityModel: string | null;
+    /** v3 only; null on v1 / v2 means "not captured", never "none". */
+    completenessModel: string | null;
+    contradictionModel: string | null;
   };
 }
 
@@ -563,6 +594,13 @@ function ruleLine(rule: EvidenceRule): RuleLine {
       source_quote: rule.source_quote,
     }),
   };
+}
+
+/** Completeness / contradiction links exist on v3 gaps only; v2 gaps never fabricate them. */
+function gapLinks(gap: QualityGapV2 | QualityGapV3): { completenessItemIds: string[]; contradictionId: string | null } {
+  return "completeness_item_ids" in gap
+    ? { completenessItemIds: gap.completeness_item_ids, contradictionId: gap.contradiction_id }
+    : { completenessItemIds: [], contradictionId: null };
 }
 
 /**
@@ -622,12 +660,13 @@ export function scoreTies(view: EvidenceView): { score: number; insurers: string
 }
 
 function scoredView(
-  version: "v1" | "v2",
+  version: ReadyVersion,
   evidence: RecommendationEvidence,
   outcome: ScoredEvidenceOutcome | ScoredEvidenceOutcomeV2
 ): InsurerEvidenceView {
-  const v2Outcome = version === "v2" ? (outcome as ScoredEvidenceOutcomeV2) : null;
-  const v2Evidence = version === "v2" ? (evidence as RecommendationEvidenceV2) : null;
+  // v3 is a superset of v2 for everything read here, so both take the v2 path.
+  const v2Outcome = version !== "v1" ? (outcome as ScoredEvidenceOutcomeV2) : null;
+  const v2Evidence = version !== "v1" ? (evidence as V2Family) : null;
 
   const nonDocument = outcome.rule_evidence.filter((rule) => rule.matcher_component !== "required_document");
   const lines = nonDocument.map(ruleLine);
@@ -722,8 +761,8 @@ function scoredView(
     : null;
 
   const gaps: GapLine[] = v2Evidence
-    ? v2Evidence.quality.gaps
-        .filter((gap: QualityGapV2) => gap.insurer_id === outcome.insurer_id)
+    ? (v2Evidence.quality.gaps as (QualityGapV2 | QualityGapV3)[])
+        .filter((gap) => gap.insurer_id === outcome.insurer_id)
         .map((gap) => ({
           gapId: gap.gap_id,
           insurerName: null,
@@ -733,6 +772,7 @@ function scoredView(
           section: gap.section_key ? sectionName.get(gap.section_key) ?? gap.section_key : null,
           rule: gap.rule_id,
           missing: gap.missing,
+          ...gapLinks(gap),
         }))
     : (evidence as RecommendationEvidenceV1).quality.gaps
         .filter((gap) => gap.insurer_id === outcome.insurer_id)
@@ -745,6 +785,8 @@ function scoredView(
           section: null,
           rule: gap.rule_id,
           missing: gap.missing,
+          completenessItemIds: [],
+          contradictionId: null,
         }));
 
   // Provenance table: every distinct rule the packet carries for this insurer.
@@ -846,6 +888,8 @@ function scoredView(
       unresolvedRuleIds: outcome.unresolved_rule_ids,
       evidenceIds: outcome.rule_evidence.map((rule) => rule.evidence_id),
       qualityModel: v2Evidence ? v2Evidence.quality.model : null,
+      completenessModel: version === "v3" ? (evidence as RecommendationEvidenceV3).completeness.model : null,
+      contradictionModel: version === "v3" ? (evidence as RecommendationEvidenceV3).contradictions.model : null,
     },
   };
 }
@@ -901,8 +945,8 @@ export function recommendationQuality(view: EvidenceView): RecommendationQuality
   const names = new Map(
     (view.evidence.insurers as { insurer_id: string; insurer_name: string }[]).map((item) => [item.insurer_id, item.insurer_name])
   );
-  if (view.version === "v2") {
-    const evidence = view.evidence;
+  if (view.version === "v2" || view.version === "v3") {
+    const evidence: V2Family = view.evidence;
     const sectionName = new Map(evidence.requested_sections.map((item) => [item.section_key, item.section]));
     for (const insurer of evidence.insurers) {
       if (insurer.status !== "scored") continue;
@@ -918,7 +962,7 @@ export function recommendationQuality(view: EvidenceView): RecommendationQuality
       material: evidence.quality.material_count,
       advisory: evidence.quality.advisory_count,
       gapCount: evidence.quality.gaps.length,
-      gaps: evidence.quality.gaps.map((gap) => ({
+      gaps: (evidence.quality.gaps as (QualityGapV2 | QualityGapV3)[]).map((gap) => ({
         gapId: gap.gap_id,
         code: gap.code,
         severity: gap.severity,
@@ -927,6 +971,7 @@ export function recommendationQuality(view: EvidenceView): RecommendationQuality
         rule: gap.rule_id,
         missing: gap.missing,
         insurerName: gap.insurer_id ? names.get(gap.insurer_id) ?? null : null,
+        ...gapLinks(gap),
       })),
       scoringStatement:
         evidence.scoring_scope.section_outcomes === "evaluated_not_aggregated"
@@ -954,9 +999,538 @@ export function recommendationQuality(view: EvidenceView): RecommendationQuality
       rule: gap.rule_id,
       missing: gap.missing,
       insurerName: gap.insurer_id ? names.get(gap.insurer_id) ?? null : null,
+      completenessItemIds: [],
+      contradictionId: null,
     })),
     scoringStatement: null,
     requestedSections: [],
     matcherVersion: evidence.provenance.matcher_version,
+  };
+}
+
+/* ---------------------------------------------------------------------------
+   Phase 3 — completeness: "what Atlas still needs"
+   ---------------------------------------------------------------------------
+   The Worker decides what is missing, how much it matters and who requires it.
+   This module only attaches wording, groups the decided items for reading and
+   derives the stable titles the Missing Information workspace uses to recognise
+   an item it already tracks. A v1 or v2 packet never reaches this code as though
+   it had been analysed: it is reported as "not captured".
+   ------------------------------------------------------------------------- */
+
+export const COMPLETENESS_NOT_CAPTURED_V1 =
+  "Completeness and contradiction analysis was not captured for this historical recommendation.";
+export const COMPLETENESS_NOT_CAPTURED_V2 =
+  "This recommendation predates deterministic completeness and contradiction analysis.";
+
+export const COMPLETENESS_STATE: Record<CompletenessState, Labelled & { meaning: string }> = {
+  complete: {
+    label: "Nothing outstanding",
+    tone: "success",
+    meaning:
+      "Atlas found nothing that its recorded requirements say is still missing. That is not a statement that everything has been verified.",
+  },
+  incomplete_nonblocking: {
+    label: "Information outstanding",
+    tone: "info",
+    meaning: "Some information is outstanding. It does not limit what Atlas can say about the outcome. Nothing is blocked or declined by this.",
+  },
+  incomplete_material: {
+    label: "Material information outstanding",
+    tone: "warning",
+    meaning:
+      "Some outstanding information limits what Atlas can say about the outcome. Nothing is blocked or declined by this: it tells you what to chase.",
+  },
+};
+
+export const MATERIALITY: Record<CompletenessItemV3["materiality"], Labelled> = {
+  material: { label: "Material", tone: "warning", description: "Limits what Atlas can say about the outcome." },
+  nonblocking: { label: "Nonblocking", tone: "neutral", description: "Outstanding, but does not limit what Atlas can say." },
+};
+
+const COMPLETENESS_COPY: Record<string, GapCopy> = {
+  required_document_missing: {
+    title: "Required document not evidenced",
+    body: "An insurer's guideline requires this document and it was not among the trusted documents. It lowers that insurer's confidence only; it never changes the score. Other clean documents do not satisfy it.",
+  },
+  requested_sections_not_declared: {
+    title: "No cover sections were declared",
+    body: "The reviewed submission lists no cover sections, so there was nothing to evaluate section by section. Atlas has not invented any.",
+  },
+  requested_section_not_evaluated: {
+    title: "A requested section has no applicable rule",
+    body: "Atlas found no appetite rule for this requested cover section at this insurer, so the outcome says nothing about it.",
+  },
+  section_rule_ambiguous: {
+    title: "Rules for a requested section disagree",
+    body: "Several equally good rules apply to this section and they disagree. Atlas used a fixed identity order to pick one; that is not an underwriting judgement.",
+  },
+  multiple_products_without_declared_sections: {
+    title: "Several products apply but no cover sections were declared",
+    body: "This insurer has rules for more than one product line the submission implies. Atlas cannot claim a complete section evaluation and has not invented requested sections.",
+  },
+  implied_product_rule_ambiguous: {
+    title: "Rules for a possible product disagree",
+    body: "Several equally good rules apply to a product line the submission implies and they disagree. Atlas used a fixed identity order to pick one.",
+  },
+  insurer_appetite_data_missing: {
+    title: "No active appetite data for this insurer",
+    body: "Atlas has no active appetite rules for this insurer, so it could not be scored. This is a gap in the guideline data, not a decline.",
+  },
+  insurer_rule_match_missing: {
+    title: "No rule for this insurer matched the submission",
+    body: "None of this insurer's rules relates to the submitted product, so its ranking is provisional and needs manual review.",
+  },
+  extraction_reported_information_missing: {
+    title: "Information reported as outstanding at extraction",
+    body: "The reviewed extraction lists this as missing. Atlas records that it was reported; it does not know whether it changes the outcome.",
+  },
+};
+
+const AFFECTS_COPY: Record<CompletenessItemV3["affects"], string> = {
+  recommendation: "Affects how complete the whole recommendation is.",
+  insurer: "Affects the insurers named below.",
+  section: "Affects one requested section.",
+  rule: "Affects one rule.",
+  not_determined: "Atlas cannot tell whether this changes the outcome.",
+};
+
+const STATUS_COPY: Record<CompletenessItemV3["status"], string> = {
+  missing: "Missing",
+  not_evaluated: "Not evaluated",
+  ambiguous: "Ambiguous",
+};
+
+export interface CompletenessLine {
+  itemId: string;
+  code: string;
+  copy: GapCopy;
+  statusLabel: string;
+  materiality: CompletenessItemV3["materiality"];
+  materialityMeta: Labelled;
+  scope: CompletenessItemV3["scope"];
+  affects: string;
+  insurers: { insurerId: string; insurerName: string }[];
+  sections: string[];
+  documentType: string | null;
+  documentKey: string | null;
+  fieldPath: string | null;
+  fieldLabel: string | null;
+  /** WHO / WHAT requires it, as sentences built from the recorded authority. */
+  requiredBy: string[];
+  /** Where the requirement comes from, as plain words. */
+  basis: string;
+  qualityGapIds: string[];
+  /** What the Missing Information workspace would call this if a person tracked it. */
+  tracking: TrackingTemplate;
+}
+
+export interface TrackingTemplate {
+  /**
+   * Deterministic. The display join recognises a tracked item by `type` + this exact
+   * title, except for titles several schema paths share (see SHARED_SCHEMA_FIELD_LABELS).
+   */
+  title: string;
+  type: "document" | "underwriting_info" | "other";
+  description: string;
+  sectionKey: string | null;
+  /**
+   * True only for something a BROKER can supply (a document, the cover sections,
+   * a named schema fact). Tracked items are visible to the submission's broker and
+   * can appear in request drafts, so internal limitations — a section no rule
+   * covers, a rule tie, an insurer without data — are never offered for tracking.
+   */
+  trackable: boolean;
+  owner: "broker" | "consultant";
+}
+
+/** The matcher's own document normalisation: case, separators and spacing ignored. */
+export function documentKey(label: string): string {
+  return label.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** The part of a Missing Information item the join needs. */
+export interface TrackedLike {
+  item_type: string;
+  title: string;
+  status: string;
+}
+
+export type TrackedState =
+  | { state: "untracked" }
+  | { state: "tracked_open" | "tracked_closed"; status: string; count: number };
+
+const CLOSED_STATUSES = new Set(["received", "waived", "not_required"]);
+
+/**
+ * Schema-field labels (trimmed, lower-cased) that more than one extraction path
+ * generates: `Name` (extracted_client / broker), `Risk address` (extracted_client /
+ * quote_terms) and `Required documents` (current_cover / quote_terms).
+ *
+ * A tracked row carries only its title, so a row with one of these titles cannot say
+ * WHICH path it was tracked for. The server refuses to map such a title to a path
+ * (worker/src/detected-missing-info.ts), so the display join must not claim more: it
+ * uses this set only to WITHHOLD a match. It never resolves a title to a path. A
+ * parity test derives the same set from the worker's own registry, so a new colliding
+ * schema field fails CI instead of silently reintroducing the defect.
+ */
+export const SHARED_SCHEMA_FIELD_LABELS: ReadonlySet<string> = new Set(["name", "risk address", "required documents"]);
+
+function isSharedSchemaFieldLabel(title: string): boolean {
+  return SHARED_SCHEMA_FIELD_LABELS.has(title.trim().toLowerCase());
+}
+
+/**
+ * Is this detected item already in the Missing Information workspace? Documents
+ * match on the matcher's canonical document key (so "Risk survey", "risk-survey"
+ * and a derived "RISK SURVEY" are one item); other items match on type + the exact
+ * deterministic title above, EXCEPT when that title is shared by several schema
+ * paths: there a title cannot prove identity, so the line reads as untracked (the
+ * "Track this" button stays, and the server-authoritative Track endpoint answers
+ * `duplicate: true` if it already is). Nothing is created, merged or inferred by this.
+ */
+export function trackedStateFor(line: CompletenessLine, items: readonly TrackedLike[]): TrackedState {
+  if (!line.tracking.trackable) return { state: "untracked" };
+  if (line.documentKey === null && isSharedSchemaFieldLabel(line.tracking.title)) return { state: "untracked" };
+  const matches = items.filter((item) =>
+    line.documentKey !== null
+      ? item.item_type === "document" && documentKey(item.title) === line.documentKey
+      : item.item_type === line.tracking.type && item.title === line.tracking.title
+  );
+  if (matches.length === 0) return { state: "untracked" };
+  const open = matches.find((item) => !CLOSED_STATUSES.has(item.status));
+  return open
+    ? { state: "tracked_open", status: open.status, count: matches.length }
+    : { state: "tracked_closed", status: matches[matches.length - 1].status, count: matches.length };
+}
+
+export type CompletenessView =
+  | { mode: "not_captured"; version: "v1" | "v2"; message: string }
+  | {
+      mode: "captured";
+      state: CompletenessState;
+      stateMeta: Labelled & { meaning: string };
+      materialCount: number;
+      nonblockingCount: number;
+      /** What "required" means in this packet, in words. */
+      basis: string[];
+      /** Not tied to one insurer: undeclared sections, information the extraction reported. */
+      caseLines: CompletenessLine[];
+      /** One line per logical document, across insurers. */
+      documentLines: CompletenessLine[];
+      /** Insurers with something outstanding other than a document, worst first. */
+      insurerGroups: {
+        insurerId: string;
+        insurerName: string;
+        state: CompletenessState;
+        stateMeta: Labelled & { meaning: string };
+        lines: CompletenessLine[];
+      }[];
+      /** Insurers for which nothing is outstanding. */
+      completeInsurers: string[];
+      reportedOmitted: number;
+    };
+
+const STATE_ORDER: Record<CompletenessState, number> = { incomplete_material: 0, incomplete_nonblocking: 1, complete: 2 };
+
+function requirementSentence(
+  ref: CompletenessRequirementV3,
+  insurerName: (id: string | null) => string,
+  sectionName: (key: string | null) => string
+): string {
+  switch (ref.authority) {
+    case "appetite_rule": {
+      const who = ref.insurer_id ? insurerName(ref.insurer_id) : "An insurer";
+      const rule = ref.rule_scope === "portfolio" ? "portfolio rule" : ref.rule_scope === "product" ? "product rule" : "rule";
+      const state = ref.present === false ? " — not evidenced" : ref.present === true ? " — evidenced" : "";
+      return ref.rule_id === null && ref.rule_scope === null
+        ? `${who}'s guideline (the rule is no longer in the recorded rule set)${state}`
+        : `${who}'s ${rule}${state}`;
+    }
+    case "declared_cover_section":
+      return `The submission declared the ${sectionName(ref.section_key)} cover section`;
+    case "section_evaluation_model":
+      return ref.section_key
+        ? `Atlas evaluates cover sections one by one and none was declared (${sectionName(ref.section_key)})`
+        : "Atlas evaluates cover sections one by one and none was declared";
+    case "rule_selection_model":
+      return `${insurerName(ref.insurer_id)} needs a rule that relates to the submitted product`;
+    case "active_insurer_inventory":
+      return `${insurerName(ref.insurer_id)} is an active insurer with no active appetite rule`;
+    case "extraction_report": {
+      const position = ref.reference?.match(/\[(\d+)\]/)?.[1];
+      const item = position === undefined ? "an item" : `item ${Number(position) + 1}`;
+      return `The extraction reported ${item} as outstanding${ref.priority ? ` (${ref.priority} priority)` : ""}`;
+    }
+  }
+}
+
+/**
+ * What the Missing Information workspace would record if a person tracked this
+ * item. Titles are written to be read by a broker. Only requests a broker can act
+ * on are trackable; free-text facts are not (the existing "Derive from analysis"
+ * flow already carries those, with their text, under existing access control).
+ */
+function trackingFor(item: CompletenessItemV3, subject: string, copy: GapCopy, fieldLabel: string | null): TrackingTemplate {
+  if (item.code === "required_document_missing") {
+    return {
+      title: item.document_type ?? subject,
+      type: "document",
+      description: "Required by an insurer's guideline and not among the trusted documents.",
+      sectionKey: null,
+      trackable: true,
+      owner: "broker",
+    };
+  }
+  if (item.code === "requested_sections_not_declared") {
+    return {
+      title: "Cover sections required",
+      type: "underwriting_info",
+      description: "The submission does not say which cover sections are required.",
+      sectionKey: null,
+      trackable: true,
+      owner: "broker",
+    };
+  }
+  if (item.code === "extraction_reported_information_missing" && fieldLabel) {
+    return {
+      title: fieldLabel,
+      type: "underwriting_info",
+      description: "Reported as outstanding when the submission was read.",
+      sectionKey: null,
+      trackable: true,
+      owner: "broker",
+    };
+  }
+  return { title: subject, type: "other", description: copy.title, sectionKey: null, trackable: false, owner: "consultant" };
+}
+
+function completenessBasis(basis: RecommendationEvidenceV3["completeness"]["requirement_basis"]): string[] {
+  const out: string[] = [];
+  if (basis.documents === "appetite_rule_required_documents") out.push("Documents are required only where an insurer's appetite rule says so.");
+  if (basis.sections === "declared_cover_sections") out.push("Sections are expected only where the submission declared them.");
+  if (basis.facts === "extraction_reported_missing_information_only") {
+    out.push("Facts are listed only where the reviewed extraction itself reported them as missing.");
+  }
+  if (basis.universal_requirements === "none_defined") out.push("Atlas defines no universal insurance requirement and has not invented one.");
+  return out;
+}
+
+export function completenessView(view: EvidenceView): CompletenessView | null {
+  if (view.kind !== "ready") return null;
+  if (view.version === "v1") return { mode: "not_captured", version: "v1", message: COMPLETENESS_NOT_CAPTURED_V1 };
+  if (view.version === "v2") return { mode: "not_captured", version: "v2", message: COMPLETENESS_NOT_CAPTURED_V2 };
+
+  const evidence = view.evidence;
+  const names = new Map(
+    (evidence.insurers as { insurer_id: string; insurer_name: string }[]).map((item) => [item.insurer_id, item.insurer_name])
+  );
+  const sectionNames = new Map(evidence.requested_sections.map((item) => [item.section_key, item.section]));
+  for (const insurer of evidence.insurers) {
+    if (insurer.status !== "scored") continue;
+    for (const implied of (insurer as ScoredEvidenceOutcomeV2).implied_product_evaluations) {
+      if (!sectionNames.has(implied.section_key)) sectionNames.set(implied.section_key, implied.section);
+    }
+  }
+  const insurerName = (id: string | null) => (id ? names.get(id) ?? "An insurer" : "An insurer");
+  const sectionName = (key: string | null) => (key ? sectionNames.get(key) ?? key.replace(/_/g, " ") : "a cover");
+
+  const lineFor = (item: CompletenessItemV3): CompletenessLine => {
+    const copy = COMPLETENESS_COPY[item.code] ?? {
+      title: "Information outstanding",
+      body: `Atlas recorded something outstanding that this version cannot describe (${item.code}).`,
+    };
+    const insurers = item.insurer_ids.map((id) => ({ insurerId: id, insurerName: insurerName(id) }));
+    const sections = item.section_keys.map(sectionName);
+    const reportedPosition = item.required_by.find((ref) => ref.authority === "extraction_report")?.reference?.match(/\[(\d+)\]/)?.[1];
+    const fieldLabel = item.label && item.scope === "fact" ? item.label : null;
+    const requiredBy = [
+      ...new Set(item.required_by.map((ref) => requirementSentence(ref, insurerName, sectionName))),
+    ];
+    const subject =
+      item.scope === "document"
+        ? item.document_type ?? "Required document"
+        : fieldLabel
+        ? fieldLabel
+        : item.code === "extraction_reported_information_missing"
+        ? `Information reported as outstanding at extraction${reportedPosition === undefined ? "" : ` (item ${Number(reportedPosition) + 1})`}`
+        : sections.length > 0
+        ? `${copy.title}: ${sections.join(", ")}${insurers.length === 1 ? ` (${insurers[0].insurerName})` : ""}`
+        : insurers.length === 1
+        ? `${copy.title}: ${insurers[0].insurerName}`
+        : copy.title;
+    return {
+      itemId: item.item_id,
+      code: item.code,
+      copy,
+      statusLabel: STATUS_COPY[item.status],
+      materiality: item.materiality,
+      materialityMeta: MATERIALITY[item.materiality],
+      scope: item.scope,
+      affects: AFFECTS_COPY[item.affects],
+      insurers,
+      sections,
+      documentType: item.document_type,
+      documentKey: item.document_key,
+      fieldPath: item.field_path,
+      fieldLabel,
+      requiredBy,
+      basis:
+        item.scope === "document"
+          ? "Required by the insurer's guideline; presence is judged against active, clean-scanned documents only."
+          : item.scope === "fact"
+          ? "Reported by the reviewed extraction."
+          : "Derived from the recorded section and rule evaluation.",
+      qualityGapIds: item.quality_gap_ids,
+      tracking: trackingFor(item, subject, copy, fieldLabel),
+    };
+  };
+
+  const completeness = evidence.completeness;
+  const byId = new Map(completeness.items.map((item) => [item.item_id, item]));
+  const caseLines = completeness.case_item_ids.map((id) => byId.get(id)).filter((i): i is CompletenessItemV3 => !!i).map(lineFor);
+  const documentLines = completeness.items.filter((item) => item.scope === "document").map(lineFor);
+  const insurerGroups = completeness.insurers
+    .filter((entry) => entry.state !== "complete")
+    .map((entry) => ({
+      insurerId: entry.insurer_id,
+      insurerName: insurerName(entry.insurer_id),
+      state: entry.state,
+      stateMeta: COMPLETENESS_STATE[entry.state],
+      lines: entry.item_ids
+        .map((id) => byId.get(id))
+        .filter((i): i is CompletenessItemV3 => !!i && i.scope !== "document")
+        .map(lineFor),
+    }))
+    .sort(
+      (a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || (a.insurerName < b.insurerName ? -1 : a.insurerName > b.insurerName ? 1 : 0)
+    );
+  return {
+    mode: "captured",
+    state: completeness.state,
+    stateMeta: COMPLETENESS_STATE[completeness.state],
+    materialCount: completeness.material_count,
+    nonblockingCount: completeness.nonblocking_count,
+    basis: completenessBasis(completeness.requirement_basis),
+    caseLines,
+    documentLines,
+    insurerGroups,
+    completeInsurers: completeness.insurers.filter((entry) => entry.state === "complete").map((entry) => insurerName(entry.insurer_id)),
+    reportedOmitted: completeness.extraction_reported_omitted,
+  };
+}
+
+/* ---------------------------------------------------------------------------
+   Phase 4 — contradictions: "conflicts to review"
+   ---------------------------------------------------------------------------
+   Wording rule: "Atlas found conflicting recorded values". Never "false
+   information", never "fraud", never "misrepresentation", and never which value
+   is right — Atlas applies no source precedence.
+   ------------------------------------------------------------------------- */
+
+export interface ContradictionLine {
+  id: string;
+  label: string;
+  title: string;
+  fieldPath: string | null;
+  severity: ContradictionRecordV3["severity"];
+  severityMeta: Labelled;
+  affectsMatcher: boolean;
+  matcherNote: string;
+  /** One per distinct recorded value. `display` is typed-canonical or masked, never the raw text. */
+  groups: {
+    reference: string;
+    display: string | null;
+    sources: { label: string; where: string }[];
+  }[];
+  basis: { kind: string; normalization: string; steps: string[] };
+  resolution: { state: "unresolved"; label: string };
+  qualityGapId: string | null;
+}
+
+export type ContradictionsView =
+  | { mode: "not_captured"; version: "v1" | "v2"; message: string }
+  | {
+      mode: "captured";
+      comparedCount: number;
+      conflicts: ContradictionLine[];
+      /** Fields compared where every source agreed. */
+      agreedLabels: string[];
+      /** Comparisons Atlas could not make, with the reason in words. */
+      unavailable: { label: string; reason: string }[];
+      precedenceStatement: string;
+    };
+
+const SEVERITY_META: Record<ContradictionRecordV3["severity"], Labelled> = {
+  material: {
+    label: "Material",
+    tone: "warning",
+    description: "The field is used by the matcher, so the disagreement could change what Atlas sees.",
+  },
+  advisory: {
+    label: "Advisory",
+    tone: "neutral",
+    description: "The field is not used by the matcher, so this did not affect the ranking.",
+  },
+};
+
+const UNAVAILABLE_REASON: Record<string, string> = {
+  unparseable_value: "a recorded value is not in a form Atlas can compare",
+  source_unavailable: "one source could not be read when this ran",
+};
+
+function pointerWhere(source: ContradictionRecordV3["value_groups"][number]["sources"][number]): string {
+  const pointer = source.pointer;
+  if (pointer.record === "atlas_submissions") return "Submission intake record";
+  const status = source.field_status && source.field_status !== "extracted" ? ` · field status ${source.field_status.replace(/_/g, " ")}` : "";
+  const page = pointer.page !== null ? ` · page ${pointer.page}` : "";
+  return `Reviewed extraction · ${pointer.field_path.replace(/\./g, " › ")}${page}${status}`;
+}
+
+export function contradictionsView(view: EvidenceView): ContradictionsView | null {
+  if (view.kind !== "ready") return null;
+  if (view.version === "v1") return { mode: "not_captured", version: "v1", message: COMPLETENESS_NOT_CAPTURED_V1 };
+  if (view.version === "v2") return { mode: "not_captured", version: "v2", message: COMPLETENESS_NOT_CAPTURED_V2 };
+  const analysis = view.evidence.contradictions;
+  return {
+    mode: "captured",
+    comparedCount: analysis.comparisons.length,
+    conflicts: analysis.contradictions.map<ContradictionLine>((record) => ({
+      id: record.contradiction_id,
+      label: record.label,
+      title: "Atlas found conflicting recorded values",
+      fieldPath: record.field_path,
+      severity: record.severity,
+      severityMeta: SEVERITY_META[record.severity],
+      affectsMatcher: record.affects_matcher_input,
+      matcherNote: record.affects_matcher_input
+        ? "The matcher uses this field, so the disagreement could have affected the recommendation. Atlas did not change any score because of it."
+        : "The matcher does not use this field, so this did not affect the ranking, the scores or any flag.",
+      groups: record.value_groups.map((group) => ({
+        reference: group.value_label,
+        display: group.value_display,
+        sources: group.sources.map((source) => ({ label: source.source_label, where: pointerWhere(source) })),
+      })),
+      basis: {
+        kind: record.comparison_basis.kind,
+        normalization: record.comparison_basis.normalization,
+        steps: record.comparison_basis.normalization_steps,
+      },
+      resolution: {
+        state: record.resolution_state,
+        label:
+          "Unresolved — Atlas has no record that anyone has reviewed this disagreement. It clears when a later recommendation no longer finds the values in conflict, for example after the record is corrected",
+      },
+      qualityGapId: record.quality_gap_id,
+    })),
+    agreedLabels: analysis.comparisons.filter((item) => item.outcome === "agree").map((item) => item.label),
+    unavailable: analysis.comparisons
+      .filter((item) => item.outcome === "comparison_unavailable")
+      .map((item) => ({
+        label: item.label,
+        reason: UNAVAILABLE_REASON[item.unavailable_reason ?? ""] ?? "the values could not be compared",
+      })),
+    precedenceStatement:
+      "Atlas reports that recorded values differ. It does not say which one is correct and applies no source precedence.",
   };
 }

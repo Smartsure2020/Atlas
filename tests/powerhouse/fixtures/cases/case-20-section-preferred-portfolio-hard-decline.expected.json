@@ -5,7 +5,7 @@
     "differing_insurers": []
   },
   "observation": {
-    "evidence_schema": "recommendation-evidence-v2",
+    "evidence_schema": "recommendation-evidence-v3",
     "matcher_version": "2026-10-section-evaluation-v2",
     "recommended": "Beta Insurance",
     "insurer_order": [
@@ -45,7 +45,8 @@
         "omitted_risk_only": 0,
         "documents": [],
         "quality": "decision_ready",
-        "gaps": []
+        "gaps": [],
+        "completeness": "complete"
       },
       "insurer-alpha": {
         "rank": 2,
@@ -81,7 +82,8 @@
         "omitted_risk_only": 0,
         "documents": [],
         "quality": "decision_ready",
-        "gaps": []
+        "gaps": [],
+        "completeness": "complete"
       }
     },
     "no_data": [],
@@ -98,6 +100,19 @@
     "privacy": {
       "sentinel_hits": [],
       "features_redacted": true
+    },
+    "completeness": {
+      "state": "complete",
+      "material": 0,
+      "nonblocking": 0,
+      "items": []
+    },
+    "contradictions": {
+      "count": 0,
+      "material": 0,
+      "advisory": 0,
+      "comparisons": [],
+      "items": []
     }
   }
 }

@@ -51,7 +51,7 @@ import {
   summariseRecommendation,
 } from "../lib/decision-workbench";
 import { resolveEvidence } from "../lib/recommendation-evidence";
-import { EvidenceDrawer, IntelligenceQualityPanel } from "../components/EvidenceMode";
+import { CompletenessPanel, ConflictsPanel, EvidenceDrawer, IntelligenceQualityPanel } from "../components/EvidenceMode";
 
 export default function RecommendationPanel({
   submissionId,
@@ -238,6 +238,15 @@ export default function RecommendationPanel({
 
             <div style={{ marginTop: "var(--atlas-space-4)" }}>
               <IntelligenceQualityPanel evidence={evidence} />
+            </div>
+
+            {/* Evidence v3: what is still missing, and which recorded values disagree.
+                A historical v1/v2 packet shows a plain "not captured" note instead. */}
+            <div style={{ marginTop: "var(--atlas-space-4)" }}>
+              <CompletenessPanel evidence={evidence} />
+            </div>
+            <div style={{ marginTop: "var(--atlas-space-4)" }}>
+              <ConflictsPanel evidence={evidence} />
             </div>
 
             {openMissingInfo.length > 0 && (

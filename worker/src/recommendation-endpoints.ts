@@ -43,9 +43,14 @@ import { composeExplanation, verifyPolish } from "./explanation-composer";
 import { minimisedMatcherInputSnapshot } from "./recommendation-evidence";
 import {
   QUALITY_MODEL_VERSION,
-  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
-  buildRecommendationEvidenceV2,
-} from "./recommendation-evidence-v2";
+  RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3,
+  buildRecommendationEvidenceV3,
+} from "./recommendation-evidence-v3";
+import { COMPLETENESS_MODEL_VERSION } from "./completeness";
+import {
+  CONTRADICTION_MODEL_VERSION,
+  type ObservationSet,
+} from "./contradictions";
 import { explanationMode } from "./pipeline-mode";
 import type { Env } from "./config";
 import { logOperationError } from "./phase6-hardening";
@@ -64,11 +69,11 @@ const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 interface RecommendationEndpointDependencies {
-  buildEvidence: typeof buildRecommendationEvidenceV2;
+  buildEvidence: typeof buildRecommendationEvidenceV3;
 }
 
 const DEFAULT_RECOMMENDATION_DEPENDENCIES: RecommendationEndpointDependencies = {
-  buildEvidence: buildRecommendationEvidenceV2,
+  buildEvidence: buildRecommendationEvidenceV3,
 };
 
 // ----------------------------------------------------------------------------
@@ -400,6 +405,10 @@ export async function handleRunRecommendation(
     name: row.name,
   }));
 
+  // Production currently has no independently comparable source pair. Keep the
+  // registry-driven engine active, but make no comparison and perform no intake read.
+  const observations: ObservationSet = { observations: [], unavailable_sources: [] };
+
   const inputFp = buildRecommendationFingerprint({
     submissionId,
     extractionId: extraction.id,
@@ -409,12 +418,14 @@ export async function handleRunRecommendation(
     ),
     availableDocuments: availableDocs,
     // Behaviour versions: a deploy that changes matching, taxonomy, the
-    // persisted evidence contract or the quality classification must not be
-    // answered from a stale cache.
+    // persisted evidence contract, the quality classification or the
+    // completeness / contradiction models must not be answered from a stale cache.
     matcherVersion: MATCHER_VERSION,
     taxonomyVersion: TAXONOMY_VERSION,
-    evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+    evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3,
     qualityModelVersion: QUALITY_MODEL_VERSION,
+    completenessModelVersion: COMPLETENESS_MODEL_VERSION,
+    contradictionModelVersion: CONTRADICTION_MODEL_VERSION,
     activeInsurers,
   });
   const job = await beginJob(
@@ -590,6 +601,7 @@ export async function handleRunRecommendation(
       matcherInput: risk,
       matcherResult: result,
       activeAppetite: appetite,
+      observations,
     });
   } catch {
     await failJob(admin, job.jobId, {

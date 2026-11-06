@@ -325,7 +325,7 @@
   "extraction_id": "22222222-2222-2222-2222-222222222222",
   "created_at": "2026-10-16T10:00:00.000Z",
   "evidence_json": {
-    "schema_version": "recommendation-evidence-v2",
+    "schema_version": "recommendation-evidence-v3",
     "provenance": {
       "recommendation_id": "rec-case-05-multi-section-hard-decline",
       "submission_id": "11111111-1111-1111-1111-111111111111",
@@ -336,7 +336,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_b8fc2d4d"
+      "recommendation_input_fingerprint": "fp_65e63ade"
     },
     "matcher_input": {
       "product_candidates": [
@@ -1267,7 +1267,7 @@
       }
     ],
     "quality": {
-      "model": "recommendation-quality-v2",
+      "model": "recommendation-quality-v3",
       "state": "incomplete",
       "blocker_count": 2,
       "material_count": 0,
@@ -1284,7 +1284,9 @@
           ],
           "scope": "section",
           "code": "section_hard_decline_not_reflected",
-          "severity": "blocker"
+          "severity": "blocker",
+          "completeness_item_ids": [],
+          "contradiction_id": null
         },
         {
           "gap_id": "gap:section_hard_decline_not_reflected:insurer-beta:beta-git:goods_in_transit:-:section_outcome_in_score",
@@ -1297,7 +1299,9 @@
           ],
           "scope": "section",
           "code": "section_hard_decline_not_reflected",
-          "severity": "blocker"
+          "severity": "blocker",
+          "completeness_item_ids": [],
+          "contradiction_id": null
         },
         {
           "gap_id": "gap:section_hard_decline_not_reflected:insurer-gamma:gamma-git:goods_in_transit:-:section_outcome_in_score",
@@ -1310,9 +1314,59 @@
           ],
           "scope": "section",
           "code": "section_hard_decline_not_reflected",
-          "severity": "advisory"
+          "severity": "advisory",
+          "completeness_item_ids": [],
+          "contradiction_id": null
         }
       ]
+    },
+    "completeness": {
+      "model": "recommendation-completeness-v1",
+      "state": "complete",
+      "material_count": 0,
+      "nonblocking_count": 0,
+      "requirement_basis": {
+        "documents": "appetite_rule_required_documents",
+        "sections": "declared_cover_sections",
+        "facts": "extraction_reported_missing_information_only",
+        "universal_requirements": "none_defined"
+      },
+      "items": [],
+      "insurers": [
+        {
+          "insurer_id": "insurer-alpha",
+          "state": "complete",
+          "material_count": 0,
+          "nonblocking_count": 0,
+          "item_ids": []
+        },
+        {
+          "insurer_id": "insurer-beta",
+          "state": "complete",
+          "material_count": 0,
+          "nonblocking_count": 0,
+          "item_ids": []
+        },
+        {
+          "insurer_id": "insurer-gamma",
+          "state": "complete",
+          "material_count": 0,
+          "nonblocking_count": 0,
+          "item_ids": []
+        }
+      ],
+      "case_item_ids": [],
+      "extraction_reported_omitted": 0
+    },
+    "contradictions": {
+      "model": "recommendation-contradictions-v1",
+      "source_precedence": "none_applied",
+      "comparisons": [],
+      "contradictions": [],
+      "contradiction_count": 0,
+      "material_count": 0,
+      "advisory_count": 0,
+      "unavailable_count": 0
     }
   }
 }

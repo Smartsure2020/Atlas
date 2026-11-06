@@ -35,7 +35,7 @@ export function env(): Env {
 
 export function installRestStub(
   seed: Record<string, Row[]>,
-  options: { projectSelect?: boolean; failTables?: string[] } = {}
+  options: { projectSelect?: boolean; failTables?: string[]; failRequest?: (request: Recorded) => boolean } = {}
 ) {
   const original = globalThis.fetch;
   const requests: Recorded[] = [];
@@ -46,6 +46,16 @@ export function installRestStub(
   const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
     status, headers: { "Content-Type": "application/json" },
   });
+  const project = (rows: Row[], select: string | null): Row[] => {
+    if (options.projectSelect === false || !select || select === "*") return rows;
+    const fields = select.split(",").map((item) => item.trim()).filter(Boolean);
+    return rows.map((row) => Object.fromEntries(fields.map((fieldSpec) => {
+      const separator = fieldSpec.indexOf(":");
+      const output = separator >= 0 ? fieldSpec.slice(0, separator) : fieldSpec;
+      const source = separator >= 0 ? fieldSpec.slice(separator + 1) : fieldSpec;
+      return [output, row[source]];
+    })));
+  };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const match = url.pathname.match(/^\/rest\/v1\/([a-z_0-9]+)$/);
@@ -53,13 +63,14 @@ export function installRestStub(
     const table = match[1];
     const method = (init?.method ?? "GET").toUpperCase();
     const body = parse(init?.body);
-    requests.push({ method, table, body, url });
+    const recorded = { method, table, body, url };
+    requests.push(recorded);
     const headers = new Headers(init?.headers);
     const wantsObject = (headers.get("accept") ?? "").includes("vnd.pgrst.object+json");
     const wantsRepresentation = (headers.get("prefer") ?? "").includes("return=representation");
 
     if (method === "GET") {
-      if ((options.failTables ?? []).includes(table)) {
+      if ((options.failTables ?? []).includes(table) || options.failRequest?.(recorded)) {
         return response({ code: "57P03", message: "stub database error", details: null, hint: null }, 500);
       }
       let rows = [...(seed[table] ?? [])];
@@ -68,31 +79,52 @@ export function installRestStub(
         if (raw.startsWith("eq.")) {
           const expected = raw.slice(3);
           rows = rows.filter((row) => String(row[key]) === expected);
+        } else if (raw.startsWith("neq.")) {
+          const expected = raw.slice(4);
+          rows = rows.filter((row) => String(row[key]) !== expected);
         } else if (raw.startsWith("in.(") && raw.endsWith(")")) {
           const expected = raw.slice(4, -1).split(",").map((item) => item.replace(/^"|"$/g, ""));
           rows = rows.filter((row) => expected.includes(String(row[key])));
         }
       });
-      const select = url.searchParams.get("select");
-      if (options.projectSelect && select) {
-        const fields = select.split(",").map((item) => item.trim()).filter(Boolean);
-        rows = rows.map((row) => Object.fromEntries(fields.map((fieldSpec) => {
-          const separator = fieldSpec.indexOf(":");
-          const output = separator >= 0 ? fieldSpec.slice(0, separator) : fieldSpec;
-          const source = separator >= 0 ? fieldSpec.slice(separator + 1) : fieldSpec;
-          return [output, row[source]];
-        })));
+      const order = url.searchParams.get("order");
+      if (order) {
+        const terms = order.split(",").map((term) => {
+          const [key, direction = "asc"] = term.split(".");
+          return { key, direction };
+        });
+        rows.sort((left, right) => {
+          for (const term of terms) {
+            const a = left[term.key];
+            const b = right[term.key];
+            const compared = String(a ?? "").localeCompare(String(b ?? ""));
+            if (compared !== 0) return term.direction === "desc" ? -compared : compared;
+          }
+          return 0;
+        });
       }
+      const limit = url.searchParams.get("limit");
+      if (limit !== null) rows = rows.slice(0, Math.max(0, Number.parseInt(limit, 10) || 0));
+      rows = project(rows, url.searchParams.get("select"));
       if (wantsObject) {
         return rows.length === 1 ? response(rows[0]) : response({ code: "PGRST116", message: "0 rows" }, 406);
       }
       return response(rows);
     }
 
-    if (wantsRepresentation) {
-      const inserted = Array.isArray(body) ? body[0] : body;
-      const row = { id: `stub-${table}`, ...(inserted as Row) };
-      return wantsObject ? response(row, 201) : response([row], 201);
+    if (method === "POST") {
+      const stored = seed[table] ?? (seed[table] = []);
+      const inputs = (Array.isArray(body) ? body : [body]) as Row[];
+      const inserted = inputs.map((inputRow, index) => ({ id: `stub-${table}-${stored.length + index + 1}`, ...inputRow }));
+      if (inserted.some((row) => stored.some((existing) => existing.id === row.id))) {
+        return response({ code: "23505", message: "duplicate key" }, 409);
+      }
+      stored.push(...inserted);
+      if (wantsRepresentation) {
+        const projected = project(inserted, url.searchParams.get("select"));
+        return wantsObject ? response(projected[0], 201) : response(projected, 201);
+      }
+      return new Response(null, { status: 201 });
     }
     return new Response(null, { status: 204 });
   }) as typeof fetch;
@@ -110,6 +142,12 @@ export interface HarnessInput {
   insurers?: { id: string; name: string; active: boolean }[];
   extractionConfidence?: number | null;
   reviewedAt?: string;
+  /**
+   * The submission's intake row (the contradiction analysis' second source).
+   * Omitted: no `atlas_submissions` row is seeded, so the endpoint reports
+   * `not_found` and nothing is compared.
+   */
+  submission?: Row | null;
   /** Extra seeded rows, e.g. a previously completed job for cache tests. */
   extraTables?: Record<string, Row[]>;
 }
@@ -128,6 +166,7 @@ export function buildTables(input: HarnessInput): Record<string, Row[]> {
     atlas_documents: (input.documents ?? []).map((doc) => ({ submission_id: SUB, ...doc })),
     atlas_insurer_appetite: input.rules,
     atlas_insurers: input.insurers ?? [],
+    ...(input.submission ? { atlas_submissions: [{ id: SUB, ...input.submission }] } : {}),
     atlas_jobs: [{
       id: JOB, status: "running", cancellation_requested: false, retry_count: 0,
       max_retries: 2, job_type: "recommendation", submission_id: SUB,
@@ -158,9 +197,9 @@ export interface HarnessRun {
 
 export async function runThroughHandler(
   input: HarnessInput,
-  options: { request?: Request } = {}
+  options: { request?: Request; failTables?: string[] } = {}
 ): Promise<HarnessRun> {
-  const stub = installRestStub(buildTables(input));
+  const stub = installRestStub(buildTables(input), { failTables: options.failTables });
   try {
     const res = await handleRunRecommendation(SUB, options.request ?? forcedRequest(), env(), MANAGER);
     const body = (await res.json()) as Row;

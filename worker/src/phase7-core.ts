@@ -82,6 +82,10 @@ export function buildRecommendationFingerprint(input: {
   evidenceSchemaVersion: string;
   /** Version of the quality classification table that shapes the persisted quality block. */
   qualityModelVersion: string;
+  /** Version of the deterministic completeness model that shapes `evidence_json.completeness`. */
+  completenessModelVersion: string;
+  /** Version of the deterministic contradiction model (and its normalisers) behind `evidence_json.contradictions`. */
+  contradictionModelVersion: string;
   /**
    * The ACTIVE insurer inventory (id + name). It determines `no_data_for` — the
    * insurers with zero active rules — so activating, deactivating or renaming an
@@ -100,6 +104,8 @@ export function buildRecommendationFingerprint(input: {
     taxonomy_version: input.taxonomyVersion,
     evidence_schema_version: input.evidenceSchemaVersion,
     quality_model_version: input.qualityModelVersion,
+    completeness_model_version: input.completenessModelVersion,
+    contradiction_model_version: input.contradictionModelVersion,
     active_insurers: canonicalInsurerInventory(input.activeInsurers),
   });
 }

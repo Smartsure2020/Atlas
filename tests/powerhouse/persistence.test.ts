@@ -10,7 +10,9 @@
 import { buildRecommendationFingerprint } from "../../worker/src/phase7-core.js";
 import { MATCHER_VERSION, MATCHER_VERSION_V1 } from "../../worker/src/matcher.js";
 import { MATCHER_INPUT_SNAPSHOT_MINIMISED } from "../../worker/src/recommendation-evidence.js";
-import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 } from "../../worker/src/recommendation-evidence-v2.js";
+import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3 } from "../../worker/src/recommendation-evidence-v3.js";
+import { COMPLETENESS_MODEL_VERSION } from "../../worker/src/completeness.js";
+import { COMPARABLE_FIELDS, CONTRADICTION_MODEL_VERSION } from "../../worker/src/contradictions.js";
 import { TAXONOMY_VERSION } from "../../worker/src/taxonomy.js";
 import {
   EXT,
@@ -124,8 +126,10 @@ const fpBase: Parameters<typeof buildRecommendationFingerprint>[0] = {
   submissionId: SUB, extractionId: EXT, reviewedAt: "2026-10-16T08:00:00.000Z",
   activeRuleIds: ["rule-a:1"], availableDocuments: ["Claims history"],
   matcherVersion: MATCHER_VERSION, taxonomyVersion: TAXONOMY_VERSION,
-  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3,
   qualityModelVersion: QUALITY_MODEL_VERSION,
+  completenessModelVersion: COMPLETENESS_MODEL_VERSION,
+  contradictionModelVersion: CONTRADICTION_MODEL_VERSION,
   activeInsurers: [{ id: "insurer-a", name: "A Insurance" }],
 };
 
@@ -165,10 +169,20 @@ test("5. every version component is required by the type system (compile-time gu
   void (() => buildRecommendationFingerprint({ ...fpBase, qualityModelVersion: undefined }));
   // @ts-expect-error the active insurer inventory is required
   void (() => buildRecommendationFingerprint({ ...fpBase, activeInsurers: undefined }));
+  // @ts-expect-error completenessModelVersion is required
+  void (() => buildRecommendationFingerprint({ ...fpBase, completenessModelVersion: undefined }));
+  // @ts-expect-error contradictionModelVersion is required
+  void (() => buildRecommendationFingerprint({ ...fpBase, contradictionModelVersion: undefined }));
 });
 
 test("5b. fingerprint changes when the quality model version changes", () => {
   assert(buildRecommendationFingerprint(fpBase) !== buildRecommendationFingerprint({ ...fpBase, qualityModelVersion: "recommendation-quality-v0" }), "quality model version is part of the key");
+});
+
+test("5b-1. fingerprint changes when the completeness or contradiction model version changes", () => {
+  const base = buildRecommendationFingerprint(fpBase);
+  assert(base !== buildRecommendationFingerprint({ ...fpBase, completenessModelVersion: "recommendation-completeness-v0" }), "completeness model version is part of the key");
+  assert(base !== buildRecommendationFingerprint({ ...fpBase, contradictionModelVersion: "recommendation-contradictions-v0" }), "contradiction model version is part of the key");
 });
 
 test("5c. the recorded quality model version is the one the fingerprint uses", async () => {
@@ -456,6 +470,102 @@ test("16. historical raw matcher_input rows are not touched by this change (shap
     stub.restore();
   }
   eq(JSON.stringify(historical), copy, "input object untouched");
+});
+
+// ---------------------------------------------------------------------------
+// Batch B remediation — production has no valid independently comparable pair
+// ---------------------------------------------------------------------------
+
+test("B0. FORWARD GUARD — a future production comparison requires intentional fingerprint reconnection", () => {
+  assert(
+    COMPARABLE_FIELDS.length === 0,
+    "production contradiction registry became non-empty: collect its observations and include their semantic fingerprint before enabling the pair"
+  );
+});
+
+function reviewedWithBrokerEmail(email: string): Row {
+  const reviewed = reviewedWithSentinels();
+  reviewed.broker = { email: reviewedField(email) };
+  return reviewed;
+}
+
+test("B1. recommendation performs no intake read when the production comparison registry is empty", async () => {
+  const run = await runThroughHandler(input({ reviewed: reviewedWithBrokerEmail("doc@brokers.co.za"), submission: { broker_email: "intake@brokers.co.za", broker_email_body: "PASTED_EMAIL_BODY_SENTINEL" } }));
+  assert(run.row, "row persisted");
+  const reads = run.requests.filter((item) => item.table === "atlas_submissions" && item.method === "GET");
+  eq(reads.length, 0, "no intake query");
+  assert(!JSON.stringify(run.row).includes("PASTED_EMAIL_BODY_SENTINEL"), "the email body is never read, so it can never be persisted");
+});
+
+test("B2. PRIVACY — broker addresses and value digests appear in no persisted evidence/audit/job write", async () => {
+  const intakeAddress = "ALICE.INTAKE.SENTINEL@intakebrokers.example";
+  const documentAddress = "bob.document.sentinel@documentbrokers.example";
+  const run = await runThroughHandler(input({ reviewed: reviewedWithBrokerEmail(documentAddress), submission: { broker_email: intakeAddress } }));
+  assert(run.row, "row persisted");
+  const evidence = run.row.evidence_json as Row;
+  eq(((evidence.contradictions as Row).contradiction_count as number), 0, "the invalid pair is not compared");
+  eq(((evidence.contradictions as Row).comparisons as unknown[]).length, 0, "no comparison attempt");
+  const everything = [run.row, ...["atlas_audit_logs", "atlas_jobs", "atlas_submissions"].flatMap((table) => run.writes(table).map((w) => w.body))];
+  for (const needle of [intakeAddress, intakeAddress.toLowerCase(), documentAddress, "alice.intake", "bob.document", "intakebrokers", "documentbrokers"]) {
+    deepEq(pathsContaining(everything, needle).concat(pathsContaining(everything, needle.toLowerCase())), [], `${needle} must be persisted nowhere`);
+  }
+  assert(!JSON.stringify(everything).includes("value_digest"), "no persisted contradiction value digest");
+});
+
+test("B3. an unreadable submissions table does not affect recommendation because no intake read occurs", async () => {
+  const errors: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    const run = await runThroughHandler(
+      input({ reviewed: reviewedWithBrokerEmail("doc@brokers.co.za"), submission: { broker_email: "intake@brokers.co.za" } }),
+      { failTables: ["atlas_submissions"] }
+    );
+    eq(run.status, 200, "the recommendation still runs");
+    assert(run.row, "row persisted");
+    const contradictions = (run.row.evidence_json as Row).contradictions as { comparisons: Row[]; contradiction_count: number };
+    eq(contradictions.contradiction_count, 0, "no contradiction is invented");
+    deepEq(contradictions.comparisons, [], "no unavailable comparison without a registered pair");
+    const logged = JSON.stringify(errors.filter((args) => args[0] === "atlas_operation_error"));
+    assert(!logged.includes("intake_record_unavailable"), "the obsolete read/failure path is gone");
+    for (const needle of ["doc@brokers", "intake@brokers"]) assert(!logged.includes(needle), "no value in the log");
+  } finally {
+    console.error = original;
+  }
+});
+
+test("B4/B5. CACHE — intake broker-email changes are not production fingerprint inputs", async () => {
+  const reviewed = reviewedWithBrokerEmail("doc@brokers.co.za");
+  const cached = liveFingerprint();
+  const hit = await unforcedRunWithCompletedJob(cached, { reviewed, submission: { broker_email: "intake@brokers.co.za" } });
+  eq(hit.skipped, true, "identical input => cache hit");
+  const cosmetic = await unforcedRunWithCompletedJob(cached, { reviewed, submission: { broker_email: "  INTAKE@Brokers.co.za " } });
+  eq(cosmetic.skipped, true, "a cosmetic edit produces the same analysis, so the cache is still valid");
+  const edited = await unforcedRunWithCompletedJob(cached, { reviewed, submission: { broker_email: "someone.else@brokers.co.za" } });
+  eq(edited.skipped, true, "a real intake address change is irrelevant with no registered production pair");
+  const removed = await unforcedRunWithCompletedJob(cached, { reviewed });
+  eq(removed.skipped, true, "the intake row disappearing is irrelevant");
+});
+
+test("B6. CACHE — a job completed under the PREVIOUS completeness / contradiction model version is not served from cache", async () => {
+  const reviewed = reviewedWithBrokerEmail("doc@brokers.co.za");
+  const stale1 = await unforcedRunWithCompletedJob(liveFingerprint({ completenessModelVersion: "recommendation-completeness-v0" }), { reviewed });
+  assert(stale1.skipped !== true, "stale completeness model");
+  const stale2 = await unforcedRunWithCompletedJob(liveFingerprint({ contradictionModelVersion: "recommendation-contradictions-v0" }), { reviewed });
+  assert(stale2.skipped !== true, "stale contradiction model");
+  const fresh = await unforcedRunWithCompletedJob(liveFingerprint(), { reviewed });
+  eq(fresh.skipped, true, "control: same versions and inputs => hit");
+});
+
+test("B7. the persisted evidence records the model versions and the fingerprint matches the one computed from the same inputs", async () => {
+  const reviewed = reviewedWithBrokerEmail("doc@brokers.co.za");
+  const run = await runThroughHandler(input({ reviewed, submission: { broker_email: "intake@brokers.co.za" } }));
+  assert(run.row, "row persisted");
+  const evidence = run.row.evidence_json as Row;
+  eq(evidence.schema_version, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3, "v3");
+  eq((evidence.completeness as Row).model, COMPLETENESS_MODEL_VERSION, "completeness model");
+  eq((evidence.contradictions as Row).model, CONTRADICTION_MODEL_VERSION, "contradiction model");
+  eq(((evidence.provenance as Row).recommendation_input_fingerprint), liveFingerprint(), "fingerprint = live fingerprint without intake input");
 });
 
 void JOB;

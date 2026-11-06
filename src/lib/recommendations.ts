@@ -368,8 +368,160 @@ export interface RecommendationEvidenceV2 {
   };
 }
 
+/* ---------------------------------------------------------------------------
+   recommendation-evidence-v3 (Powerhouse Batch B). A strict superset of v2 for
+   every shared field; adds deterministic completeness ("what the case still
+   needs"), deterministic contradiction detection ("recorded values that
+   disagree"), and quality gaps that point at both. Historical v1/v2 packets are
+   never converted into v3 and never shown as though these analyses ran.
+   ------------------------------------------------------------------------- */
+
+export type CompletenessState = "complete" | "incomplete_nonblocking" | "incomplete_material";
+export type CompletenessMateriality = "material" | "nonblocking";
+
+export interface QualityGapV3 extends Omit<QualityGapV2, "code"> {
+  code: string;
+  /** Completeness items describing the same problem (stable ids). */
+  completeness_item_ids: string[];
+  /** The contradiction this gap reports, when it is one. */
+  contradiction_id: string | null;
+}
+
+export interface CompletenessRequirementV3 {
+  authority:
+    | "appetite_rule"
+    | "declared_cover_section"
+    | "section_evaluation_model"
+    | "rule_selection_model"
+    | "active_insurer_inventory"
+    | "extraction_report";
+  insurer_id: string | null;
+  rule_id: string | null;
+  rule_scope: "product" | "portfolio" | null;
+  section_key: string | null;
+  /** Extraction-report authority only: a pointer such as `missing_information[2]`, never the text. */
+  reference: string | null;
+  priority: "high" | "medium" | "low" | null;
+  /** Document requirements only. */
+  present: boolean | null;
+}
+
+export interface CompletenessItemV3 {
+  item_id: string;
+  code: string;
+  scope: "submission" | "insurer" | "section" | "document" | "fact";
+  status: "missing" | "not_evaluated" | "ambiguous";
+  materiality: CompletenessMateriality;
+  affects: "recommendation" | "insurer" | "section" | "rule" | "not_determined";
+  insurer_ids: string[];
+  section_keys: string[];
+  rule_ids: string[];
+  field_path: string | null;
+  label: string | null;
+  document_type: string | null;
+  document_key: string | null;
+  trust_basis: "active_exact_clean" | null;
+  required_by: CompletenessRequirementV3[];
+  source: string;
+  quality_gap_ids: string[];
+  resolution_state: "open";
+}
+
+export interface CompletenessAnalysisV3 {
+  model: string;
+  state: CompletenessState;
+  material_count: number;
+  nonblocking_count: number;
+  requirement_basis: {
+    documents: string;
+    sections: string;
+    facts: string;
+    universal_requirements: string;
+  };
+  items: CompletenessItemV3[];
+  insurers: {
+    insurer_id: string;
+    state: CompletenessState;
+    material_count: number;
+    nonblocking_count: number;
+    item_ids: string[];
+  }[];
+  case_item_ids: string[];
+  extraction_reported_omitted: number;
+}
+
+export type ContradictionSourcePointerV3 =
+  | { record: "atlas_submissions"; column: string }
+  | { record: "atlas_extractions"; record_id: string; field_path: string; document_id: string | null; page: number | null };
+
+export interface ContradictionRecordV3 {
+  contradiction_id: string;
+  code: string;
+  field_key: string;
+  field_path: string | null;
+  label: string;
+  scope: "submission";
+  status: "unresolved";
+  resolution_state: "unresolved";
+  severity: "material" | "advisory";
+  severity_basis: string;
+  comparison_basis: { kind: string; normalization: string; normalization_steps: string[] };
+  affects_matcher_input: boolean;
+  matcher_roles: string[];
+  value_groups: {
+    value_label: string;
+    value_display: string | null;
+    source_count: number;
+    sources: {
+      source_id: string;
+      source_label: string;
+      pointer: ContradictionSourcePointerV3;
+      field_status: string | null;
+      confidence: number | null;
+    }[];
+  }[];
+  quality_gap_id: string | null;
+}
+
+export interface ContradictionAnalysisV3 {
+  model: string;
+  source_precedence: "none_applied";
+  comparisons: {
+    field_key: string;
+    label: string;
+    kind: string;
+    normalization: string;
+    outcome: "agree" | "conflict" | "single_source" | "comparison_unavailable";
+    source_ids: string[];
+    unparseable_source_ids: string[];
+    unavailable_source_ids: string[];
+    unavailable_reason: "unparseable_value" | "source_unavailable" | null;
+    contradiction_id: string | null;
+    quality_gap_id: string | null;
+  }[];
+  contradictions: ContradictionRecordV3[];
+  contradiction_count: number;
+  material_count: number;
+  advisory_count: number;
+  unavailable_count: number;
+}
+
+export interface RecommendationEvidenceV3 extends Omit<RecommendationEvidenceV2, "schema_version" | "quality"> {
+  schema_version: "recommendation-evidence-v3";
+  quality: {
+    model: string;
+    state: IntelligenceState;
+    blocker_count: number;
+    material_count: number;
+    advisory_count: number;
+    gaps: QualityGapV3[];
+  };
+  completeness: CompletenessAnalysisV3;
+  contradictions: ContradictionAnalysisV3;
+}
+
 /** Discriminated on `schema_version`. Unknown future versions are handled by resolveEvidence(). */
-export type RecommendationEvidence = RecommendationEvidenceV1 | RecommendationEvidenceV2;
+export type RecommendationEvidence = RecommendationEvidenceV1 | RecommendationEvidenceV2 | RecommendationEvidenceV3;
 
 export interface Recommendation {
   id: string;

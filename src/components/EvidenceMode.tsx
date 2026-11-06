@@ -4,12 +4,17 @@
  * "Why did Atlas rank this insurer here — and how far can I rely on it?"
  *
  * Everything on this surface is READ from the persisted `evidence_json`
- * (recommendation-evidence-v1 or -v2) through lib/recommendation-evidence. It
+ * (recommendation-evidence-v1, -v2 or -v3) through lib/recommendation-evidence. It
  * never scores, ranks, classifies materiality or reconstructs history from
  * prose. Where the packet is silent the UI says so: a missing page, quote,
  * file or document is shown as "not recorded", never filled in.
  *
  *   • IntelligenceQualityPanel — recommendation-level reliance verdict.
+ *   • CompletenessPanel        — "What Atlas still needs" (evidence v3): missing
+ *                                 documents, undeclared / unevaluated sections,
+ *                                 information the extraction reported, by scope.
+ *   • ConflictsPanel           — "Conflicts to review" (evidence v3): recorded
+ *                                 values that disagree. Never says which is right.
  *   • EvidenceDrawer           — one insurer: ranking explanation, rules,
  *                                 requested sections, triggers, documents,
  *                                 trusted evidence, gaps, provenance, quality.
@@ -23,12 +28,16 @@ import { Block, Disclosure, Drawer, KeyValue, Notice, StatusBadge } from "./ui";
 import {
   INTELLIGENCE_STATE,
   SEVERITY,
+  completenessView,
+  contradictionsView,
   insurerView,
   missingLabel,
   noDataInsurers,
   recommendationQuality,
   scoreTies,
+  type CompletenessLine,
   type ConsideredLine,
+  type ContradictionLine,
   type DocumentLine,
   type EvidenceView,
   type GapLine,
@@ -332,6 +341,277 @@ export function IntelligenceQualityPanel({ evidence }: { evidence: EvidenceView 
   );
 }
 
+/* ===========================================================================
+   Phase 3 — "What Atlas still needs"
+   =========================================================================== */
+
+export const NEEDS_HEADING = "What Atlas still needs";
+export const CONFLICTS_HEADING = "Conflicts to review";
+
+/** One outstanding item. `showInsurers` is false inside a per-insurer group, where the heading already names it. */
+export function CompletenessLineRow({
+  line,
+  showInsurers = true,
+  action,
+}: {
+  line: CompletenessLine;
+  showInsurers?: boolean;
+  action?: ReactNode;
+}) {
+  const headline = line.documentType ?? line.fieldLabel ?? line.copy.title;
+  return (
+    <li
+      className={`atlas-ev__gap atlas-ev__gap--${line.materiality === "material" ? "material" : "advisory"}`}
+      data-completeness-item={line.itemId}
+    >
+      <div className="atlas-ev__gap-head">
+        <StatusBadge status={line.materialityMeta} />
+        <strong>{headline}</strong>
+        <StatusBadge status={{ label: line.statusLabel, tone: "neutral" }} quiet />
+        {action}
+      </div>
+      {line.documentType !== null || line.fieldLabel !== null ? (
+        <p className="atlas-list__meta">{line.copy.title}</p>
+      ) : null}
+      <p className="atlas-text-dense">{line.copy.body}</p>
+      {((showInsurers && line.insurers.length > 0) || line.sections.length > 0) && (
+        <p className="atlas-list__meta">
+          {showInsurers && line.insurers.length > 0 && <>Insurers: {line.insurers.map((item) => item.insurerName).join(", ")}. </>}
+          {line.sections.length > 0 && <>Sections: {line.sections.join(", ")}.</>}
+        </p>
+      )}
+      {line.requiredBy.length > 0 && (
+        <Disclosure summary="Why Atlas says this is required">
+          <ul className="atlas-ev__terms" aria-label="Required by">
+            {line.requiredBy.map((sentence) => (
+              <li key={sentence} className="atlas-text-dense">
+                {sentence}
+              </li>
+            ))}
+          </ul>
+          <p className="atlas-list__meta">{line.basis} {line.affects}</p>
+        </Disclosure>
+      )}
+    </li>
+  );
+}
+
+export function CompletenessPanel({ evidence }: { evidence: EvidenceView }) {
+  const view = completenessView(evidence);
+  // Absent / unsupported / malformed packets are already explained by the quality panel.
+  if (!view) return null;
+  if (view.mode === "not_captured") {
+    return (
+      <section className="atlas-ev__quality" aria-label={NEEDS_HEADING}>
+        <p className="atlas-reco__summary-eyebrow">{NEEDS_HEADING}</p>
+        <Notice tone="info" title="Not captured for this recommendation">
+          {view.message} Atlas does not rebuild it from current data.
+        </Notice>
+      </section>
+    );
+  }
+  return (
+    <section className="atlas-ev__quality" aria-label={NEEDS_HEADING}>
+      <div className="atlas-ev__quality-head">
+        <div>
+          <p className="atlas-reco__summary-eyebrow">{NEEDS_HEADING}</p>
+          <p className="atlas-reco__summary-title">{view.stateMeta.label}</p>
+        </div>
+        <div className="atlas-reco__summary-flags">
+          <StatusBadge status={{ label: view.stateMeta.label, tone: view.stateMeta.tone }} strong />
+          <StatusBadge status={{ label: `${view.materialCount} material`, tone: view.materialCount > 0 ? "warning" : "neutral" }} quiet={view.materialCount === 0} />
+          <StatusBadge status={{ label: `${view.nonblockingCount} nonblocking`, tone: "neutral" }} quiet />
+        </div>
+      </div>
+      <p className="atlas-text-dense">{view.stateMeta.meaning}</p>
+      <Disclosure summary="What Atlas counts as required">
+        <ul className="atlas-ev__terms">
+          {view.basis.map((sentence) => (
+            <li key={sentence} className="atlas-text-dense">
+              {sentence}
+            </li>
+          ))}
+        </ul>
+      </Disclosure>
+
+      {view.caseLines.length > 0 && (
+        <>
+          <p className="atlas-block__title">Across the whole recommendation</p>
+          <ul className="atlas-ev__gaps" aria-label="Outstanding across the recommendation">
+            {view.caseLines.map((line) => (
+              <CompletenessLineRow key={line.itemId} line={line} />
+            ))}
+          </ul>
+        </>
+      )}
+      {view.reportedOmitted > 0 && (
+        <p className="atlas-text-dense atlas-text-muted">
+          {view.reportedOmitted} further item{view.reportedOmitted === 1 ? "" : "s"} reported by the extraction {view.reportedOmitted === 1 ? "is" : "are"} not
+          listed individually.
+        </p>
+      )}
+
+      {view.documentLines.length > 0 && (
+        <>
+          <p className="atlas-block__title">Required documents</p>
+          <ul className="atlas-ev__gaps" aria-label="Required documents not evidenced">
+            {view.documentLines.map((line) => (
+              <CompletenessLineRow key={line.itemId} line={line} />
+            ))}
+          </ul>
+        </>
+      )}
+
+      {view.insurerGroups.length > 0 && (
+        <>
+          <p className="atlas-block__title">By insurer</p>
+          {view.insurerGroups.map((group) => (
+            <div key={group.insurerId} className="atlas-ev__rule" aria-label={`Outstanding for ${group.insurerName}`}>
+              <div className="atlas-ev__rule-head">
+                <strong>{group.insurerName}</strong>
+                <StatusBadge status={{ label: group.stateMeta.label, tone: group.stateMeta.tone }} />
+              </div>
+              {group.lines.length === 0 ? (
+                <p className="atlas-text-dense atlas-text-muted">Only the required documents above are outstanding for this insurer.</p>
+              ) : (
+                <ul className="atlas-ev__gaps">
+                  {group.lines.map((line) => (
+                    <CompletenessLineRow key={line.itemId} line={line} showInsurers={false} />
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+
+      {view.completeInsurers.length > 0 && (
+        <p className="atlas-text-dense atlas-text-muted">Nothing outstanding for: {view.completeInsurers.join(", ")}.</p>
+      )}
+      {view.caseLines.length + view.documentLines.length + view.insurerGroups.length === 0 && (
+        <p className="atlas-text-dense atlas-text-muted">Nothing outstanding was recorded for this recommendation.</p>
+      )}
+    </section>
+  );
+}
+
+/* ===========================================================================
+   Phase 4 — "Conflicts to review"
+   =========================================================================== */
+
+export function ContradictionCard({ line, action }: { line: ContradictionLine; action?: ReactNode }) {
+  return (
+    <li
+      className={`atlas-ev__gap atlas-ev__gap--${line.severity === "material" ? "material" : "advisory"}`}
+      data-contradiction={line.id}
+    >
+      <div className="atlas-ev__gap-head">
+        <StatusBadge status={line.severityMeta} />
+        <strong>{line.title}</strong>
+        <StatusBadge status={{ label: "Unresolved", tone: "warning" }} />
+        {action}
+      </div>
+      <p className="atlas-list__meta">
+        Fact: {line.label}
+        {line.fieldPath ? ` (${line.fieldPath.replace(/\./g, " › ")})` : ""}
+      </p>
+      <ul className="atlas-ev__rules" aria-label={`Recorded values for ${line.label}`}>
+        {line.groups.map((group, index) => (
+          <li key={group.reference} className="atlas-ev__rule">
+            <p className="atlas-list__title">
+              Value {String.fromCharCode(65 + index)}{" "}
+              {group.display !== null ? <q>{group.display}</q> : <span className="atlas-text-muted">(not shown)</span>}{" "}
+            </p>
+            <p className="atlas-list__meta">
+              Recorded by: {group.sources.map((source) => `${source.label} — ${source.where}`).join("; ")}
+            </p>
+          </li>
+        ))}
+      </ul>
+      <p className="atlas-text-dense">{line.matcherNote}</p>
+      <p className="atlas-text-dense atlas-text-muted">{line.resolution.label}.</p>
+      <Disclosure summary="How Atlas compared them">
+        <p className="atlas-text-dense">
+          Compared as <strong>{line.basis.kind.replace(/_/g, " ")}</strong> values after these steps:
+        </p>
+        <ol className="atlas-ev__terms">
+          {line.basis.steps.map((step) => (
+            <li key={step} className="atlas-text-dense">
+              {step}
+            </li>
+          ))}
+        </ol>
+        <p className="atlas-list__meta">
+          Values are shown typed or masked. The raw recorded text is not kept in this evidence.
+        </p>
+      </Disclosure>
+    </li>
+  );
+}
+
+export function ConflictsPanel({ evidence }: { evidence: EvidenceView }) {
+  const view = contradictionsView(evidence);
+  if (!view) return null;
+  if (view.mode === "not_captured") {
+    return (
+      <section className="atlas-ev__quality" aria-label={CONFLICTS_HEADING}>
+        <p className="atlas-reco__summary-eyebrow">{CONFLICTS_HEADING}</p>
+        <Notice tone="info" title="Not captured for this recommendation">
+          {view.message} Atlas does not rebuild it from current data.
+        </Notice>
+      </section>
+    );
+  }
+  const count = view.conflicts.length;
+  return (
+    <section className="atlas-ev__quality" aria-label={CONFLICTS_HEADING}>
+      <div className="atlas-ev__quality-head">
+        <div>
+          <p className="atlas-reco__summary-eyebrow">{CONFLICTS_HEADING}</p>
+          <p className="atlas-reco__summary-title">
+            {count === 0 ? "No conflicting recorded values" : `${count} conflict${count === 1 ? "" : "s"} to review`}
+          </p>
+        </div>
+        <StatusBadge
+          status={{ label: count === 0 ? "Nothing to review" : `${count} to review`, tone: count === 0 ? "success" : "warning" }}
+          strong={count > 0}
+          quiet={count === 0}
+        />
+      </div>
+      <p className="atlas-text-dense atlas-text-muted">{view.precedenceStatement}</p>
+      {count > 0 && (
+        <ul className="atlas-ev__gaps" aria-label="Conflicting recorded values">
+          {view.conflicts.map((line) => (
+            <ContradictionCard key={line.id} line={line} />
+          ))}
+        </ul>
+      )}
+      {view.comparedCount === 0 ? (
+        <p className="atlas-text-dense atlas-text-muted">
+          Atlas could compare nothing here: it only compares a fact that two independent sources both recorded, and none was.
+        </p>
+      ) : count === 0 && view.unavailable.length === 0 ? (
+        <p className="atlas-text-dense atlas-text-muted">
+          Atlas compared {view.comparedCount} recorded fact{view.comparedCount === 1 ? "" : "s"} across sources and found no conflicting
+          values. A fact recorded in only one place cannot be compared.
+        </p>
+      ) : null}
+      {view.agreedLabels.length > 0 && count > 0 && (
+        <p className="atlas-text-dense atlas-text-muted">Compared and consistent: {view.agreedLabels.join(", ")}.</p>
+      )}
+      {view.unavailable.length > 0 && (
+        <ul className="atlas-ev__terms" aria-label="Comparisons Atlas could not make">
+          {view.unavailable.map((item) => (
+            <li key={item.label} className="atlas-text-dense atlas-text-muted">
+              Atlas could not compare {item.label.toLowerCase()}: {item.reason}. This is not a conflict.
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function NoDataList({ items }: { items: { insurerId: string; insurerName: string }[] }) {
   if (items.length === 0) return null;
   return (
@@ -415,7 +695,8 @@ function NoDataBody({ name, message }: { name: string; message: string }) {
 }
 
 function InsurerEvidenceBody({ view, canViewDiagnostics }: { view: InsurerEvidenceView; canViewDiagnostics: boolean }) {
-  const isV2 = view.version === "v2";
+  // v3 is a superset of v2 for everything the drawer shows.
+  const isV2 = view.version !== "v1";
   return (
     <div className="atlas-ev">
       <RankingExplanation view={view} />
@@ -856,6 +1137,8 @@ function Diagnostics({ view }: { view: InsurerEvidenceView }) {
     { key: "Taxonomy version", value: d.taxonomyVersion },
     { key: "Input fingerprint", value: d.fingerprint },
     { key: "Quality model", value: d.qualityModel ?? "—" },
+    { key: "Completeness model", value: d.completenessModel ?? "Not captured" },
+    { key: "Contradiction model", value: d.contradictionModel ?? "Not captured" },
     { key: "Scored rule ID", value: d.scoredRuleId ?? "—" },
     { key: "Unresolved rule IDs", value: d.unresolvedRuleIds.length ? d.unresolvedRuleIds.join(", ") : "none" },
     { key: "Evidence IDs", value: d.evidenceIds.length ? d.evidenceIds.join(", ") : "none" },

@@ -145,7 +145,7 @@
   "extraction_id": "22222222-2222-2222-2222-222222222222",
   "created_at": "2026-10-16T10:00:00.000Z",
   "evidence_json": {
-    "schema_version": "recommendation-evidence-v2",
+    "schema_version": "recommendation-evidence-v3",
     "provenance": {
       "recommendation_id": "rec-case-09-no-appetite-data-insurer",
       "submission_id": "11111111-1111-1111-1111-111111111111",
@@ -156,7 +156,7 @@
       "taxonomy_version": "2026-07-token-aliases-v1",
       "explanation_mode": "deterministic",
       "explanation_source": "deterministic",
-      "recommendation_input_fingerprint": "fp_efd42caf"
+      "recommendation_input_fingerprint": "fp_a6ca0058"
     },
     "matcher_input": {
       "product_candidates": [
@@ -554,7 +554,7 @@
       }
     ],
     "quality": {
-      "model": "recommendation-quality-v2",
+      "model": "recommendation-quality-v3",
       "state": "decision_ready",
       "blocker_count": 0,
       "material_count": 0,
@@ -571,7 +571,11 @@
           ],
           "code": "insurer_appetite_data_missing",
           "severity": "advisory",
-          "scope": "insurer"
+          "scope": "insurer",
+          "completeness_item_ids": [
+            "cmp:insurer_appetite_data_missing:insurer-epsilon:-:-"
+          ],
+          "contradiction_id": null
         },
         {
           "gap_id": "gap:insurer_appetite_data_missing:insurer-foxtrot:-:-:-:active_appetite_rule",
@@ -584,9 +588,136 @@
           ],
           "code": "insurer_appetite_data_missing",
           "severity": "advisory",
-          "scope": "insurer"
+          "scope": "insurer",
+          "completeness_item_ids": [
+            "cmp:insurer_appetite_data_missing:insurer-foxtrot:-:-"
+          ],
+          "contradiction_id": null
         }
       ]
+    },
+    "completeness": {
+      "model": "recommendation-completeness-v1",
+      "state": "incomplete_nonblocking",
+      "material_count": 0,
+      "nonblocking_count": 2,
+      "requirement_basis": {
+        "documents": "appetite_rule_required_documents",
+        "sections": "declared_cover_sections",
+        "facts": "extraction_reported_missing_information_only",
+        "universal_requirements": "none_defined"
+      },
+      "items": [
+        {
+          "item_id": "cmp:insurer_appetite_data_missing:insurer-epsilon:-:-",
+          "code": "insurer_appetite_data_missing",
+          "scope": "insurer",
+          "status": "missing",
+          "materiality": "nonblocking",
+          "affects": "insurer",
+          "insurer_ids": [
+            "insurer-epsilon"
+          ],
+          "section_keys": [],
+          "rule_ids": [],
+          "field_path": null,
+          "label": null,
+          "document_type": null,
+          "document_key": null,
+          "trust_basis": null,
+          "required_by": [
+            {
+              "authority": "active_insurer_inventory",
+              "insurer_id": "insurer-epsilon",
+              "rule_id": null,
+              "rule_scope": null,
+              "section_key": null,
+              "reference": null,
+              "priority": null,
+              "present": null
+            }
+          ],
+          "source": "insurer_inventory",
+          "quality_gap_ids": [
+            "gap:insurer_appetite_data_missing:insurer-epsilon:-:-:-:active_appetite_rule"
+          ],
+          "resolution_state": "open"
+        },
+        {
+          "item_id": "cmp:insurer_appetite_data_missing:insurer-foxtrot:-:-",
+          "code": "insurer_appetite_data_missing",
+          "scope": "insurer",
+          "status": "missing",
+          "materiality": "nonblocking",
+          "affects": "insurer",
+          "insurer_ids": [
+            "insurer-foxtrot"
+          ],
+          "section_keys": [],
+          "rule_ids": [],
+          "field_path": null,
+          "label": null,
+          "document_type": null,
+          "document_key": null,
+          "trust_basis": null,
+          "required_by": [
+            {
+              "authority": "active_insurer_inventory",
+              "insurer_id": "insurer-foxtrot",
+              "rule_id": null,
+              "rule_scope": null,
+              "section_key": null,
+              "reference": null,
+              "priority": null,
+              "present": null
+            }
+          ],
+          "source": "insurer_inventory",
+          "quality_gap_ids": [
+            "gap:insurer_appetite_data_missing:insurer-foxtrot:-:-:-:active_appetite_rule"
+          ],
+          "resolution_state": "open"
+        }
+      ],
+      "insurers": [
+        {
+          "insurer_id": "insurer-alpha",
+          "state": "complete",
+          "material_count": 0,
+          "nonblocking_count": 0,
+          "item_ids": []
+        },
+        {
+          "insurer_id": "insurer-epsilon",
+          "state": "incomplete_nonblocking",
+          "material_count": 0,
+          "nonblocking_count": 1,
+          "item_ids": [
+            "cmp:insurer_appetite_data_missing:insurer-epsilon:-:-"
+          ]
+        },
+        {
+          "insurer_id": "insurer-foxtrot",
+          "state": "incomplete_nonblocking",
+          "material_count": 0,
+          "nonblocking_count": 1,
+          "item_ids": [
+            "cmp:insurer_appetite_data_missing:insurer-foxtrot:-:-"
+          ]
+        }
+      ],
+      "case_item_ids": [],
+      "extraction_reported_omitted": 0
+    },
+    "contradictions": {
+      "model": "recommendation-contradictions-v1",
+      "source_precedence": "none_applied",
+      "comparisons": [],
+      "contradictions": [],
+      "contradiction_count": 0,
+      "material_count": 0,
+      "advisory_count": 0,
+      "unavailable_count": 0
     }
   }
 }

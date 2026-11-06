@@ -217,7 +217,12 @@ export function compareCodeUnits(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-const FACT_FIELDS: {
+/**
+ * The reviewed fields the matcher consumes, with the role each plays. Exported so
+ * the contradiction registry can derive "is this field consumed by the matcher?"
+ * from this single table instead of keeping a second copy that could drift.
+ */
+export const FACT_FIELDS: {
   section: string;
   key: string;
   label: string;

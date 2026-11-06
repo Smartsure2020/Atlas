@@ -77,7 +77,8 @@ const FIELD_SOURCE_KEYS: (keyof FieldSource)[] = [
   "snippet",
 ];
 
-const SECTION_FIELDS: Record<string, { field: string; array?: boolean }[]> = {
+/** Exported so completeness can recognise a schema path in an extraction's missing-information record. */
+export const SECTION_FIELDS: Record<string, { field: string; array?: boolean }[]> = {
   extracted_client: [
     { field: "name" },
     { field: "entity_type" },

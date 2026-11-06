@@ -18,7 +18,66 @@ import {
   type CommunicationStatus,
   type CommunicationType,
 } from "./phase4-workflow";
-import { roleCanViewManagerDashboard } from "./phase6-hardening";
+import { roleCanViewManagerDashboard, roleCanViewUnderwritingIntelligence, roleCanWrite } from "./phase6-hardening";
+import {
+  detectedItemIdForMissingInfoCandidate,
+  detectedMissingInfoId,
+  findExistingLogicalMissingInfo,
+  findHistoricalTrackedMissingInfo,
+  findTrackableCompletenessItem,
+  isCanonicalRequiredDocument,
+  missingInfoLogicalKey,
+  missingInfoStructuredFactPath,
+  structuredFactPathsInEvidence,
+  type MissingInfoLogicalCandidate,
+} from "./detected-missing-info";
+
+const TRACK_PROVENANCE_RECOMMENDATION_LIMIT = 100;
+
+async function recommendationIdsForTrackProvenance(
+  admin: ReturnType<typeof adminClient>,
+  submissionId: string,
+  excludeRecommendationId?: string
+): Promise<{ ids: string[]; error: boolean }> {
+  let query = admin
+    .from("atlas_recommendations")
+    .select("id")
+    .eq("submission_id", submissionId);
+  if (excludeRecommendationId) query = query.neq("id", excludeRecommendationId);
+  const { data, error } = await query
+    .order("created_at", { ascending: false })
+    .limit(TRACK_PROVENANCE_RECOMMENDATION_LIMIT);
+  return {
+    ids: (data ?? []).flatMap((row) => typeof row.id === "string" && row.id ? [row.id] : []),
+    error: !!error,
+  };
+}
+
+async function currentStructuredDocumentCandidates(
+  admin: ReturnType<typeof adminClient>,
+  submissionId: string
+): Promise<{ items: MissingInfoItemInput[]; error: boolean }> {
+  const { data: review, error: reviewError } = await admin
+    .from("atlas_quote_reviews")
+    .select("id")
+    .eq("submission_id", submissionId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (reviewError) return { items: [], error: true };
+  if (!review?.id) return { items: [], error: false };
+  const { data: sections, error: sectionsError } = await admin
+    .from("atlas_quote_review_sections")
+    .select("section_key, section_name, matched_rule_id, missing_documents, findings, rating_findings, excess_findings, warranty_findings")
+    .eq("quote_review_id", String(review.id))
+    .order("created_at", { ascending: true });
+  if (sectionsError) return { items: [], error: true };
+  return {
+    items: missingInfoFromQuoteReview({ sections: (sections ?? []) as any })
+      .filter((item) => isCanonicalRequiredDocument(item)),
+    error: false,
+  };
+}
 
 async function latestReview(admin: ReturnType<typeof adminClient>, submissionId: string) {
   const { data } = await admin
@@ -64,17 +123,31 @@ export async function handleGenerateMissingInfo(submissionId: string, env: Env, 
     extractionMissing: snapshot?.reviewed_json?.missing_information ?? [],
   });
 
-  const { data: existing } = await admin
+  const { data: existing, error: existingError } = await admin
     .from("atlas_missing_info_items")
-    .select("section_key, item_type, title, description")
-    .eq("submission_id", submissionId);
-  const existingKeys = new Set(
-    ((existing ?? []) as Record<string, unknown>[])
-      .map((i) => `${i.section_key ?? ""}|${i.item_type}|${i.title}|${i.description ?? ""}`.toLowerCase())
-  );
-  const rows = generated
-    .filter((i) => !existingKeys.has(`${i.section_key ?? ""}|${i.item_type}|${i.title}|${i.description ?? ""}`.toLowerCase()))
-    .map((i) => ({ ...i, submission_id: submissionId, created_by: user.id }));
+    .select("id, section_key, item_type, title, description, source, status, created_at")
+    .eq("submission_id", submissionId)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+  if (existingError) return json({ error: "fetch_failed" }, 500);
+  const known = [...(existing ?? [])] as MissingInfoLogicalCandidate[];
+  const generatedFactPaths = generated
+    .map((item) => missingInfoStructuredFactPath(item))
+    .filter((path): path is string => path !== null);
+  const generatedDetectedItemIds = generated.map((item) => detectedItemIdForMissingInfoCandidate(item));
+  const provenance = known.length > 0 && generatedDetectedItemIds.some(Boolean)
+    ? await recommendationIdsForTrackProvenance(admin, submissionId)
+    : { ids: [], error: false };
+  if (provenance.error) return json({ error: "fetch_failed" }, 500);
+  const rows: Record<string, unknown>[] = [];
+  for (const [index, item] of generated.entries()) {
+    if (findExistingLogicalMissingInfo(known, item, null, generatedFactPaths)) continue;
+    const detectedItemId = generatedDetectedItemIds[index];
+    if (detectedItemId && findHistoricalTrackedMissingInfo(known, submissionId, provenance.ids, detectedItemId)) continue;
+    const row = { ...item, submission_id: submissionId, created_by: user.id };
+    rows.push(row);
+    known.push({ id: `pending-${rows.length}`, ...row });
+  }
 
   if (rows.length > 0) {
     const { error } = await admin.from("atlas_missing_info_items").insert(rows);
@@ -126,6 +199,124 @@ export async function handleAddMissingInfo(submissionId: string, request: Reques
     },
   });
   return json({ ok: true, id: data.id }, 201);
+}
+
+export async function handleTrackDetectedMissingInfo(submissionId: string, request: Request, env: Env, user: AtlasUser) {
+  if (!roleCanViewUnderwritingIntelligence(user.role) || !roleCanWrite(user.role)) {
+    return json({ error: "permission_denied" }, 403);
+  }
+  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  if (
+    !body ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    Object.keys(body).length !== 1 ||
+    typeof body.detected_item_id !== "string" ||
+    body.detected_item_id.trim() === ""
+  ) return json({ error: "bad_request", detail: "detected_item_id_required" }, 400);
+
+  const admin = adminClient(env);
+  const { data: recommendation, error: recommendationError } = await admin
+    .from("atlas_recommendations")
+    .select("id, evidence_json")
+    .eq("submission_id", submissionId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (recommendationError) return json({ error: "fetch_failed" }, 500);
+  if (!recommendation) return json({ error: "no_recommendation", detail: "run_recommendation_first" }, 400);
+
+  const evidence = recommendation.evidence_json as unknown;
+  if (!evidence || typeof evidence !== "object" || (evidence as { schema_version?: unknown }).schema_version !== "recommendation-evidence-v3") {
+    return json({ error: "unsupported_evidence", detail: "latest_recommendation_must_be_v3" }, 409);
+  }
+  const detected = findTrackableCompletenessItem(evidence, body.detected_item_id);
+  if (!detected) return json({ error: "detected_item_not_trackable" }, 422);
+
+  const { data: submissionItems, error: submissionItemsError } = await admin
+    .from("atlas_missing_info_items")
+    .select("id, section_key, item_type, title, description, source, status, created_at")
+    .eq("submission_id", submissionId)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+  if (submissionItemsError) return json({ error: "fetch_failed" }, 500);
+  const logicalExisting = findExistingLogicalMissingInfo(
+    submissionItems ?? [],
+    detected.row,
+    detected.item.code === "extraction_reported_information_missing" ? detected.item.field_path : null,
+    structuredFactPathsInEvidence(evidence)
+  );
+  if (logicalExisting) return json({ ok: true, id: String(logicalExisting.id), duplicate: true });
+
+  if (isCanonicalRequiredDocument(detected.row)) {
+    const structured = await currentStructuredDocumentCandidates(admin, submissionId);
+    if (structured.error) return json({ error: "fetch_failed" }, 500);
+    const detectedKey = missingInfoLogicalKey(detected.row);
+    for (const candidate of structured.items) {
+      if (missingInfoLogicalKey(candidate) !== detectedKey) continue;
+      const legacyExisting = findExistingLogicalMissingInfo(submissionItems ?? [], candidate);
+      if (legacyExisting) return json({ ok: true, id: String(legacyExisting.id), duplicate: true });
+    }
+  }
+
+  const provenance = await recommendationIdsForTrackProvenance(admin, submissionId, String(recommendation.id));
+  if (provenance.error) return json({ error: "fetch_failed" }, 500);
+  const historical = findHistoricalTrackedMissingInfo(
+    submissionItems ?? [],
+    submissionId,
+    provenance.ids,
+    body.detected_item_id
+  );
+  if (historical) return json({ ok: true, id: String(historical.id), duplicate: true });
+
+  const id = detectedMissingInfoId(submissionId, String(recommendation.id), body.detected_item_id);
+  const { data: existing } = await admin
+    .from("atlas_missing_info_items")
+    .select("id")
+    .eq("id", id)
+    .eq("submission_id", submissionId)
+    .maybeSingle();
+  if (existing?.id) return json({ ok: true, id: String(existing.id), duplicate: true });
+
+  const { data, error } = await admin
+    .from("atlas_missing_info_items")
+    .insert({
+      id,
+      submission_id: submissionId,
+      quote_review_id: null,
+      ...detected.row,
+      status: "open",
+      required_by_rule_id: null,
+      due_date: null,
+      notes: null,
+      created_by: user.id,
+    })
+    .select("id")
+    .single();
+
+  if (error || !data) {
+    // A concurrent request may have won the deterministic primary-key insert.
+    const { data: raced } = await admin
+      .from("atlas_missing_info_items")
+      .select("id")
+      .eq("id", id)
+      .eq("submission_id", submissionId)
+      .maybeSingle();
+    if (raced?.id) return json({ ok: true, id: String(raced.id), duplicate: true });
+    return json({ error: "store_failed" }, 500);
+  }
+
+  await audit(env, {
+    submissionId,
+    action: "detected_missing_info_tracked",
+    actorId: user.id,
+    metadata: {
+      item_id: id,
+      recommendation_id: recommendation.id,
+      detected_item_id: body.detected_item_id,
+    },
+  });
+  return json({ ok: true, id, duplicate: false }, 201);
 }
 
 export async function handleUpdateMissingInfo(itemId: string, request: Request, env: Env, user: AtlasUser) {

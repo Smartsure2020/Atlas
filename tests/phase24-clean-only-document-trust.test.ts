@@ -59,7 +59,9 @@ import {
 import { MATCHER_VERSION, matchInsurers } from "../worker/src/matcher.js";
 import type { AppetiteRow } from "../worker/src/matcher-types.js";
 import { buildQuoteReview } from "../worker/src/quote-review.js";
-import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 } from "../worker/src/recommendation-evidence-v2.js";
+import { QUALITY_MODEL_VERSION, RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3 } from "../worker/src/recommendation-evidence-v3.js";
+import { COMPLETENESS_MODEL_VERSION } from "../worker/src/completeness.js";
+import { CONTRADICTION_MODEL_VERSION } from "../worker/src/contradictions.js";
 import { TAXONOMY_VERSION } from "../worker/src/taxonomy.js";
 
 // supabase-js builds a Realtime client eagerly inside createClient(), and on
@@ -1167,8 +1169,12 @@ const DOCS = ["Policy schedule", "Claims history"];
 const LIVE_BEHAVIOUR = {
   matcherVersion: MATCHER_VERSION,
   taxonomyVersion: TAXONOMY_VERSION,
-  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+  evidenceSchemaVersion: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V3,
   qualityModelVersion: QUALITY_MODEL_VERSION,
+  completenessModelVersion: COMPLETENESS_MODEL_VERSION,
+  contradictionModelVersion: CONTRADICTION_MODEL_VERSION,
+  // Production has no registered independently comparable source pair, so the
+  // recommendation fingerprint has no contradiction observation input.
   // The phase-24 recommendation stubs seed no atlas_insurers rows.
   activeInsurers: [] as { id: string; name: string }[],
 };

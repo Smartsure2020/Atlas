@@ -693,6 +693,8 @@ export default function SubmissionDetail({
               canWrite={canWrite}
               onRefresh={() => load({ silent: true })}
               onGoToTab={onTabChange}
+              // Underwriting intelligence only: a broker gets exactly the workspace it always had.
+              recommendationEvidence={isBroker || !data.recommendation ? undefined : (data.recommendation.evidence_json ?? null)}
             />
           </TabPanel>
 

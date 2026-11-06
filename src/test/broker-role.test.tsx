@@ -77,6 +77,7 @@ import WorkQueue from "../pages/WorkQueue";
 import SubmissionDetail from "../pages/SubmissionDetail";
 import { ToastProvider } from "../components/ui";
 import type { Route } from "../lib/router";
+import caseWithCompleteness from "../../tests/powerhouse/fixtures/snapshots/case-24-required-document-missing-rule-provenance.row.json";
 
 function submissionPayload(over: Record<string, unknown> = {}) {
   return {
@@ -277,6 +278,32 @@ describe("SubmissionDetail (broker) — tab set", () => {
     expect(within(tabs).getByRole("tab", { name: /^Recommendation/i })).toBeInTheDocument();
     expect(within(tabs).getByRole("tab", { name: /Quote review/i })).toBeInTheDocument();
     expect(within(tabs).getByRole("tab", { name: /Communications/i })).toBeInTheDocument();
+  });
+});
+
+describe("SubmissionDetail — Atlas-detected completeness is underwriting intelligence (Batch B)", () => {
+  const v3Row = caseWithCompleteness as unknown;
+
+  it("a broker's Missing information tab never shows what Atlas detected, and the recommendation is never requested", async () => {
+    getRecommendationMock.mockResolvedValue({ recommendation: v3Row });
+    renderDetail("broker", "missing-information");
+    await screen.findByRole("heading", { level: 1, name: /Broker's Client/ });
+    await waitFor(() => expect(getSubmissionMock).toHaveBeenCalled());
+    expect(getRecommendationMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("region", { name: "What Atlas detected" })).toBeNull();
+    const text = document.body.textContent ?? "";
+    for (const forbidden of ["Evidence Mode", "What Atlas detected", "Conflicting recorded values", "Track this", "Atlas limitations"]) {
+      expect(text).not.toContain(forbidden);
+    }
+  });
+
+  it("an underwriter's Missing information tab shows it (control case)", async () => {
+    getRecommendationMock.mockResolvedValue({ recommendation: v3Row });
+    getQuoteReviewMock.mockResolvedValue({ quote_review: null, sections: [] });
+    getDecisionMock.mockResolvedValue({ decision: null });
+    renderDetail("underwriter", "missing-information");
+    await screen.findByRole("heading", { level: 1, name: /Broker's Client/ });
+    expect(await screen.findByRole("region", { name: "What Atlas detected" })).toBeInTheDocument();
   });
 });
 

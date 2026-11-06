@@ -5,7 +5,7 @@
     "differing_insurers": []
   },
   "observation": {
-    "evidence_schema": "recommendation-evidence-v2",
+    "evidence_schema": "recommendation-evidence-v3",
     "matcher_version": "2026-10-section-evaluation-v2",
     "recommended": "Alpha Insurance",
     "insurer_order": [
@@ -55,7 +55,8 @@
         "gaps": [
           "required_documents_unevidenced:material|missing=trusted_required_document",
           "required_document_missing:advisory|missing=Claims history"
-        ]
+        ],
+        "completeness": "incomplete_material"
       },
       "insurer-beta": {
         "rank": 2,
@@ -89,7 +90,8 @@
         "omitted_risk_only": 0,
         "documents": [],
         "quality": "decision_ready",
-        "gaps": []
+        "gaps": [],
+        "completeness": "complete"
       }
     },
     "no_data": [],
@@ -106,6 +108,21 @@
     "privacy": {
       "sentinel_hits": [],
       "features_redacted": true
+    },
+    "completeness": {
+      "state": "incomplete_material",
+      "material": 1,
+      "nonblocking": 0,
+      "items": [
+        "required_document_missing:material|insurers=insurer-alpha|sections=commercial_motor|doc=claims history|by=appetite_rule/insurer-alpha/alpha-motor/product/missing|gaps=2"
+      ]
+    },
+    "contradictions": {
+      "count": 0,
+      "material": 0,
+      "advisory": 0,
+      "comparisons": [],
+      "items": []
     }
   }
 }

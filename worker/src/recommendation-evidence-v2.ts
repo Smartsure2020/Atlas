@@ -41,10 +41,10 @@ import {
   type ReviewedRiskEvidence,
   type ScoredInsurerOutcomeEvidence,
 } from "./recommendation-evidence.js";
-import { QUALITY_MODEL_VERSION, assessQuality } from "./recommendation-quality.js";
+import { QUALITY_MODEL_VERSION_V2, assessQuality } from "./recommendation-quality.js";
 
 export const RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2 = "recommendation-evidence-v2" as const;
-export { QUALITY_MODEL_VERSION };
+export { QUALITY_MODEL_VERSION_V2 };
 
 // ---------------------------------------------------------------------------
 // Quality vocabulary
@@ -105,7 +105,7 @@ export interface InsurerQualityV2 {
 }
 
 export interface RecommendationQualityV2 {
-  model: typeof QUALITY_MODEL_VERSION;
+  model: typeof QUALITY_MODEL_VERSION_V2;
   state: IntelligenceState;
   blocker_count: number;
   material_count: number;
@@ -257,7 +257,26 @@ function copyEvaluation(section: SectionEvaluation): SectionEvaluation {
   };
 }
 
-export function buildRecommendationEvidenceV2(input: BuildEvidenceV2Input): RecommendationEvidenceV2 {
+/**
+ * Everything in a v2 packet that is independent of the quality gate: provenance,
+ * the privacy-minimised matcher input, requested sections, reviewed facts, trusted
+ * documents, and every insurer outcome WITHOUT its quality block. The v2 builder
+ * adds the v2 quality gate to this; the v3 builder adds completeness,
+ * contradictions and the v3 gate to the SAME base, so v3 is a superset of v2 for
+ * every shared field by construction rather than by a second implementation.
+ */
+export interface EvidenceBaseV2 {
+  provenance: RecommendationEvidenceV1["provenance"];
+  matcher_input: PersistedMatcherInput;
+  requested_sections: RequestedSection[];
+  scoring_scope: ScoringScopeV2;
+  reviewed_risk_facts: ReviewedRiskEvidence[];
+  trusted_documents: RecommendationEvidenceV1["trusted_documents"];
+  scored: ScoredInsurerCore[];
+  noData: NoDataInsurerOutcomeEvidence[];
+}
+
+export function buildEvidenceBaseV2(input: BuildEvidenceV2Input): EvidenceBaseV2 {
   const appetiteById = new Map(input.activeAppetite.map((rule) => [rule.id, rule]));
   const facts = buildReviewedRiskEvidence(input.reviewed, input.matcherInput);
   const requestedSections = (input.matcherResult.requested_sections ?? requestedSectionsOf(input.matcherInput))
@@ -291,24 +310,7 @@ export function buildRecommendationEvidenceV2(input: BuildEvidenceV2Input): Reco
     .map((insurer) => noDataOutcome(insurer) as NoDataInsurerOutcomeEvidence);
 
   const trustedDocuments = [...new Set(input.matcherInput.available_documents)].sort(compareCodeUnits);
-  const { quality, insurerQuality } = assessQuality({
-    facts,
-    insurers: [...scored, ...noData],
-    requestedSections,
-    trustedDocumentCount: trustedDocuments.length,
-  });
-
-  const insurers: InsurerOutcomeEvidenceV2[] = [
-    ...scored.map((outcome) => {
-      const insurerState = insurerQuality.get(outcome.insurer_id);
-      if (!insurerState) throw new Error(`quality_missing:${outcome.insurer_id}`);
-      return { ...outcome, quality: insurerState };
-    }),
-    ...noData,
-  ];
-
   return {
-    schema_version: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
     provenance: {
       recommendation_id: input.recommendationId,
       submission_id: input.submissionId,
@@ -331,6 +333,37 @@ export function buildRecommendationEvidenceV2(input: BuildEvidenceV2Input): Reco
       availability: "available" as const,
       trust_basis: "active_exact_clean" as const,
     })),
+    scored,
+    noData,
+  };
+}
+
+export function buildRecommendationEvidenceV2(input: BuildEvidenceV2Input): RecommendationEvidenceV2 {
+  const base = buildEvidenceBaseV2(input);
+  const { quality, insurerQuality } = assessQuality({
+    facts: base.reviewed_risk_facts,
+    insurers: [...base.scored, ...base.noData],
+    requestedSections: base.requested_sections,
+    trustedDocumentCount: base.trusted_documents.length,
+  });
+
+  const insurers: InsurerOutcomeEvidenceV2[] = [
+    ...base.scored.map((outcome) => {
+      const insurerState = insurerQuality.get(outcome.insurer_id);
+      if (!insurerState) throw new Error(`quality_missing:${outcome.insurer_id}`);
+      return { ...outcome, quality: insurerState };
+    }),
+    ...base.noData,
+  ];
+
+  return {
+    schema_version: RECOMMENDATION_EVIDENCE_SCHEMA_VERSION_V2,
+    provenance: base.provenance,
+    matcher_input: base.matcher_input,
+    requested_sections: base.requested_sections,
+    scoring_scope: base.scoring_scope,
+    reviewed_risk_facts: base.reviewed_risk_facts,
+    trusted_documents: base.trusted_documents,
     insurers,
     quality,
   };
