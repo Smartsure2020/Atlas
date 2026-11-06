@@ -418,8 +418,10 @@ export default function MissingInfoPanel({
    Detection lives in the recommendation's evidence; THIS tab remains the one
    place a person acts on it. Nothing is duplicated into a second workflow: a
    detected item is matched against the items already tracked (documents by the
-   matcher's canonical document key, others by type + deterministic title), and
-   "Track" sends only the detected id to the dedicated server-side boundary.
+   matcher's canonical document key, others by type + deterministic title, except
+   titles that several schema paths share, which cannot prove identity and so read
+   as untracked), and "Track" sends only the detected id to the dedicated
+   server-side boundary, which answers `duplicate: true` if it already exists.
    =========================================================================== */
 
 export const DETECTED_HEADING = "What Atlas detected";

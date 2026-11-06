@@ -1126,7 +1126,10 @@ export interface CompletenessLine {
 }
 
 export interface TrackingTemplate {
-  /** Deterministic: the workspace recognises a tracked item by `type` + this exact title. */
+  /**
+   * Deterministic. The display join recognises a tracked item by `type` + this exact
+   * title, except for titles several schema paths share (see SHARED_SCHEMA_FIELD_LABELS).
+   */
   title: string;
   type: "document" | "underwriting_info" | "other";
   description: string;
@@ -1160,13 +1163,35 @@ export type TrackedState =
 const CLOSED_STATUSES = new Set(["received", "waived", "not_required"]);
 
 /**
+ * Schema-field labels (trimmed, lower-cased) that more than one extraction path
+ * generates: `Name` (extracted_client / broker), `Risk address` (extracted_client /
+ * quote_terms) and `Required documents` (current_cover / quote_terms).
+ *
+ * A tracked row carries only its title, so a row with one of these titles cannot say
+ * WHICH path it was tracked for. The server refuses to map such a title to a path
+ * (worker/src/detected-missing-info.ts), so the display join must not claim more: it
+ * uses this set only to WITHHOLD a match. It never resolves a title to a path. A
+ * parity test derives the same set from the worker's own registry, so a new colliding
+ * schema field fails CI instead of silently reintroducing the defect.
+ */
+export const SHARED_SCHEMA_FIELD_LABELS: ReadonlySet<string> = new Set(["name", "risk address", "required documents"]);
+
+function isSharedSchemaFieldLabel(title: string): boolean {
+  return SHARED_SCHEMA_FIELD_LABELS.has(title.trim().toLowerCase());
+}
+
+/**
  * Is this detected item already in the Missing Information workspace? Documents
  * match on the matcher's canonical document key (so "Risk survey", "risk-survey"
  * and a derived "RISK SURVEY" are one item); other items match on type + the exact
- * deterministic title above. Nothing is created, merged or inferred by this.
+ * deterministic title above, EXCEPT when that title is shared by several schema
+ * paths: there a title cannot prove identity, so the line reads as untracked (the
+ * "Track this" button stays, and the server-authoritative Track endpoint answers
+ * `duplicate: true` if it already is). Nothing is created, merged or inferred by this.
  */
 export function trackedStateFor(line: CompletenessLine, items: readonly TrackedLike[]): TrackedState {
   if (!line.tracking.trackable) return { state: "untracked" };
+  if (line.documentKey === null && isSharedSchemaFieldLabel(line.tracking.title)) return { state: "untracked" };
   const matches = items.filter((item) =>
     line.documentKey !== null
       ? item.item_type === "document" && documentKey(item.title) === line.documentKey

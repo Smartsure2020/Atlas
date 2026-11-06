@@ -344,7 +344,13 @@ the latest recommendation and performs a lightweight display join to tracked ite
 Detected documents use the matcher's canonical document key in the frontend. Other
 frontend rows still use exact type + displayed title: a Derive raw fact key can therefore
 look untracked until "Track this" is clicked; the server then returns `duplicate: true`
-without inserting. The server, not this presentation join, is authoritative. "Track this"
+without inserting. The one exception is a title that several schema paths share (`Name`,
+`Risk address`, `Required documents`): a tracked row carries only its title, so it cannot
+prove which path it was tracked for, and the join never treats it as a match. Such a line
+always reads as untracked, so a tracked or closed sibling can neither mark the other as
+tracked nor remove its "Track this" button. The client only withholds the match; it
+never maps a title to a path, and a parity test against the worker registry fails if a new
+schema field starts sharing a label. The server, not this presentation join, is authoritative. "Track this"
 sends only the
 `detected_item_id` to `POST /api/submissions/:id/missing-info/detected`. The server loads
 that submission's latest recommendation, requires Evidence v3, finds the item, applies a

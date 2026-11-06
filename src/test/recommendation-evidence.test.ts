@@ -9,9 +9,12 @@
 
 import { describe, expect, it } from "vitest";
 import { documentKey as workerDocumentKey } from "../../worker/src/matcher";
+import { resolveSchemaFieldIdentity as workerResolveSchemaFieldIdentity, schemaFieldLabel as workerSchemaFieldLabel } from "../../worker/src/completeness";
+import { SECTION_FIELDS } from "../../worker/src/extraction";
 import {
   COMPLETENESS_NOT_CAPTURED_V1,
   COMPLETENESS_NOT_CAPTURED_V2,
+  SHARED_SCHEMA_FIELD_LABELS,
   completenessView,
   contradictionsView,
   documentKey,
@@ -791,5 +794,126 @@ describe("Batch B — document key parity and the tracked-state join", () => {
     const text = JSON.stringify([...view.caseLines, ...view.documentLines].map((l) => l.tracking));
     expect(text.toLowerCase()).not.toContain("sentinel");
     expect(text).not.toMatch(/cmp:|gap:|ctr:/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch B — a shared schema label can never prove WHICH path a tracked row is for
+// ---------------------------------------------------------------------------
+
+describe("Batch B — ambiguous schema labels never prove tracked state", () => {
+  // A tracked row carries only its title. Several extraction paths share one label, so
+  // for those the title alone cannot say which path the row was tracked for. The server
+  // refuses to map such a title to a path (see detected-missing-info.ts); the display
+  // join must not claim more than the server does.
+  const SHARED_PATHS = [
+    "extracted_client.name",
+    "broker.name",
+    "extracted_client.risk_address",
+    "quote_terms.risk_address",
+    "current_cover.required_documents",
+    "quote_terms.required_documents",
+  ] as const;
+
+  const lineOf = (source: unknown, predicate: (l: { code: string }) => boolean) => {
+    const view = captured(completenessView(evidenceOf(source)));
+    const line = [...view.caseLines, ...view.documentLines, ...view.insurerGroups.flatMap((g) => g.lines)].find(predicate);
+    if (!line) throw new Error("line not found");
+    return line;
+  };
+  const factLine = () => {
+    const line = captured(completenessView(evidenceOf(case23))).caseLines.find((l) => l.tracking.trackable && l.fieldPath !== null);
+    if (!line) throw new Error("fact line not found");
+    return line;
+  };
+  /** A real trackable fact line, re-pointed at another schema path with that path's own generated label. */
+  const lineForPath = (path: string) => {
+    const base = factLine();
+    const label = workerSchemaFieldLabel(path);
+    return { ...base, fieldPath: path, fieldLabel: label, tracking: { ...base.tracking, title: label } };
+  };
+  const row = (title: string, status: string) => ({ item_type: "underwriting_info", title, status });
+
+  it("the shared-label set is exactly the labels the worker registry itself refuses to resolve", () => {
+    const pathsByLabel = new Map<string, string[]>();
+    for (const [section, fields] of Object.entries(SECTION_FIELDS)) {
+      for (const { field } of fields) {
+        const path = `${section}.${field}`;
+        const label = workerSchemaFieldLabel(path).toLowerCase();
+        pathsByLabel.set(label, [...(pathsByLabel.get(label) ?? []), path]);
+      }
+    }
+    const shared = new Map([...pathsByLabel].filter(([, paths]) => paths.length > 1));
+    // Drift guard: a new schema field that collides on label must be added to the client set.
+    expect(new Set(shared.keys())).toEqual(new Set(SHARED_SCHEMA_FIELD_LABELS));
+    expect([...shared.values()].flat().sort()).toEqual([...SHARED_PATHS].sort());
+    for (const [label, paths] of shared) {
+      expect(workerResolveSchemaFieldIdentity(label)).toBeNull();
+      expect(paths.length).toBeGreaterThan(1);
+    }
+    // And every other label resolves uniquely, so a title match for it is still proof.
+    for (const [label, paths] of pathsByLabel) {
+      if (!shared.has(label)) expect(workerResolveSchemaFieldIdentity(label)).toBe(paths[0]);
+    }
+  });
+
+  it("two sibling paths that render the same title are never both reported as tracked", () => {
+    const a = lineForPath("extracted_client.risk_address");
+    const b = lineForPath("quote_terms.risk_address");
+    expect(a.tracking.title).toBe(b.tracking.title);
+    for (const status of ["open", "requested", "received", "waived", "not_required"]) {
+      const items = [row("Risk address", status)];
+      expect(trackedStateFor(a, items)).toEqual({ state: "untracked" });
+      expect(trackedStateFor(b, items)).toEqual({ state: "untracked" });
+    }
+  });
+
+  it("a closed row for one sibling cannot hide the genuinely outstanding other (Track stays available)", () => {
+    const outstanding = lineForPath("quote_terms.risk_address");
+    for (const status of ["received", "waived", "not_required"]) {
+      expect(trackedStateFor(outstanding, [row("Risk address", status)]).state).toBe("untracked");
+    }
+  });
+
+  it("holds even when only one sibling is in the packet (a row may belong to the absent peer)", () => {
+    const only = lineForPath("extracted_client.risk_address");
+    expect(trackedStateFor(only, [row("Risk address", "open")])).toEqual({ state: "untracked" });
+    expect(trackedStateFor(only, [row("Risk address", "open"), row("Risk address", "received")])).toEqual({ state: "untracked" });
+  });
+
+  it("applies to every shared label, not just risk address", () => {
+    for (const path of SHARED_PATHS) {
+      const line = lineForPath(path);
+      expect(trackedStateFor(line, [row(line.tracking.title, "open")])).toEqual({ state: "untracked" });
+      expect(trackedStateFor(line, [row(line.tracking.title, "received")])).toEqual({ state: "untracked" });
+    }
+  });
+
+  it("is insensitive to case and padding of the row title, as the server's registry lookup is", () => {
+    const line = lineForPath("quote_terms.risk_address");
+    for (const title of ["risk address", "RISK ADDRESS", "  Risk address  "]) {
+      expect(trackedStateFor(line, [row(title, "open")])).toEqual({ state: "untracked" });
+    }
+  });
+
+  it("an unambiguous schema fact is still recognised exactly as before", () => {
+    const line = factLine();
+    expect(line.tracking.title).toBe("Registration or ID number");
+    expect(trackedStateFor(line, [row("Registration or ID number", "open")])).toMatchObject({ state: "tracked_open", status: "open", count: 1 });
+    expect(trackedStateFor(line, [row("Registration or ID number", "received")])).toMatchObject({ state: "tracked_closed", status: "received" });
+    expect(trackedStateFor(line, [row("Risk address", "open")])).toEqual({ state: "untracked" });
+  });
+
+  it("documents and the cover-sections item are unaffected by the shared-label rule", () => {
+    const doc = lineOf(case24, (l) => l.code === "required_document_missing");
+    expect(trackedStateFor(doc, [{ item_type: "document", title: "Risk survey", status: "received" }])).toMatchObject({ state: "tracked_closed" });
+    const sections = lineOf(case27, (l) => l.code === "requested_sections_not_declared");
+    expect(trackedStateFor(sections, [row("Cover sections required", "open")])).toMatchObject({ state: "tracked_open" });
+  });
+
+  it("a document that merely shares a shared label's words is still matched on its document key", () => {
+    const doc = { ...lineOf(case24, (l) => l.code === "required_document_missing") };
+    const asDocument = { ...doc, documentKey: documentKey("Name"), tracking: { ...doc.tracking, title: "Name" } };
+    expect(trackedStateFor(asDocument, [{ item_type: "document", title: "name", status: "open" }])).toMatchObject({ state: "tracked_open" });
   });
 });
